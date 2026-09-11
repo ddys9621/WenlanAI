@@ -1,9 +1,16 @@
-"""灵感模式API - 通过对话引导创建项目"""
-from fastapi import APIRouter, Depends
+"""灵感模式API - 通过对话引导创建项目
+
+两个 AI 端点（候选生成 / 智能补全）都跑在通用后台任务上（2026-09-11 D）：
+POST /generate-options-stream、/quick-generate-stream 返回 SSE（start → llm 思考计数 → result{原 JSON} → done），
+按用户互斥；重连 / 停止走 /api/ai-jobs/*。实现函数 _generate_options_impl / _quick_generate_impl 保持原逻辑。
+"""
+from fastapi import APIRouter, Depends, HTTPException, Request
 from typing import Dict, Any, List
 import json
 import re
 
+from app.api.ai_jobs import job_sse_response
+from app.services.ai_jobs import AIJobConflictError, ai_jobs
 from app.services.ai_service import AIService
 from app.api.settings import get_user_ai_service
 from app.logger import get_logger
@@ -11,6 +18,13 @@ from app.utils.json_cleaner import clean_and_parse_json
 
 router = APIRouter(prefix="/inspiration", tags=["灵感模式"])
 logger = get_logger(__name__)
+
+STEP_LABELS = {"title": "书名", "description": "简介", "theme": "主题", "genre": "类型"}
+
+
+def _options_title(step: Any) -> str:
+    label = STEP_LABELS.get(str(step), "")
+    return f"灵感：生成{label}候选"
 
 
 # 灵感模式提示词模板
@@ -401,13 +415,12 @@ def _salvage_options_response(content: str, step: str) -> Dict[str, Any]:
     }
 
 
-@router.post("/generate-options")
-async def generate_options(
+async def _generate_options_impl(
     data: Dict[str, Any],
-    ai_service: AIService = Depends(get_user_ai_service)
+    ai_service: AIService,
 ) -> Dict[str, Any]:
     """
-    根据当前收集的信息生成下一步的选项建议（带自动重试）
+    根据当前收集的信息生成下一步的选项建议（带自动重试）——后台任务 runner 调用
     
     Request:
         {
@@ -549,13 +562,35 @@ async def generate_options(
     }
 
 
-@router.post("/quick-generate")
-async def quick_generate(
+@router.post("/generate-options-stream", summary="灵感模式：生成候选（后台任务 + SSE）")
+async def generate_options_stream(
     data: Dict[str, Any],
+    request: Request,
     ai_service: AIService = Depends(get_user_ai_service)
+):
+    """请求体与原 /generate-options 相同；result 事件的 data 即原 JSON（含软错误 error 字段）。同用户互斥。"""
+    user_id = getattr(request.state, "user_id", None) or "system"
+
+    async def runner(job):
+        return await _generate_options_impl(data, ai_service)
+
+    try:
+        job = await ai_jobs.start(
+            kind="inspiration_options", title=_options_title(data.get("step", "title")), user_id=user_id,
+            project_id=None, scope=f"inspiration_options:{user_id}", runner=runner,
+            cancel_message="已停止生成候选", meta={"step": data.get("step")},
+        )
+    except AIJobConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return job_sse_response(job)
+
+
+async def _quick_generate_impl(
+    data: Dict[str, Any],
+    ai_service: AIService,
 ) -> Dict[str, Any]:
     """
-    智能补全：根据用户已提供的部分信息，AI自动补全缺失字段
+    智能补全：根据用户已提供的部分信息，AI自动补全缺失字段——后台任务 runner 调用
     
     Request:
         {
@@ -661,3 +696,26 @@ async def quick_generate(
         return {
             "error": str(e)
         }
+
+
+@router.post("/quick-generate-stream", summary="灵感模式：智能补全（后台任务 + SSE）")
+async def quick_generate_stream(
+    data: Dict[str, Any],
+    request: Request,
+    ai_service: AIService = Depends(get_user_ai_service)
+):
+    """请求体与原 /quick-generate 相同；result 事件的 data 即原 JSON（含软错误 error 字段）。同用户互斥。"""
+    user_id = getattr(request.state, "user_id", None) or "system"
+
+    async def runner(job):
+        return await _quick_generate_impl(data, ai_service)
+
+    try:
+        job = await ai_jobs.start(
+            kind="inspiration_quick", title="灵感：智能补全书籍信息", user_id=user_id,
+            project_id=None, scope=f"inspiration_quick:{user_id}", runner=runner,
+            cancel_message="已停止补全",
+        )
+    except AIJobConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return job_sse_response(job)
