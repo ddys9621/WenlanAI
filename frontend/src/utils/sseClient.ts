@@ -24,14 +24,27 @@ export interface SSEClientOptions<TResult = unknown> {
   onConnectionError?: (error: Event) => void;
   /** type=meta 事件（如一键仿写的 used_packs/used_dimensions/strength） */
   onMeta?: (meta: Record<string, unknown>) => void;
-  /** 业务自定义事件（thinking / partial / bridges / start 及未知类型），原样回调 */
+  /** 业务自定义事件（thinking / partial / bridges / stage / tool_call / reference / llm / start 及未知类型），原样回调 */
   onEvent?: (message: SSEMessage) => void;
+  /** 每条消息的原始回调（含 progress / content / result / done / error），先于分类回调触发；通用任务 store 用它做事件归约 */
+  onMessage?: (message: SSEMessage) => void;
   signal?: AbortSignal;
 }
 
 /** 后端存在 {error} 与 {message} 两种错误字段风格，统一取值 */
 function extractErrorText(message: SSEMessage): string {
   return message.error || message.message || '未知错误';
+}
+
+/** 非 2xx：优先取 FastAPI 的 {detail}，否则退回 "HTTP error! status: N"（连接层重连逻辑按该前缀识别） */
+async function readErrorDetail(response: Response): Promise<string> {
+  try {
+    const body = (await response.json()) as { detail?: unknown };
+    if (typeof body?.detail === 'string' && body.detail.trim()) return body.detail;
+  } catch {
+    /* 非 JSON 响应体 */
+  }
+  return `HTTP error! status: ${response.status}`;
 }
 
 type ResolveSSE = (value: unknown) => void;
@@ -87,7 +100,7 @@ export class SSEPostClient<TResult = unknown, TRequest = unknown> {
       });
 
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        throw new Error(await readErrorDetail(response));
       }
 
       this.reader = response.body?.getReader() || null;
@@ -161,6 +174,7 @@ export class SSEPostClient<TResult = unknown, TRequest = unknown> {
   }
 
   private handleMessage(message: SSEMessage, resolve: ResolveSSE, reject: RejectSSE) {
+    this.options.onMessage?.(message);
     switch (message.type) {
       case 'progress':
         if (this.options.onProgress && message.progress !== undefined) {
@@ -216,6 +230,10 @@ export class SSEPostClient<TResult = unknown, TRequest = unknown> {
       case 'partial':
       case 'bridges':
       case 'start':
+      case 'stage':
+      case 'tool_call':
+      case 'reference':
+      case 'llm':
         this.options.onEvent?.(message);
         break;
 
