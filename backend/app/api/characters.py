@@ -7,9 +7,7 @@ from typing import Optional
 
 from app.database import get_db
 from app.models.character import Character
-from app.models.generation_history import GenerationHistory
-from app.models.relationship import CharacterRelationship, Organization, OrganizationMember
-from app.services.relationship_matcher import match_relationship_type
+from app.models.relationship import Organization, OrganizationMember
 from app.services.character_rename_service import propagate_character_rename
 from app.schemas.character import (
     CharacterCreate,
@@ -18,8 +16,10 @@ from app.schemas.character import (
     CharacterListResponse,
     CharacterGenerateRequest
 )
+from app.api.ai_jobs import job_sse_response
+from app.services.ai_jobs import AIJobConflictError, ai_jobs, job_session_factory
 from app.services.ai_service import AIService
-from app.services.prompt_service import prompt_service
+from app.services.character_generation_service import make_character_runner
 from app.logger import get_logger
 from app.api.settings import get_user_ai_service
 from app.utils.role_type import normalize_role_type
@@ -314,471 +314,38 @@ async def create_character(
         logger.error(f"手动创建角色失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"创建角色失败: {str(e)}")
 
-
-@router.post("/generate", response_model=CharacterResponse, summary="AI生成角色")
-async def generate_character(
+@router.post("/generate-stream", summary="AI生成角色（后台任务 + SSE 事件流）")
+async def generate_character_stream(
     request: CharacterGenerateRequest,
     http_request: Request,
     db: AsyncSession = Depends(get_db),
     user_ai_service: AIService = Depends(get_user_ai_service)
 ):
+    """启动后台任务并从头流式输出其事件：start → stage / tool_call / reference / llm / progress → result(角色) → done。
+
+    任务寿命独立于本连接（关弹窗 / 刷新 / 切页不中断）；重连与停止走 /api/ai-jobs/*。
+    同项目已有角色生成在跑 → 409。生成逻辑见 services/character_generation_service.py。
     """
-    使用AI生成角色卡
-    
-    根据用户输入的信息，结合项目的世界观、主题等背景，
-    AI会生成一个完整、详细的角色设定卡片。
-    
-    生成内容包括：姓名、年龄、性别、性格、外貌、背景故事、人际关系等
-    """
-    # 验证用户权限和项目是否存在
-    user_id = getattr(http_request.state, 'user_id', None)
+    user_id = getattr(http_request.state, "user_id", None)
     project = await verify_project_access(request.project_id, user_id, db)
-    
+    name = (request.name or "").strip()
+    runner = make_character_runner(
+        user_id=user_id,
+        project_id=project.id,
+        request=request,
+        ai_service=user_ai_service,
+        session_factory=job_session_factory(user_id),
+    )
     try:
-        # 获取已存在的角色列表，用于关系网络
-        existing_chars_result = await db.execute(
-            select(Character)
-            .where(Character.project_id == request.project_id)
-            .order_by(Character.created_at.desc())
+        job = await ai_jobs.start(
+            kind="character_generate",
+            title=f"AI 生成角色「{name}」" if name else "AI 生成角色",
+            user_id=user_id,
+            project_id=project.id,
+            runner=runner,
+            cancel_message="已停止生成角色",
+            meta={"role_type": request.role_type, "enable_mcp": request.enable_mcp},
         )
-        existing_characters = existing_chars_result.scalars().all()
-        
-        # 构建现有角色信息摘要（包含组织）
-        existing_chars_info = ""
-        character_list = []
-        organization_list = []
-        
-        if existing_characters:
-            for c in existing_characters[:10]:  # 最多显示10个
-                if c.is_organization:
-                    organization_list.append(f"- {c.name} [{c.organization_type or '组织'}]")
-                else:
-                    character_list.append(f"- {c.name}（{c.role_type or '未知'}）")
-            
-            if character_list:
-                existing_chars_info += "\n已有角色：\n" + "\n".join(character_list)
-            if organization_list:
-                existing_chars_info += "\n\n已有组织：\n" + "\n".join(organization_list)
-        
-        # 构建项目上下文信息（使用列表方便后续添加参考资料）
-        project_context_parts = [f"""
-项目信息：
-- 书名：{project.title}
-- 主题：{project.theme or '未设定'}
-- 类型：{project.genre or '未设定'}
-- 时间背景：{project.world_time_period or '未设定'}
-- 地理位置：{project.world_location or '未设定'}
-- 氛围基调：{project.world_atmosphere or '未设定'}
-- 世界规则：{project.world_rules or '未设定'}
-{existing_chars_info}
-"""]
-
-        project_context = "\n".join(project_context_parts)
-
-        # 构建用户输入信息
-        user_input = f"""
-用户要求：
-- 角色名称：{request.name or '请AI生成'}
-- 角色定位：{request.role_type or 'supporting'}（protagonist=主角, supporting=配角, antagonist=反派）
-- 背景设定：{request.background or '无特殊要求'}
-- 其他要求：{request.requirements or '无'}
-"""
-
-        # 【强控工具流】如果启用了 MCP，先强制调用工具收集资料
-        reference_materials = ""
-        if request.enable_mcp and request.selected_plugins:
-            try:
-                logger.info(f"🔧 [角色生成] 强制先调用MCP工具收集资料（插件：{request.selected_plugins}）")
-
-                from app.services.mcp_tool_service import mcp_tool_service
-
-                # 构建工具调用查询
-                tool_query = f"{project.theme or ''} {project.genre or ''} {request.role_type or '角色'} 角色设定 人物背景 性格特点"
-
-                # 获取用户启用的工具
-                available_tools = await mcp_tool_service.get_user_enabled_tools(
-                    user_id=user_id,
-                    db_session=db,
-                    plugin_names=request.selected_plugins
-                )
-
-                if available_tools:
-                    # 优先使用搜索类工具
-                    search_tool = None
-                    for tool in available_tools:
-                        if 'search' in tool['function']['name'].lower():
-                            search_tool = tool
-                            break
-
-                    if search_tool:
-                        tool_name = search_tool['function']['name']
-                        plugin_name = tool_name.split('_')[0] if '_' in tool_name else 'unknown'
-                        actual_tool_name = tool_name.split('_', 1)[1] if '_' in tool_name else tool_name
-
-                        logger.info(f"🔍 [角色生成] 调用工具: {tool_name}")
-
-                        # 调用工具
-                        tool_result = await mcp_tool_service._call_tool_with_retry(
-                            user_id=user_id,
-                            plugin_name=plugin_name,
-                            tool_name=actual_tool_name,
-                            arguments={'query': tool_query, 'numResults': 5},
-                            timeout=60.0
-                        )
-
-                        if tool_result:
-                            reference_materials = str(tool_result)
-                        else:
-                            logger.warning(f"⚠️ [角色生成] MCP工具返回空结果")
-                    else:
-                        logger.warning(f"⚠️ [角色生成] 未找到可用的搜索工具")
-                else:
-                    logger.warning(f"⚠️ [角色生成] 未找到可用的MCP工具")
-
-            except Exception as tool_error:
-                logger.error(f"❌ [角色生成] MCP工具调用失败：{str(tool_error)}")
-                # 工具调用失败不中断流程，继续用已有上下文生成
-
-        # 如果有参考资料，添加到项目上下文中
-        if reference_materials:
-            # 统一日志：记录参考资料使用情况
-            raw_chars = len(reference_materials)
-            # 截断参考资料（统一为 2000 字符）
-            max_length = 2000
-            if len(reference_materials) > max_length:
-                logger.warning(f"⚠️ [character_generation] 参考资料过长（{raw_chars}字符），截断至{max_length}字符")
-                used_reference = reference_materials[:max_length] + "\n...(内容过长已截断)"
-            else:
-                used_reference = reference_materials
-
-            used_chars = len(used_reference)
-            logger.info(
-                f"[MCP] context=character_generation user_id={user_id} "
-                f"plugins={request.selected_plugins} tools_used=['search'] "
-                f"raw_chars={raw_chars} used_chars={used_chars} tool_calls=1"
-            )
-
-            project_context_parts.append(f"""
-【参考资料】
-以下是通过MCP工具收集的相关参考资料，可以作为灵感来源：
-
-{used_reference}
-""")
-            project_context = "\n".join(project_context_parts)
-
-        # 使用统一的提示词服务
-        prompt = prompt_service.get_single_character_prompt(
-            project_context=project_context,
-            user_input=user_input
-        )
-
-        # 拆书参考注入（R6）：追加 archetypes / entities 维度为角色生成提供塑造手法参考
-        # 设计文档：@/agent-docs/features/dissect_to_creation_pipeline.md §A.2
-        try:
-            from app.services.reference_pack_injector import ReferencePackInjector
-            _injector = ReferencePackInjector()
-            _anchor = (
-                f"{request.role_type or ''} {user_input or ''}".strip()
-                or "角色生成"
-            )
-            _ref_block = await _injector.build_reference_block(
-                db, request.project_id,
-                scene="character_generation",
-                # 角色场景默认只要 archetypes 维度；corpus 也作为同类角色样本供 LLM 参考
-                fallback_dimensions=("archetypes", "corpus"),
-                pack_ids=request.pack_ids,
-                dimensions=request.dimensions,
-                strength=request.strength,
-                anchor_query=_anchor,
-            )
-            if _ref_block.user_segment:
-                prompt = (
-                    f"{prompt}\n\n{_ref_block.user_segment}\n\n"
-                    "请参考上述拆书中的角色塑造手法（仅作方法参考，"
-                    "不要复刻原书人名与具体设定），生成本项目的角色。"
-                )
-                logger.info(
-                    f"📚 [R6-角色] 注入拆书参考包 {len(_ref_block.used_packs)} 个，"
-                    f"维度={_ref_block.used_dimensions}"
-                )
-        except ValueError:
-            pass
-        except Exception as _e:  # pragma: no cover - 防御性兜底
-            logger.warning(f"[R6-角色] 拆书参考注入失败（已跳过）: {_e}")
-
-        # 调用AI生成角色
-        logger.info(f"🎯 开始为项目 {request.project_id} 生成角色")
-        logger.info(f"  - 角色名：{request.name or 'AI生成'}")
-        logger.info(f"  - 角色定位：{request.role_type}")
-        logger.info(f"  - 背景设定：{request.background or '无'}")
-        logger.info(f"  - AI提供商：{user_ai_service.api_provider}")
-        logger.info(f"  - AI模型：{user_ai_service.default_model}")
-        logger.info(f"  - Prompt长度：{len(prompt)} 字符")
-        logger.info(f"  - 用户ID：{user_id}")
-
-        try:
-            # 使用普通的文本生成（资料已经通过工具收集并拼接进prompt）
-            ai_response = await user_ai_service.generate_text(
-                prompt=prompt,
-                provider=None,
-                model=None
-            )
-
-            # 统一处理：generate_text 返回 dict，需要提取 content 字段
-            if not isinstance(ai_response, dict):
-                # 兼容旧式返回（如果有）
-                ai_response = {"content": str(ai_response or "")}
-
-            ai_content = ai_response.get("content") or ""
-            logger.info(f"✅ AI响应接收完成，长度：{len(ai_content)} 字符")
-
-        except Exception as ai_error:
-            logger.error(f"❌ AI服务调用异常：{str(ai_error)}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"AI服务调用失败：{str(ai_error)}"
-            )
-        
-        # 检查AI响应
-        if not ai_content or not ai_content.strip():
-            logger.error("❌ AI返回了空响应")
-            raise HTTPException(
-                status_code=500,
-                detail="AI服务返回空响应。可能原因：1) API配置错误 2) 模型不支持 3) 网络问题。请检查后端日志。"
-            )
-
-        # 使用统一的 JSON 清理工具解析 AI 响应
-        from app.utils.json_cleaner import clean_and_parse_json
-
-        logger.info(f"🔍 开始解析 JSON（原始长度：{len(ai_content)}）")
-        try:
-            character_data = clean_and_parse_json(
-                ai_content,
-                expected_type='object',
-                log_prefix="[角色生成]"
-            )
-            logger.info(f"✅ JSON 解析成功")
-            logger.info(f"  - 解析后的字段：{list(character_data.keys())}")
-        except json.JSONDecodeError as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"AI返回的内容无法解析为JSON。错误：{str(e)}。响应内容已记录到日志，请查看后端日志排查。"
-            )
-        except Exception as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"解析AI响应时发生异常：{str(e)}"
-            )
-        
-        # 转换traits为JSON字符串
-        traits_json = json.dumps(character_data.get("traits", []), ensure_ascii=False) if character_data.get("traits") else None
-        
-        # 判断是否为组织
-        is_organization = character_data.get("is_organization", False)
-        
-        # 创建角色
-        character = Character(
-            project_id=request.project_id,
-            name=character_data.get("name", request.name or "未命名角色"),
-            age=str(character_data.get("age", "")),
-            gender=character_data.get("gender"),
-            is_organization=is_organization,
-            role_type=normalize_role_type(request.role_type, "supporting"),
-            personality=character_data.get("personality", ""),
-            background=character_data.get("background", ""),
-            appearance=character_data.get("appearance", ""),
-            relationships=character_data.get("relationships_text", character_data.get("relationships", "")),  # 优先使用文本描述
-            organization_type=character_data.get("organization_type") if is_organization else None,
-            organization_purpose=character_data.get("organization_purpose") if is_organization else None,
-            organization_members=json.dumps(character_data.get("organization_members", []), ensure_ascii=False) if is_organization else None,
-            traits=traits_json
-        )
-        db.add(character)
-        await db.flush()  # 获取character.id
-        
-        logger.info(f"✅ 角色创建成功：{character.name} (ID: {character.id}, 是否组织: {is_organization})")
-        
-        # 如果是组织，自动创建Organization详情记录
-        if is_organization:
-            org_check = await db.execute(
-                select(Organization).where(Organization.character_id == character.id)
-            )
-            existing_org = org_check.scalar_one_or_none()
-            
-            if not existing_org:
-                organization = Organization(
-                    character_id=character.id,
-                    project_id=request.project_id,
-                    member_count=0,
-                    power_level=character_data.get("power_level", 50),
-                    location=character_data.get("location"),
-                    motto=character_data.get("motto"),
-                    color=character_data.get("color")
-                )
-                db.add(organization)
-                await db.flush()
-                logger.info(f"✅ 自动创建组织详情：{character.name} (Org ID: {organization.id})")
-            else:
-                logger.info(f"ℹ️  组织详情已存在：{character.name}")
-        
-        # 处理结构化关系数据（仅针对非组织角色）
-        if not is_organization:
-            relationships_data = character_data.get("relationships", [])
-            if relationships_data and isinstance(relationships_data, list):
-                logger.info(f"📊 开始处理 {len(relationships_data)} 条关系数据")
-                created_rels = 0
-                
-                for rel in relationships_data:
-                    try:
-                        target_name = rel.get("target_character_name")
-                        if not target_name:
-                            logger.debug(f"  ⚠️  关系缺少target_character_name，跳过")
-                            continue
-                        
-                        target_result = await db.execute(
-                            select(Character).where(
-                                Character.project_id == request.project_id,
-                                Character.name == target_name
-                            )
-                        )
-                        target_char = target_result.scalar_one_or_none()
-                        
-                        if target_char:
-                            # 检查是否已存在相同关系
-                            existing_rel = await db.execute(
-                                select(CharacterRelationship).where(
-                                    CharacterRelationship.project_id == request.project_id,
-                                    CharacterRelationship.character_from_id == character.id,
-                                    CharacterRelationship.character_to_id == target_char.id
-                                )
-                            )
-                            if existing_rel.scalar_one_or_none():
-                                logger.debug(f"  ℹ️  关系已存在：{character.name} -> {target_name}")
-                                continue
-                            
-                            relationship = CharacterRelationship(
-                                project_id=request.project_id,
-                                character_from_id=character.id,
-                                character_to_id=target_char.id,
-                                relationship_name=rel.get("relationship_type", "未知关系"),
-                                intimacy_level=rel.get("intimacy_level", 50),
-                                description=rel.get("description", ""),
-                                started_at=rel.get("started_at"),
-                                source="ai"
-                            )
-                            
-                            # 模糊匹配预定义关系类型（三级回退）
-                            matched_type_id = await match_relationship_type(db, rel.get("relationship_type"))
-                            if matched_type_id:
-                                relationship.relationship_type_id = matched_type_id
-                            
-                            db.add(relationship)
-                            created_rels += 1
-                            logger.info(f"  ✅ 创建关系：{character.name} -> {target_name} ({rel.get('relationship_type')})")
-                        else:
-                            logger.warning(f"  ⚠️  目标角色不存在：{target_name}")
-                            
-                    except Exception as rel_error:
-                        logger.warning(f"  ❌ 创建关系失败：{str(rel_error)}")
-                        continue
-                
-                logger.info(f"✅ 成功创建 {created_rels} 条关系记录")
-        
-        # 处理组织成员关系（仅针对非组织角色）
-        if not is_organization:
-            org_memberships = character_data.get("organization_memberships", [])
-            if org_memberships and isinstance(org_memberships, list):
-                logger.info(f"🏢 开始处理 {len(org_memberships)} 条组织成员关系")
-                created_members = 0
-                
-                for membership in org_memberships:
-                    try:
-                        org_name = membership.get("organization_name")
-                        if not org_name:
-                            logger.debug(f"  ⚠️  组织成员关系缺少organization_name，跳过")
-                            continue
-                        
-                        org_char_result = await db.execute(
-                            select(Character).where(
-                                Character.project_id == request.project_id,
-                                Character.name == org_name,
-                                Character.is_organization == True
-                            )
-                        )
-                        org_char = org_char_result.scalar_one_or_none()
-                        
-                        if org_char:
-                            # 获取或创建Organization记录
-                            org_result = await db.execute(
-                                select(Organization).where(Organization.character_id == org_char.id)
-                            )
-                            org = org_result.scalar_one_or_none()
-                            
-                            if not org:
-                                # 如果组织Character存在但Organization不存在，自动创建
-                                org = Organization(
-                                    character_id=org_char.id,
-                                    project_id=request.project_id,
-                                    member_count=0
-                                )
-                                db.add(org)
-                                await db.flush()
-                                logger.info(f"  ℹ️  自动创建缺失的组织详情：{org_name}")
-                            
-                            # 检查是否已存在成员关系
-                            existing_member = await db.execute(
-                                select(OrganizationMember).where(
-                                    OrganizationMember.organization_id == org.id,
-                                    OrganizationMember.character_id == character.id
-                                )
-                            )
-                            if existing_member.scalar_one_or_none():
-                                logger.debug(f"  ℹ️  成员关系已存在：{character.name} -> {org_name}")
-                                continue
-                            
-                            # 创建成员关系
-                            member = OrganizationMember(
-                                organization_id=org.id,
-                                character_id=character.id,
-                                position=membership.get("position", "成员"),
-                                rank=membership.get("rank", 0),
-                                loyalty=membership.get("loyalty", 50),
-                                joined_at=membership.get("joined_at"),
-                                status=membership.get("status", "active"),
-                                source="ai"
-                            )
-                            db.add(member)
-                            
-                            # 更新组织成员计数
-                            org.member_count += 1
-                            
-                            created_members += 1
-                            logger.info(f"  ✅ 添加成员：{character.name} -> {org_name} ({membership.get('position')})")
-                        else:
-                            logger.warning(f"  ⚠️  组织不存在：{org_name}")
-                            
-                    except Exception as org_error:
-                        logger.warning(f"  ❌ 添加组织成员失败：{str(org_error)}")
-                        continue
-                
-                logger.info(f"✅ 成功创建 {created_members} 条组织成员记录")
-        
-        # 记录生成历史
-        history = GenerationHistory(
-            project_id=request.project_id,
-            prompt=prompt,
-            generated_content=json.dumps(ai_response, ensure_ascii=False) if isinstance(ai_response, dict) else ai_content,
-            model=user_ai_service.default_model
-        )
-        db.add(history)
-        
-        await db.commit()
-        await db.refresh(character)
-        
-        logger.info(f"🎉 成功为项目 {request.project_id} 生成角色: {character.name}")
-        
-        return character
-        
-    except Exception as e:
-        logger.error(f"生成角色失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"生成角色失败: {str(e)}")
+    except AIJobConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return job_sse_response(job)
