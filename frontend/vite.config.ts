@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import path from 'path'
 
@@ -24,5 +24,10 @@ export default defineConfig({
         changeOrigin: true,
       }
     }
-  }
+  },
+  // vitest：被测逻辑全是纯函数 / store，node 环境即可，不引入 jsdom
+  test: {
+    environment: 'node',
+    include: ['src/**/*.test.ts'],
+  },
 })

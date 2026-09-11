@@ -6,8 +6,9 @@ import { toast } from 'sonner';
  * 负责监控会话状态、自动刷新和过期处理
  */
 class SessionManager {
-  private checkInterval: number | null = null;
-  private activityTimeout: number | null = null;
+  // 用 ReturnType 而不是 number：src 下的 vitest 用例会把 @types/node 带进同一 tsc 程序，浏览器 / node 两套 setTimeout 签名都兼容
+  private checkInterval: ReturnType<typeof setInterval> | null = null;
+  private activityTimeout: ReturnType<typeof setTimeout> | null = null;
   private lastActivityTime: number = Date.now();
   
   // 配置参数

@@ -1,5 +1,8 @@
 export interface SSEMessage {
-  type: 'progress' | 'chunk' | 'result' | 'error' | 'done' | 'start' | 'content' | 'meta' | 'thinking' | 'partial' | 'bridges';
+  type:
+    | 'progress' | 'chunk' | 'result' | 'error' | 'done' | 'start' | 'content' | 'meta'
+    | 'thinking' | 'partial' | 'bridges'
+    | 'stage' | 'tool_call' | 'reference' | 'llm';
   message?: string;
   progress?: number;
   word_count?: number;
