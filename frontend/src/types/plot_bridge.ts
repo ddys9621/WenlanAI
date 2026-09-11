@@ -113,22 +113,6 @@ export interface FillBridgesEvent {
   seq?: number;
 }
 
-/** GET fill-jobs/current 的任务快照 */
-export interface FillJobSnapshot {
-  id: string;
-  project_id: string;
-  status: 'running' | 'done' | 'error' | 'cancelled';
-  model: string | null;
-  beat_index: number | null;
-  started_at: number;
-  finished_at: number | null;
-  elapsed: number;
-  seq: number;
-  error: string | null;
-  last_progress: { type: 'progress'; message: string; progress: number; status: string; seq: number } | null;
-  live: { partial?: FillPartialEvent; thinking?: FillThinkingEvent };
-}
-
 export type BridgeStatus = 'draft' | 'ready' | 'generating' | 'completed';
 
 export const BRIDGE_STATUS_LABEL: Record<BridgeStatus, string> = {

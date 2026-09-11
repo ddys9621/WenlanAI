@@ -14,7 +14,6 @@ import type {
   ExpandBridgeResponse,
   FillBridgesRequest,
   FillBridgesResult,
-  FillJobSnapshot,
   PlotBridge,
   UpdateBridgeRequest,
 } from '@/types/plot_bridge';
@@ -42,7 +41,7 @@ export const plotBridgesApi = {
     api.delete<unknown, { deleted: number }>(`/projects/${projectId}/bridges`),
 
   /**
-   * SSE：启动后台填充任务并从头订阅事件（任务不随连接断开而终止；已有任务 → 409）
+   * SSE：启动后台填充任务并从头订阅事件（任务不随连接断开而终止；重连 / 停止走 aiJobsApi；已有任务 → 409）
    * POST /api/projects/{projectId}/bridges/fill-stream
    */
   fillStream: (
@@ -50,31 +49,6 @@ export const plotBridgesApi = {
     payload: FillBridgesRequest,
     options?: SSEClientOptions<FillBridgesResult>,
   ) => ssePost<FillBridgesResult>(`/api/projects/${projectId}/bridges/fill-stream`, payload, options),
-
-  /**
-   * 当前项目是否有填充任务在跑（页面挂载时恢复横幅并重连）
-   * GET /api/projects/{projectId}/bridges/fill-jobs/current
-   */
-  fillJobCurrent: (projectId: string) =>
-    api.get<unknown, { job: FillJobSnapshot | null }>(`/projects/${projectId}/bridges/fill-jobs/current`),
-
-  /**
-   * 重连任务事件流：从 since 之后回放并续尾到终态
-   * POST /api/projects/{projectId}/bridges/fill-jobs/{jobId}/events
-   */
-  fillJobEvents: (
-    projectId: string,
-    jobId: string,
-    since: number,
-    options?: SSEClientOptions<FillBridgesResult>,
-  ) => ssePost<FillBridgesResult>(`/api/projects/${projectId}/bridges/fill-jobs/${jobId}/events`, { since }, options),
-
-  /**
-   * 停止填充（当前子批保持 draft，已完成的已入库）
-   * DELETE /api/projects/{projectId}/bridges/fill-jobs/{jobId}
-   */
-  fillJobCancel: (projectId: string, jobId: string) =>
-    api.delete<unknown, { cancelled: boolean }>(`/projects/${projectId}/bridges/fill-jobs/${jobId}`),
 
   /**
    * 列出项目下所有桥段
