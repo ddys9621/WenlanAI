@@ -51,6 +51,8 @@ class GenerationTrace:
         self._sink = sink
         self._llm_min_interval = llm_min_interval
         self._llm_last_emit: dict[str, float] = {}
+        # 仍处于 running 的阶段（name → (label, 开始时刻)）：任务失败 / 取消时由管理器统一收尾
+        self._open_stages: dict[str, tuple[str, float]] = {}
 
     def emit(self, event: dict[str, Any]) -> None:
         try:
@@ -62,6 +64,10 @@ class GenerationTrace:
         self, name: str, label: str, status: str = "running", *,
         elapsed: Optional[float] = None, detail: Optional[dict[str, Any]] = None, error: Any = None,
     ) -> None:
+        if status == "running":
+            self._open_stages[name] = (label, time.monotonic())
+        else:
+            self._open_stages.pop(name, None)
         event: dict[str, Any] = {"type": "stage", "name": name, "label": label, "status": status}
         if elapsed is not None:
             event["elapsed"] = round(elapsed, 2)
@@ -70,6 +76,12 @@ class GenerationTrace:
         if error:
             event["error"] = _short_error(error)
         self.emit(event)
+
+    def close_open_stages(self, status: str, error: Any = None) -> None:
+        """任务失败 / 取消时把还在 running 的阶段收尾（begin_stage 这种线性写法没有 with 块兜底）。"""
+        now = time.monotonic()
+        for name, (label, started) in list(self._open_stages.items()):
+            self.stage(name, label, status, elapsed=now - started, error=error)
 
     def progress(self, message: str, progress: int, status: str = "processing") -> None:
         self.emit({"type": "progress", "message": message, "progress": int(progress), "status": status})
@@ -174,6 +186,42 @@ def trace_tool_call(call_id: str, **kw: Any) -> None:
 def trace_llm(call_id: str, phase: str, **kw: Any) -> bool:
     trace = current_trace()
     return trace.llm(call_id, phase, **kw) if trace is not None else False
+
+
+class StageTimer:
+    """线性代码用的显式阶段计时器（长函数里逐段 `async with` 会导致大面积重缩进时用它）。
+
+    begin_stage() 发 running；done() / skip() 收尾；中途异常没收尾的阶段由任务管理器
+    `close_open_stages` 兜底标 error / cancelled。未绑定 trace 时全部 no-op。
+    """
+
+    def __init__(self, name: str, label: str):
+        self.name = name
+        self.label = label
+        self.detail: dict[str, Any] = {}
+        self._started = time.monotonic()
+        self._trace = current_trace()
+        if self._trace is not None:
+            self._trace.stage(name, label, "running")
+
+    def note(self, **detail: Any) -> None:
+        self.detail.update(detail)
+
+    def done(self, **detail: Any) -> None:
+        self.detail.update(detail)
+        if self._trace is not None:
+            self._trace.stage(self.name, self.label, "done", elapsed=time.monotonic() - self._started, detail=self.detail)
+
+    def skip(self, reason: str = "") -> None:
+        if self._trace is not None:
+            self._trace.stage(
+                self.name, self.label, "skipped", elapsed=time.monotonic() - self._started,
+                detail={"reason": reason} if reason else None,
+            )
+
+
+def begin_stage(name: str, label: str) -> StageTimer:
+    return StageTimer(name, label)
 
 
 @dataclass

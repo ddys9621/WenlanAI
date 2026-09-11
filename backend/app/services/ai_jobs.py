@@ -188,6 +188,14 @@ class AIJobManager:
             job.finish("cancelled")
         return True
 
+    def dismiss(self, job_id: str) -> bool:
+        """用户在托盘点 × ：把终态任务从注册表移除，刷新后 list_for_user 不再返回它（相当于提前 gc）。运行中的不动。"""
+        job = self._jobs.get(job_id)
+        if job is None or not job.is_terminal:
+            return False
+        del self._jobs[job_id]
+        return True
+
     async def shutdown(self) -> None:
         """应用退出：取消所有运行中的任务（业务表状态由各 runner 自行保证可续跑）。"""
         for job in list(self._jobs.values()):
@@ -221,7 +229,8 @@ class AIJobManager:
 
     async def _run(self, job: AIJob, runner: Runner) -> None:
         # 绑定过程追踪：runner 内（含其 create_task 的子任务）调用的共享入口自动把 llm / tool_call / reference 写进任务日志
-        token = bind_trace(GenerationTrace(job.publish))
+        trace = GenerationTrace(job.publish)
+        token = bind_trace(trace)
         try:
             result = await runner(job)
             if result is not None:
@@ -232,11 +241,13 @@ class AIJobManager:
             job.finish("done")
         except asyncio.CancelledError:
             logger.info("[AIJob] %s(%s) 已取消", job.kind, job.id)
+            trace.close_open_stages("cancelled")
             job.publish({"type": "error", "error": job.cancel_message, "code": 499})
             job.finish("cancelled")
             raise
         except Exception as exc:  # noqa: BLE001 - 统一转 error 事件
             logger.error("[AIJob] %s(%s) 失败: %s", job.kind, job.id, exc, exc_info=True)
+            trace.close_open_stages("error", error=exc)
             job.publish({"type": "error", "error": f"{job.title}失败: {exc}", "code": 500})
             job.finish("error", str(exc))
         finally:
