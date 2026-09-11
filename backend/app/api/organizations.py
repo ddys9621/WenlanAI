@@ -2,14 +2,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
-from typing import List, Optional
-from pydantic import BaseModel, Field
-import json
+from typing import List
 
 from app.database import get_db
 from app.models.relationship import Organization, OrganizationMember
 from app.models.character import Character
-from app.models.generation_history import GenerationHistory
 from app.schemas.relationship import (
     OrganizationCreate,
     OrganizationUpdate,
@@ -18,28 +15,19 @@ from app.schemas.relationship import (
     OrganizationMemberCreate,
     OrganizationMemberUpdate,
     OrganizationMemberResponse,
-    OrganizationMemberDetailResponse
+    OrganizationMemberDetailResponse,
+    OrganizationGenerateRequest,
 )
-from app.schemas.character import CharacterResponse
+from app.api.ai_jobs import job_sse_response
+from app.services.ai_jobs import AIJobConflictError, ai_jobs, job_session_factory
 from app.services.ai_service import AIService
-from app.services.prompt_service import prompt_service
+from app.services.organization_generation_service import make_organization_runner
 from app.logger import get_logger
 from app.api.settings import get_user_ai_service
 from app.api.deps import verify_project_access
 
 router = APIRouter(prefix="/organizations", tags=["组织管理"])
 logger = get_logger(__name__)
-
-
-class OrganizationGenerateRequest(BaseModel):
-    """AI生成组织的请求模型"""
-    project_id: str = Field(..., description="项目ID")
-    name: Optional[str] = Field(None, description="组织名称")
-    organization_type: Optional[str] = Field(None, description="组织类型")
-    background: Optional[str] = Field(None, description="组织背景")
-    requirements: Optional[str] = Field(None, description="特殊要求")
-    enable_mcp: bool = Field(False, description="是否启用MCP工具增强（搜索组织架构参考）")
-    selected_plugins: List[str] = Field(default_factory=list, description="选择的MCP插件列表")
 
 
 @router.get("/project/{project_id}", response_model=List[OrganizationDetailResponse], summary="获取项目的所有组织")
@@ -404,310 +392,38 @@ async def remove_organization_member(
     logger.info(f"移除成员成功：{member_id}")
     return {"message": "成员移除成功", "id": member_id}
 
-@router.post("/generate", response_model=CharacterResponse, summary="AI生成组织")
-async def generate_organization(
+@router.post("/generate-stream", summary="AI生成组织（后台任务 + SSE 事件流）")
+async def generate_organization_stream(
     gen_request: OrganizationGenerateRequest,
     http_request: Request,
     db: AsyncSession = Depends(get_db),
     user_ai_service: AIService = Depends(get_user_ai_service)
 ):
+    """启动后台任务并从头流式输出其事件：start → stage / reference(世界规则) / tool_call / llm / progress → result(组织) → done。
+
+    任务寿命独立于本连接（关弹窗 / 刷新 / 切页不中断）；重连与停止走 /api/ai-jobs/*。
+    同项目已有组织生成在跑 → 409。生成逻辑见 services/organization_generation_service.py。
     """
-    使用AI生成组织设定
-    
-    根据用户输入的信息，结合项目的世界观、主题等背景，
-    AI会生成一个完整、详细的组织设定。
-    
-    生成内容包括：组织名称、类型、特性、背景、目的、势力等级等
-    """
-    # 验证用户权限
     user_id = getattr(http_request.state, 'user_id', None)
     project = await verify_project_access(gen_request.project_id, user_id, db)
-    
+    name = (gen_request.name or "").strip()
+    runner = make_organization_runner(
+        user_id=user_id,
+        project_id=project.id,
+        request=gen_request,
+        ai_service=user_ai_service,
+        session_factory=job_session_factory(user_id),
+    )
     try:
-        # 获取已存在的角色和组织列表
-        existing_chars_result = await db.execute(
-            select(Character)
-            .where(Character.project_id == gen_request.project_id)
-            .order_by(Character.created_at.desc())
+        job = await ai_jobs.start(
+            kind="organization_generate",
+            title=f"AI 生成组织「{name}」" if name else "AI 生成组织",
+            user_id=user_id,
+            project_id=project.id,
+            runner=runner,
+            cancel_message="已停止生成组织",
+            meta={"organization_type": gen_request.organization_type, "enable_mcp": gen_request.enable_mcp},
         )
-        existing_characters = existing_chars_result.scalars().all()
-        
-        # 构建现有角色和组织信息摘要
-        existing_info = ""
-        character_list = []
-        organization_list = []
-        
-        if existing_characters:
-            for c in existing_characters[:10]:  # 最多显示10个
-                if c.is_organization:
-                    organization_list.append(f"- {c.name} [{c.organization_type or '组织'}]")
-                else:
-                    character_list.append(f"- {c.name}（{c.role_type or '未知'}）")
-            
-            if character_list:
-                existing_info += "\n已有角色：\n" + "\n".join(character_list)
-            if organization_list:
-                existing_info += "\n\n已有组织：\n" + "\n".join(organization_list)
-        
-        # 【新增】查询详细世界规则
-        from app.services.world_rule_service import world_rule_service
-        world_rules_summary = ""
-        try:
-            # 构建查询文本
-            query_text = f"{project.theme or ''} {project.genre or ''} {gen_request.organization_type or ''}"
-            # 使用语义检索获取相关规则
-            world_rules_summary = await world_rule_service.generate_rules_summary_with_search(
-                db, gen_request.project_id, query_text, limit=10
-            )
-            if world_rules_summary:
-                logger.info(f"✅ 为组织生成加载了世界规则摘要 ({len(world_rules_summary)} 字符)")
-            else:
-                logger.info("📋 项目暂无详细世界规则,使用基础设定")
-        except Exception as rule_error:
-            logger.warning(f"⚠️ 加载世界规则失败: {str(rule_error)}")
-            world_rules_summary = ""
-
-        # 构建项目上下文信息
-        project_context_parts = [f"""
-项目信息：
-- 书名：{project.title}
-- 主题：{project.theme or '未设定'}
-- 类型：{project.genre or '未设定'}
-- 时间背景：{project.world_time_period or '未设定'}
-- 地理位置：{project.world_location or '未设定'}
-- 氛围基调：{project.world_atmosphere or '未设定'}
-- 世界规则：{project.world_rules or '未设定'}
-{existing_info}
-"""]
-
-        # 添加详细世界规则
-        if world_rules_summary:
-            project_context_parts.append(f"""
-【详细世界规则】
-以下是本作品的详细世界规则设定，请确保组织设定符合这些规则：
-
-{world_rules_summary}
-""")
-
-        project_context = "\n".join(project_context_parts)
-        
-        # 构建用户输入信息
-        user_input = f"""
-用户要求：
-- 组织名称：{gen_request.name or '请AI生成'}
-- 组织类型：{gen_request.organization_type or '请AI根据世界观决定'}
-- 背景设定：{gen_request.background or '无特殊要求'}
-- 其他要求：{gen_request.requirements or '无'}
-"""
-
-        # 【强控工具流】如果启用了 MCP，先强制调用工具收集资料
-        reference_materials = ""
-        if gen_request.enable_mcp and gen_request.selected_plugins:
-            try:
-                logger.info(f"🔧 [组织生成] 强制先调用MCP工具收集资料（插件：{gen_request.selected_plugins}）")
-
-                from app.services.mcp_tool_service import mcp_tool_service
-
-                # 构建工具调用查询
-                tool_query = f"{project.theme or ''} {project.genre or ''} {gen_request.organization_type or '组织'} 组织设定 世界观 背景资料"
-
-                # 获取用户启用的工具
-                available_tools = await mcp_tool_service.get_user_enabled_tools(
-                    user_id=user_id,
-                    db_session=db,
-                    plugin_names=gen_request.selected_plugins
-                )
-
-                if available_tools:
-                    # 优先使用搜索类工具
-                    search_tool = None
-                    for tool in available_tools:
-                        if 'search' in tool['function']['name'].lower():
-                            search_tool = tool
-                            break
-
-                    if search_tool:
-                        tool_name = search_tool['function']['name']
-                        plugin_name = tool_name.split('_')[0] if '_' in tool_name else 'unknown'
-                        actual_tool_name = tool_name.split('_', 1)[1] if '_' in tool_name else tool_name
-
-                        logger.info(f"📞 调用工具：{tool_name}，查询：{tool_query}")
-
-                        # 调用工具
-                        tool_result = await mcp_tool_service._call_tool_with_retry(
-                            user_id=user_id,
-                            plugin_name=plugin_name,
-                            tool_name=actual_tool_name,
-                            arguments={'query': tool_query, 'numResults': 5},
-                            timeout=60.0
-                        )
-
-                        if tool_result:
-                            reference_materials = str(tool_result)
-                        else:
-                            logger.warning(f"⚠️ [组织生成] MCP工具返回空结果")
-                    else:
-                        logger.warning(f"⚠️ [组织生成] 未找到可用的搜索工具")
-                else:
-                    logger.warning(f"⚠️ [组织生成] 未找到可用的MCP工具")
-
-            except Exception as tool_error:
-                logger.error(f"❌ [组织生成] MCP工具调用失败：{str(tool_error)}")
-                # 工具调用失败不中断流程，继续用已有上下文生成
-
-        # 如果有参考资料，添加到项目上下文中
-        if reference_materials:
-            # 统一日志：记录参考资料使用情况
-            raw_chars = len(reference_materials)
-            # 截断参考资料（统一为 2000 字符）
-            max_length = 2000
-            if len(reference_materials) > max_length:
-                logger.warning(f"⚠️ [organization_generation] 参考资料过长（{raw_chars}字符），截断至{max_length}字符")
-                used_reference = reference_materials[:max_length] + "\n...(内容过长已截断)"
-            else:
-                used_reference = reference_materials
-
-            used_chars = len(used_reference)
-            logger.info(
-                f"[MCP] context=organization_generation user_id={user_id} "
-                f"plugins={gen_request.selected_plugins} tools_used=['search'] "
-                f"raw_chars={raw_chars} used_chars={used_chars} tool_calls=1"
-            )
-
-            project_context_parts.append(f"""
-【参考资料】
-以下是通过MCP工具收集的相关参考资料，可以作为灵感来源：
-
-{used_reference}
-""")
-            project_context = "\n".join(project_context_parts)
-
-        # 使用统一的提示词服务
-        prompt = prompt_service.get_single_organization_prompt(
-            project_context=project_context,
-            user_input=user_input
-        )
-
-        # 调用AI生成组织
-        logger.info(f"🎯 开始为项目 {gen_request.project_id} 生成组织")
-        logger.info(f"  - 组织名：{gen_request.name or 'AI生成'}")
-        logger.info(f"  - 组织类型：{gen_request.organization_type or 'AI决定'}")
-        logger.info(f"  - 背景设定：{gen_request.background or '无'}")
-        logger.info(f"  - AI提供商：{user_ai_service.api_provider}")
-        logger.info(f"  - AI模型：{user_ai_service.default_model}")
-        logger.info(f"  - Prompt长度：{len(prompt)} 字符")
-        logger.info(f"  - 用户ID：{user_id}")
-
-        try:
-            # 使用普通的文本生成（资料已经通过工具收集并拼接进prompt）
-            ai_response = await user_ai_service.generate_text(
-                prompt=prompt,
-                provider=None,
-                model=None
-            )
-
-            # 统一处理：generate_text 返回 dict，需要提取 content 字段
-            if not isinstance(ai_response, dict):
-                # 兼容旧式返回（如果有）
-                ai_response = {"content": str(ai_response or "")}
-
-            ai_content = ai_response.get("content") or ""
-            logger.info(f"✅ AI响应接收完成，长度：{len(ai_content)} 字符")
-
-        except Exception as ai_error:
-            logger.error(f"❌ AI服务调用异常：{str(ai_error)}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"AI服务调用失败：{str(ai_error)}"
-            )
-
-        # 检查AI响应
-        if not ai_content or not ai_content.strip():
-            logger.error("❌ AI返回了空响应")
-            raise HTTPException(
-                status_code=500,
-                detail="AI服务返回空响应。请检查AI配置和网络连接。"
-            )
-
-        # 使用统一的 JSON 清理工具解析 AI 响应
-        from app.utils.json_cleaner import clean_and_parse_json
-
-        logger.info(f"🔍 开始解析 JSON（原始长度：{len(ai_content)}）")
-        try:
-            organization_data = clean_and_parse_json(
-                ai_content,
-                expected_type='object',
-                log_prefix="[组织生成]"
-            )
-            logger.info(f"✅ JSON 解析成功")
-            logger.info(f"  - 解析后的字段：{list(organization_data.keys())}")
-        except json.JSONDecodeError as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"AI返回的内容无法解析为JSON。错误：{str(e)}"
-            )
-        except Exception as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"解析AI响应时发生异常：{str(e)}"
-            )
-        
-        # 创建角色记录（组织也是角色的一种）
-        character = Character(
-            project_id=gen_request.project_id,
-            name=organization_data.get("name", gen_request.name or "未命名组织"),
-            is_organization=True,
-            role_type="supporting",  # 组织通常作为配角
-            personality=organization_data.get("personality", ""),
-            background=organization_data.get("background", ""),
-            appearance=organization_data.get("appearance", ""),
-            organization_type=organization_data.get("organization_type"),
-            organization_purpose=organization_data.get("organization_purpose"),
-            organization_members=json.dumps(
-                organization_data.get("organization_members", []), 
-                ensure_ascii=False
-            ),
-            traits=json.dumps(
-                organization_data.get("traits", []), 
-                ensure_ascii=False
-            )
-        )
-        db.add(character)
-        await db.flush()
-        
-        logger.info(f"✅ 组织角色创建成功：{character.name} (ID: {character.id})")
-        
-        # 自动创建Organization详情记录
-        organization = Organization(
-            character_id=character.id,
-            project_id=gen_request.project_id,
-            member_count=0,
-            power_level=organization_data.get("power_level", 50),
-            location=organization_data.get("location"),
-            motto=organization_data.get("motto"),
-            color=organization_data.get("color")
-        )
-        db.add(organization)
-        await db.flush()
-        
-        logger.info(f"✅ 组织详情创建成功：{character.name} (Org ID: {organization.id})")
-        
-        # 记录生成历史
-        history = GenerationHistory(
-            project_id=gen_request.project_id,
-            prompt=prompt,
-            generated_content=ai_content, 
-            model=user_ai_service.default_model
-        )
-        db.add(history)
-        
-        await db.commit()
-        await db.refresh(character)
-        
-        logger.info(f"🎉 成功为项目 {gen_request.project_id} 生成组织: {character.name}")
-        
-        return character
-        
-    except Exception as e:
-        logger.error(f"生成组织失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"生成组织失败: {str(e)}")
+    except AIJobConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return job_sse_response(job)

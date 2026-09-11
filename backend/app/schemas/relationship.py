@@ -1,6 +1,6 @@
 """关系管理相关的Pydantic模型"""
 from pydantic import BaseModel, Field, ConfigDict
-from typing import Optional
+from typing import List, Optional
 from datetime import datetime
 
 
@@ -174,3 +174,16 @@ class OrganizationMemberDetailResponse(BaseModel):
     joined_at: Optional[str] = None
     left_at: Optional[str] = None
     notes: Optional[str] = None
+
+
+# ============ AI 生成组织 ============
+
+class OrganizationGenerateRequest(BaseModel):
+    """AI生成组织的请求模型（服务层 organization_generation_service 与 API 共用）"""
+    project_id: str = Field(..., description="项目ID")
+    name: Optional[str] = Field(None, description="组织名称")
+    organization_type: Optional[str] = Field(None, description="组织类型")
+    background: Optional[str] = Field(None, description="组织背景")
+    requirements: Optional[str] = Field(None, description="特殊要求")
+    enable_mcp: bool = Field(False, description="是否启用MCP工具增强（搜索组织架构参考）")
+    selected_plugins: List[str] = Field(default_factory=list, description="选择的MCP插件列表")
