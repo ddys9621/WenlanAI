@@ -46,7 +46,7 @@ import { cn } from '@/lib/utils';
 import { plotBridgesApi } from '@/services/plotBridgesApi';
 import { settingsApi } from '@/services/api';
 import { AIJobBanner } from '@/components/ai-job/AIJobBanner';
-import { useAIJob, useAIJobsStore } from '@/store/aiJobsStore';
+import { useAIJob, useAIJobsStore, useRunningAIJobs } from '@/store/aiJobsStore';
 import type { AIJobLLM, AIJobState } from '@/types/ai_job';
 import type { SSEMessage } from '@/utils/sseClient';
 import {
@@ -58,6 +58,8 @@ import {
   type BridgeGenerationMeta,
   type BridgeSlotPreview,
   type BridgeStatus,
+  type ExpandAllBridgesResponse,
+  type ExpandBridgeResponse,
   type FillBridgesEvent,
   type FillBridgesResult,
   type FillPartialEvent,
@@ -172,7 +174,8 @@ export default function PlotBridgesPage() {
   const subscribeJob = useAIJobsStore((s) => s.subscribe);
   const onJobSettled = useAIJobsStore((s) => s.onSettled);
   const allJobs = useAIJobsStore((s) => s.jobs);
-  const [expandingAll, setExpandingAll] = useState(false);
+  // 展开任务（单个 / 批量共用互斥键）：由 store 派生运行态
+  const expanding = useRunningAIJobs(projectId, ['bridge_expand']).length > 0;
   const [editingBridge, setEditingBridge] = useState<PlotBridge | null>(null);
   const [expandingBridge, setExpandingBridge] = useState<PlotBridge | null>(null);
 
@@ -241,7 +244,16 @@ export default function PlotBridgesPage() {
     }
   }, [projectId, fetchBridges]);
 
-  /** 任务的场景级事件（首连与重连共用）：thinking 高亮节点、partial 幽灵文本、bridges 翻新卡片 */
+  /** bridges 事件：后端刚写回的桥段（填充完成 / 展开完成）原位翻新卡片 */
+  const applyBridgesEvent = useCallback((ev: FillBridgesEvent) => {
+    setBridges((prev) => {
+      const byId = new Map(prev.map((b) => [b.id, b]));
+      for (const b of ev.bridges) byId.set(b.id, b);
+      return Array.from(byId.values());
+    });
+  }, []);
+
+  /** 填充任务的场景级事件（首连与重连共用）：thinking 高亮节点、partial 幽灵文本、bridges 翻新卡片 */
   const handleFillEvent = useCallback((m: SSEMessage) => {
     switch (m.type) {
       case 'thinking':
@@ -259,11 +271,7 @@ export default function PlotBridgesPage() {
       }
       case 'bridges': {
         const ev = m as unknown as FillBridgesEvent;
-        setBridges((prev) => {
-          const byId = new Map(prev.map((b) => [b.id, b]));
-          for (const b of ev.bridges) byId.set(b.id, b);
-          return Array.from(byId.values());
-        });
+        applyBridgesEvent(ev);
         setPartials((prev) => {
           const next = { ...prev };
           for (const b of ev.bridges) delete next[b.bridge_number];
@@ -275,7 +283,12 @@ export default function PlotBridgesPage() {
       default:
         break;
     }
-  }, []);
+  }, [applyBridgesEvent]);
+
+  /** 展开任务的场景级事件：每个桥段展开完成即翻卡为 completed */
+  const handleExpandEvent = useCallback((m: SSEMessage) => {
+    if (m.type === 'bridges') applyBridgesEvent(m as unknown as FillBridgesEvent);
+  }, [applyBridgesEvent]);
 
   /** 任务结束（完成 / 失败 / 停止）后的收尾：清掉幽灵卡片、提示结果、刷新列表 */
   const finishFill = useCallback(
@@ -375,37 +388,67 @@ export default function PlotBridgesPage() {
     };
   }, [bridges]);
 
+  /** 第 3 段·批量展开：后台任务，每个桥段展开完成即翻卡；通用弹窗显示每桥段 stage，可最小化 / 停止 */
   const handleExpandAll = useCallback(async () => {
     if (!projectId || stats.ready === 0) return;
     if (
       !window.confirm(
         `将展开 ${stats.ready} 个 ready 状态的桥段为 ${stats.ready * 4} 个章纲。\n` +
-          `单个桥段失败不影响其他桥段。是否继续？`,
+          `按顺序逐个展开，首个失败即停止（后续桥段依赖前序已展开）。是否继续？`,
       )
     ) {
       return;
     }
-    setExpandingAll(true);
     try {
-      const res = await plotBridgesApi.expandAll(projectId, {
-        model: defaultModel || undefined,
+      await startJob({
+        kind: 'bridge_expand',
+        title: '展开全部就绪桥段为章纲',
+        projectId,
+        connect: (options) => plotBridgesApi.expandAllStream(projectId, { model: defaultModel || undefined }, options),
+        onEvent: handleExpandEvent,
+        onSettled: (job) => {
+          if (job.status === 'done') {
+            const res = job.result as ExpandAllBridgesResponse | null;
+            if (res && res.failed.length === 0) {
+              toast.success(`成功展开 ${res.succeeded.length} 个桥段，共创建 ${res.created_chapter_count} 个章纲`);
+            } else if (res) {
+              toast.warning(`部分完成：${res.succeeded.length}/${res.total} 成功，${res.failed.length} 失败：${res.failed[0]?.error ?? ''}`);
+            }
+          }
+          void fetchBridges();
+        },
       });
-      if (res.failed.length === 0) {
-        toast.success(
-          `成功展开 ${res.succeeded.length} 个桥段，共创建 ${res.created_chapter_count} 个章纲`,
-        );
-      } else {
-        toast.warning(
-          `部分完成：${res.succeeded.length}/${res.total} 成功，${res.failed.length} 失败`,
-        );
-      }
-      await fetchBridges();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '批量展开失败');
-    } finally {
-      setExpandingAll(false);
     }
-  }, [projectId, stats.ready, defaultModel, fetchBridges]);
+  }, [projectId, stats.ready, defaultModel, fetchBridges, startJob, handleExpandEvent]);
+
+  /** 第 3 段·单个展开：后台任务（弹窗选完模型即关闭，进度在通用任务弹窗里） */
+  const handleExpandOne = useCallback(
+    async (bridge: PlotBridge, model?: string) => {
+      if (!projectId) return;
+      setExpandingBridge(null);
+      try {
+        await startJob({
+          kind: 'bridge_expand',
+          title: `展开桥段 ${bridge.bridge_number}《${bridge.title}》`,
+          projectId,
+          connect: (options) => plotBridgesApi.expandStream(bridge.id, { model }, options),
+          onEvent: handleExpandEvent,
+          onSettled: (job) => {
+            if (job.status === 'done') {
+              const res = job.result as ExpandBridgeResponse | null;
+              if (res) toast.success(`已展开 ${res.chapter_count} 个章纲（第 ${bridge.chapter_start}-${bridge.chapter_end} 章）`);
+            }
+            void fetchBridges();
+          },
+        });
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : '展开失败');
+      }
+    },
+    [projectId, startJob, handleExpandEvent, fetchBridges],
+  );
 
   const handleGoToChapterOutlines = useCallback(() => {
     if (!projectId) return;
@@ -447,9 +490,9 @@ export default function PlotBridgesPage() {
               {filling ? '填充中…' : `AI 填充桥段内容（${stats.draft} 待填）`}
             </button>
           ) : stats.ready > 0 ? (
-            <button onClick={handleExpandAll} disabled={expandingAll} className="hh-btn-primary">
-              {expandingAll ? <Loader2 className="h-4 w-4 animate-spin" /> : <Expand className="h-4 w-4" />}
-              {expandingAll ? '正在展开…' : `展开为章纲（${stats.ready} 个桥段）`}
+            <button onClick={handleExpandAll} disabled={expanding} className="hh-btn-primary">
+              {expanding ? <Loader2 className="h-4 w-4 animate-spin" /> : <Expand className="h-4 w-4" />}
+              {expanding ? '正在展开…' : `展开为章纲（${stats.ready} 个桥段）`}
             </button>
           ) : null}
         </div>
@@ -661,10 +704,7 @@ export default function PlotBridgesPage() {
         loadingModels={loadingModels}
         refreshModels={refreshModels}
         onClose={() => setExpandingBridge(null)}
-        onExpanded={() => {
-          setExpandingBridge(null);
-          fetchBridges();
-        }}
+        onStart={handleExpandOne}
       />
     </div>
   );
@@ -1210,7 +1250,7 @@ function EditBridgeModal({
 function ExpandBridgeModal({
   bridge,
   onClose,
-  onExpanded,
+  onStart,
   modelOptions,
   defaultModel,
   loadingModels,
@@ -1218,14 +1258,14 @@ function ExpandBridgeModal({
 }: {
   bridge: PlotBridge | null;
   onClose: () => void;
-  onExpanded: () => void;
+  /** 选好模型 → 页面启动后台展开任务并关闭本弹窗（进度在通用任务弹窗里） */
+  onStart: (bridge: PlotBridge, model?: string) => Promise<void>;
   modelOptions: ModelOption[];
   defaultModel: string;
   loadingModels: boolean;
   refreshModels: () => void;
 }) {
   const [form] = Form.useForm<{ model: string }>();
-  const [expanding, setExpanding] = useState(false);
 
   // 异步加载完成、或弹窗打开时，把表单 model 字段同步到用户默认模型
   useEffect(() => {
@@ -1234,18 +1274,9 @@ function ExpandBridgeModal({
     if (target) form.setFieldValue('model', target);
   }, [bridge, defaultModel, modelOptions, form]);
 
-  const handleExpand = async (values: { model: string }) => {
+  const handleExpand = (values: { model: string }) => {
     if (!bridge) return;
-    setExpanding(true);
-    try {
-      const res = await plotBridgesApi.expand(bridge.id, { model: values.model || undefined });
-      toast.success(`已展开 ${res.chapter_count} 个章纲（第 ${bridge.chapter_start}-${bridge.chapter_end} 章）`);
-      onExpanded();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '展开失败');
-    } finally {
-      setExpanding(false);
-    }
+    void onStart(bridge, values.model || undefined);
   };
 
   return (
@@ -1297,13 +1328,8 @@ function ExpandBridgeModal({
         </Form.Item>
         <Form.Item className="!mb-0 text-right">
           <Button onClick={onClose} className="mr-2">取消</Button>
-          <Button
-            type="primary"
-            htmlType="submit"
-            loading={expanding}
-            icon={<ExpandAltOutlined />}
-          >
-            {expanding ? '正在展开...' : '展开为 4 章'}
+          <Button type="primary" htmlType="submit" icon={<ExpandAltOutlined />}>
+            展开为 4 章
           </Button>
         </Form.Item>
       </Form>

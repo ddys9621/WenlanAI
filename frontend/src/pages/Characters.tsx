@@ -54,7 +54,7 @@ export default function Characters() {
   const [addMemberPos, setAddMemberPos] = useState('成员');
   const [showGenOrgModal, setShowGenOrgModal] = useState(false);
   const [genOrgForm, setGenOrgForm] = useState({ name: '', requirements: '' });
-  const [generatingOrg, setGeneratingOrg] = useState(false);
+  const generatingOrg = useRunningAIJobs(currentProject?.id, ['organization_generate']).length > 0;
 
   const filteredCharacters = characters.filter(c => {
     if (filter === 'character') return !c.is_organization;
@@ -200,22 +200,30 @@ export default function Characters() {
     }
   };
 
+  /** AI 生成组织：交给通用后台任务（弹窗展示阶段 / 世界规则参考 / 工具；可最小化、可停止、刷新后可重连） */
   const handleGenerateOrg = async () => {
     if (!currentProject) return;
-    setGeneratingOrg(true);
+    const name = genOrgForm.name.trim();
+    setShowGenOrgModal(false);
     try {
-      await organizationApi.generateOrganization({
-        project_id: currentProject.id,
-        requirements: genOrgForm.requirements.trim() || undefined,
+      await startJob({
+        kind: 'organization_generate',
+        title: name ? `AI 生成组织「${name}」` : 'AI 生成组织',
+        projectId: currentProject.id,
+        connect: (options) =>
+          organizationApi.generateOrganizationStream(
+            { project_id: currentProject.id, name: name || undefined, requirements: genOrgForm.requirements.trim() || undefined },
+            options,
+          ),
+        onSettled: (job) => {
+          if (job.status !== 'done') return;
+          toast.success('AI 组织已生成');
+          void refreshCharacters();
+          setGenOrgForm({ name: '', requirements: '' });
+        },
       });
-      toast.success('AI 组织已生成');
-      await refreshCharacters();
-      setShowGenOrgModal(false);
-      setGenOrgForm({ name: '', requirements: '' });
-    } catch {
-      toast.error('AI 生成组织失败');
-    } finally {
-      setGeneratingOrg(false);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'AI 生成组织失败');
     }
   };
 

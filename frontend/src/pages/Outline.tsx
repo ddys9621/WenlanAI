@@ -6,7 +6,9 @@ import { cn } from '@/lib/utils'
 import { useStore } from '@/store/index'
 import { useOutlineSync } from '@/store/hooks'
 import { usePlotCardSync, usePlotLineSync, useChapterOutlineSync } from '@/store/plotHooks'
-import { wizardStreamApi, outlineApi, chapterOutlineLinkApi, plotLineApi } from '@/services/api'
+import { useAIJobsStore, useRunningAIJobs } from '@/store/aiJobsStore'
+import { wizardStreamApi, outlineApi, chapterOutlineLinkApi, plotLineApi, plotCardApi } from '@/services/api'
+import { AIJobBanner } from '@/components/ai-job/AIJobBanner'
 import { MCPSelector } from '@/components/MCPSelector'
 import {
   ReferencePackSelector,
@@ -90,8 +92,8 @@ export default function OutlinePage() {
 
   // hooks
   const { refreshOutlines, createOutline, updateOutline, deleteOutline, activateOutline } = useOutlineSync()
-  const { plotCards, refreshPlotCards, createPlotCard, updatePlotCard, deletePlotCard, generatePlotCards } = usePlotCardSync()
-  const { plotLines, refreshPlotLines, createPlotLine, updatePlotLine: updatePlotLineData, deletePlotLine, generatePlotLines } = usePlotLineSync()
+  const { plotCards, refreshPlotCards, createPlotCard, updatePlotCard, deletePlotCard } = usePlotCardSync()
+  const { plotLines, refreshPlotLines, createPlotLine, updatePlotLine: updatePlotLineData, deletePlotLine } = usePlotLineSync()
   const { chapterOutlines, refreshChapterOutlines, createChapterOutline, updateChapterOutline: updateChapterOutlineData, deleteChapterOutline, batchCreateChapterOutlines } = useChapterOutlineSync()
 
   // 初始化加载
@@ -144,8 +146,8 @@ export default function OutlinePage() {
       ) : (
         <>
           {activeTab === 'outlines' && <OutlinesView outlines={outlines} projectId={projectId} createOutline={createOutline} updateOutline={updateOutline} deleteOutline={deleteOutline} activateOutline={activateOutline} refreshOutlines={refreshOutlines} />}
-          {activeTab === 'plotCards' && <PlotCardsView plotCards={plotCards} projectId={projectId} outlines={outlines} createPlotCard={createPlotCard} updatePlotCard={updatePlotCard} deletePlotCard={deletePlotCard} generatePlotCards={generatePlotCards} />}
-          {activeTab === 'plotLines' && <PlotLinesView plotLines={plotLines} plotCards={plotCards} projectId={projectId} outlines={outlines} createPlotLine={createPlotLine} updatePlotLine={updatePlotLineData} deletePlotLine={deletePlotLine} generatePlotLines={generatePlotLines} />}
+          {activeTab === 'plotCards' && <PlotCardsView plotCards={plotCards} projectId={projectId} outlines={outlines} createPlotCard={createPlotCard} updatePlotCard={updatePlotCard} deletePlotCard={deletePlotCard} refreshPlotCards={refreshPlotCards} />}
+          {activeTab === 'plotLines' && <PlotLinesView plotLines={plotLines} plotCards={plotCards} projectId={projectId} outlines={outlines} createPlotLine={createPlotLine} updatePlotLine={updatePlotLineData} deletePlotLine={deletePlotLine} refreshPlotLines={refreshPlotLines} />}
           {activeTab === 'chapterOutlines' && <ChapterOutlinesView chapterOutlines={chapterOutlines} projectId={projectId} createChapterOutline={createChapterOutline} updateChapterOutline={updateChapterOutlineData} deleteChapterOutline={deleteChapterOutline} batchCreateChapterOutlines={batchCreateChapterOutlines} plotLines={plotLines} />}
           {activeTab === 'overview' && <OverviewPanel plotCards={plotCards} plotLines={plotLines} chapterOutlines={chapterOutlines} />}
         </>
@@ -552,19 +554,21 @@ function OutlinesView({ outlines, projectId, createOutline, updateOutline, delet
   )
 }
 // ==================== Tab 2: 剧情卡片 ====================
-function PlotCardsView({ plotCards, projectId, outlines, createPlotCard, updatePlotCard, deletePlotCard, generatePlotCards }: {
+function PlotCardsView({ plotCards, projectId, outlines, createPlotCard, updatePlotCard, deletePlotCard, refreshPlotCards }: {
   plotCards: PlotCard[]
   projectId?: string
   outlines: Outline[]
   createPlotCard: (data: PlotCardCreate) => Promise<PlotCard>
   updatePlotCard: (id: string, data: PlotCardUpdate) => Promise<PlotCard>
   deletePlotCard: (id: string) => Promise<void>
-  generatePlotCards: (data: PlotCardGenerateRequest) => Promise<PlotCard[]>
+  refreshPlotCards: (projectId: string) => Promise<unknown>
 }) {
   const [showModal, setShowModal] = useState(false)
   const [editing, setEditing] = useState<PlotCard | null>(null)
   const [form, setForm] = useState({ title: '', content: '', card_type: '起因', order_index: 0 })
-  const [generating, setGenerating] = useState(false)
+  // AI 生成走通用后台任务：禁用态由 store 派生（刷新后仍正确）
+  const startJob = useAIJobsStore((s) => s.start)
+  const generating = useRunningAIJobs(projectId, ['plot_cards_generate']).length > 0
   const [showGenModal, setShowGenModal] = useState(false)
   const [genForm, setGenForm] = useState({ card_type: '起因', count: 5, prompt: '', extend_from_card_id: '' })
   const [genEnableMcp, setGenEnableMcp] = useState(false)
@@ -588,24 +592,36 @@ function PlotCardsView({ plotCards, projectId, outlines, createPlotCard, updateP
     } catch { /* hook 已 toast */ }
   }
 
+  /** AI 生成剧情卡：通用后台任务（弹窗展示 MCP 规划 / 参考包 / 模型进度；可最小化、可停止、刷新后可重连） */
   const handleGenerate = async () => {
     if (!projectId) return
     const activeOutline = outlines.find(o => o.is_active) || outlines[0]
     if (!activeOutline) { toast.error('请先创建故事大纲'); return }
-    setGenerating(true)
+    const payload: PlotCardGenerateRequest = {
+      project_id: projectId,
+      outline_id: activeOutline.id,
+      card_type: genForm.card_type,
+      count: genForm.count,
+      extend_from_card_id: genForm.extend_from_card_id || undefined,
+      prompt: genForm.prompt.trim() || undefined,
+      enable_mcp: genEnableMcp,
+      selected_plugins: genPlugins,
+    }
     setShowGenModal(false)
     try {
-      await generatePlotCards({
-        project_id: projectId,
-        outline_id: activeOutline.id,
-        card_type: genForm.card_type,
-        count: genForm.count,
-        extend_from_card_id: genForm.extend_from_card_id || undefined,
-        prompt: genForm.prompt.trim() || undefined,
-        enable_mcp: genEnableMcp,
-        selected_plugins: genPlugins,
+      await startJob({
+        kind: 'plot_cards_generate',
+        title: `AI 生成剧情卡（${genForm.count} 张）`,
+        projectId,
+        connect: (options) => plotCardApi.generatePlotCardsStream(payload, options),
+        onSettled: (job) => {
+          if (job.status !== 'done') return
+          const cards = Array.isArray(job.result) ? job.result : []
+          toast.success(`成功生成 ${cards.length} 个剧情卡片`)
+          void refreshPlotCards(projectId)
+        },
       })
-    } catch { /* hook 已 toast */ } finally { setGenerating(false) }
+    } catch (err) { toast.error(err instanceof Error ? err.message : 'AI 生成剧情卡片失败') }
   }
 
   const handleDelete = async (c: PlotCard) => {
@@ -614,7 +630,8 @@ function PlotCardsView({ plotCards, projectId, outlines, createPlotCard, updateP
   }
 
   return (
-    <section className="hh-panel p-6">
+    <section className="hh-panel space-y-4 p-6">
+      <AIJobBanner projectId={projectId} kinds={['plot_cards_generate']} />
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           <h2 className="text-lg font-semibold tracking-tight text-content">剧情卡片</h2>
@@ -752,7 +769,7 @@ type EditableBeat = {
   weight: number
 }
 
-function PlotLinesView({ plotLines, projectId, outlines, plotCards, createPlotLine, updatePlotLine, deletePlotLine, generatePlotLines }: {
+function PlotLinesView({ plotLines, projectId, outlines, plotCards, createPlotLine, updatePlotLine, deletePlotLine, refreshPlotLines }: {
   plotLines: PlotLine[]
   projectId?: string
   outlines: Outline[]
@@ -760,7 +777,7 @@ function PlotLinesView({ plotLines, projectId, outlines, plotCards, createPlotLi
   createPlotLine: (data: PlotLineCreate) => Promise<PlotLine>
   updatePlotLine: (id: string, data: PlotLineUpdate) => Promise<PlotLine>
   deletePlotLine: (id: string) => Promise<void>
-  generatePlotLines: (data: PlotLineGenerateRequest) => Promise<PlotLine[]>
+  refreshPlotLines: (projectId: string) => Promise<unknown>
 }) {
   const defaultLineType = normalizePlotLineType(plotLines[0]?.line_type)
   const [showModal, setShowModal] = useState(false)
@@ -769,7 +786,9 @@ function PlotLinesView({ plotLines, projectId, outlines, plotCards, createPlotLi
   const [viewingProgress, setViewingProgress] = useState<PlotLineProgress | null>(null)
   const [loadingProgress, setLoadingProgress] = useState(false)
   const [form, setForm] = useState({ title: '', description: '', line_type: defaultLineType, estimated_chapters: 0, beats: [] as EditableBeat[] })
-  const [generating, setGenerating] = useState(false)
+  // AI 生成走通用后台任务：禁用态由 store 派生（刷新后仍正确）
+  const startJob = useAIJobsStore((s) => s.start)
+  const generating = useRunningAIJobs(projectId, ['plot_lines_generate']).length > 0
   const [showGenModal, setShowGenModal] = useState(false)
   const [genForm, setGenForm] = useState({ line_type: defaultLineType, count: 3, prompt: '', based_on_lines: [] as string[], based_on_cards: [] as string[] })
   const [genEnableMcp, setGenEnableMcp] = useState(false)
@@ -918,25 +937,37 @@ function PlotLinesView({ plotLines, projectId, outlines, plotCards, createPlotLi
     } catch { /* hook 已 toast */ }
   }
 
+  /** AI 生成剧情线：通用后台任务（弹窗展示每条结构 / 节点规划 / MCP / 参考包进度；可最小化、可停止、刷新后可重连） */
   const handleGenerate = async () => {
     if (!projectId) return
     const activeOutline = outlines.find(o => o.is_active) || outlines[0]
-    setGenerating(true)
+    const payload: PlotLineGenerateRequest = {
+      project_id: projectId,
+      story_outline_id: activeOutline?.id,
+      line_type: normalizePlotLineType(genForm.line_type),
+      count: genForm.count,
+      based_on_lines: genForm.based_on_lines.length ? genForm.based_on_lines : undefined,
+      based_on_cards: genForm.based_on_cards.length ? genForm.based_on_cards : undefined,
+      prompt: genForm.prompt.trim() || undefined,
+      extend_existing: false,
+      enable_mcp: genEnableMcp,
+      selected_plugins: genPlugins,
+    }
     setShowGenModal(false)
     try {
-      await generatePlotLines({
-        project_id: projectId,
-        story_outline_id: activeOutline?.id,
-        line_type: normalizePlotLineType(genForm.line_type),
-        count: genForm.count,
-        based_on_lines: genForm.based_on_lines.length ? genForm.based_on_lines : undefined,
-        based_on_cards: genForm.based_on_cards.length ? genForm.based_on_cards : undefined,
-        prompt: genForm.prompt.trim() || undefined,
-        extend_existing: false,
-        enable_mcp: genEnableMcp,
-        selected_plugins: genPlugins,
+      await startJob({
+        kind: 'plot_lines_generate',
+        title: `AI 生成剧情线（${genForm.count} 条）`,
+        projectId,
+        connect: (options) => plotLineApi.generatePlotLinesStream(payload, options),
+        onSettled: (job) => {
+          if (job.status !== 'done') return
+          const lines = Array.isArray(job.result) ? job.result : []
+          toast.success(`成功生成 ${lines.length} 条剧情线`)
+          void refreshPlotLines(projectId)
+        },
       })
-    } catch { /* hook 已 toast */ } finally { setGenerating(false) }
+    } catch (err) { toast.error(err instanceof Error ? err.message : 'AI 生成剧情线失败') }
   }
 
   const handleDelete = async (l: PlotLine) => {
@@ -945,7 +976,8 @@ function PlotLinesView({ plotLines, projectId, outlines, plotCards, createPlotLi
   }
 
   return (
-    <section className="hh-panel p-6">
+    <section className="hh-panel space-y-4 p-6">
+      <AIJobBanner projectId={projectId} kinds={['plot_lines_generate']} />
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           <h2 className="text-lg font-semibold tracking-tight text-content">剧情线</h2>

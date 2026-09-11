@@ -829,9 +829,9 @@ export const plotCardApi = {
   reorderPlotCards: (data: PlotCardReorderRequest) =>
     api.post<unknown, { message: string }>('/plot-cards/reorder', data),
 
-  // AI生成剧情卡片
-  generatePlotCards: (data: PlotCardGenerateRequest) =>
-    api.post<unknown, PlotCard[]>('/plot-cards/generate', data),
+  /** AI 生成剧情卡片：后台任务 + SSE（重连 / 停止走 aiJobsApi）POST /api/plot-cards/generate-stream */
+  generatePlotCardsStream: (data: PlotCardGenerateRequest, options?: SSEClientOptions<PlotCard[]>) =>
+    ssePost<PlotCard[]>('/api/plot-cards/generate-stream', data, options),
 
   // 获取项目中使用的卡片类型
   getCardTypes: (projectId: string) =>
@@ -864,9 +864,9 @@ export const plotLineApi = {
   reorderPlotLines: (data: PlotLineReorderRequest) =>
     api.post<unknown, { message: string }>('/plot-lines/reorder', data),
 
-  // AI生成剧情线
-  generatePlotLines: (data: PlotLineGenerateRequest) =>
-    api.post<unknown, PlotLine[]>('/plot-lines/generate', data),
+  /** AI 生成剧情线：后台任务 + SSE（重连 / 停止走 aiJobsApi）POST /api/plot-lines/generate-stream */
+  generatePlotLinesStream: (data: PlotLineGenerateRequest, options?: SSEClientOptions<PlotLine[]>) =>
+    ssePost<PlotLine[]>('/api/plot-lines/generate-stream', data, options),
 
   // 获取项目中使用的剧情线类型
   getLineTypes: (projectId: string) =>
@@ -1143,14 +1143,19 @@ export const organizationApi = {
   removeMember: (memberId: string) =>
     api.delete<unknown, { message: string }>(`/organizations/members/${memberId}`),
 
-  // AI生成组织
-  generateOrganization: (data: {
-    project_id: string;
-    requirements?: string;
-  }) =>
-    api.post<unknown, Record<string, unknown>>('/organizations/generate', data),
-
-  // AI流式生成组织
+  /** AI 生成组织：后台任务 + SSE（重连 / 停止走 aiJobsApi）POST /api/organizations/generate-stream */
+  generateOrganizationStream: (
+    data: {
+      project_id: string;
+      name?: string;
+      organization_type?: string;
+      background?: string;
+      requirements?: string;
+      enable_mcp?: boolean;
+      selected_plugins?: string[];
+    },
+    options?: SSEClientOptions<Character>,
+  ) => ssePost<Character>('/api/organizations/generate-stream', data, options),
 };
 
 // ============================================

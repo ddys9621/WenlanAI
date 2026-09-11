@@ -72,16 +72,22 @@ export const plotBridgesApi = {
     api.delete<unknown, { success: boolean }>(`/bridges/${bridgeId}`),
 
   /**
-   * 展开为第 4(n-1)+1…4n 章（要求 ready 且前一桥段已 completed）
-   * POST /api/bridges/{bridgeId}/expand
+   * SSE：后台展开为第 4(n-1)+1…4n 章（要求 ready 且前一桥段已 completed）；重连 / 停止走 aiJobsApi；同项目已有展开任务 → 409
+   * POST /api/bridges/{bridgeId}/expand-stream
    */
-  expand: (bridgeId: string, payload: ExpandBridgeRequest = {}) =>
-    api.post<unknown, ExpandBridgeResponse>(`/bridges/${bridgeId}/expand`, payload),
+  expandStream: (
+    bridgeId: string,
+    payload: ExpandBridgeRequest = {},
+    options?: SSEClientOptions<ExpandBridgeResponse>,
+  ) => ssePost<ExpandBridgeResponse>(`/api/bridges/${bridgeId}/expand-stream`, payload, options),
 
   /**
-   * 按 bridge_number 顺序批量展开全部 ready 桥段（首个失败即停止）
-   * POST /api/projects/{projectId}/bridges/expand-all
+   * SSE：后台按 bridge_number 顺序批量展开全部 ready 桥段（每桥段一个 stage + bridges 事件；首个失败即停止）
+   * POST /api/projects/{projectId}/bridges/expand-all-stream
    */
-  expandAll: (projectId: string, payload: ExpandAllBridgesRequest = {}) =>
-    api.post<unknown, ExpandAllBridgesResponse>(`/projects/${projectId}/bridges/expand-all`, payload),
+  expandAllStream: (
+    projectId: string,
+    payload: ExpandAllBridgesRequest = {},
+    options?: SSEClientOptions<ExpandAllBridgesResponse>,
+  ) => ssePost<ExpandAllBridgesResponse>(`/api/projects/${projectId}/bridges/expand-all-stream`, payload, options),
 };

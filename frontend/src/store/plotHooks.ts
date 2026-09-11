@@ -8,11 +8,9 @@ import { plotCardApi, plotLineApi, chapterOutlineApi } from '../services/api';
 import type {
   PlotCardCreate,
   PlotCardUpdate,
-  PlotCardGenerateRequest,
   PlotCardReorderRequest,
   PlotLineCreate,
   PlotLineUpdate,
-  PlotLineGenerateRequest,
   PlotLineReorderRequest,
   ChapterOutlineCreate,
   ChapterOutlineUpdate,
@@ -102,20 +100,6 @@ export function usePlotCardSync() {
     }
   }, []);
 
-  // AI生成剧情卡片
-  const generatePlotCards = useCallback(async (data: PlotCardGenerateRequest) => {
-    try {
-      const newCards = await plotCardApi.generatePlotCards(data);
-      newCards.forEach(card => addPlotCard(card));
-      toast.success(`成功生成 ${newCards.length} 个剧情卡片`);
-      return newCards;
-    } catch (error) {
-      console.error('AI生成剧情卡片失败:', error);
-      toast.error('AI生成剧情卡片失败');
-      throw error;
-    }
-  }, [addPlotCard]);
-
   // 获取卡片类型统计
   const getCardTypes = useCallback(async (projectId: string) => {
     try {
@@ -134,7 +118,6 @@ export function usePlotCardSync() {
     updatePlotCard: updatePlotCardData,
     deletePlotCard,
     reorderPlotCards,
-    generatePlotCards,
     getCardTypes,
   };
 }
@@ -219,20 +202,6 @@ export function usePlotLineSync() {
     }
   }, []);
 
-  // AI生成剧情线
-  const generatePlotLines = useCallback(async (data: PlotLineGenerateRequest) => {
-    try {
-      const newLines = await plotLineApi.generatePlotLines(data);
-      newLines.forEach(line => addPlotLine(line));
-      toast.success(`成功生成 ${newLines.length} 条剧情线`);
-      return newLines;
-    } catch (error) {
-      console.error('AI生成剧情线失败:', error);
-      toast.error('AI生成剧情线失败');
-      throw error;
-    }
-  }, [addPlotLine]);
-
   // 获取剧情线类型统计
   const getLineTypes = useCallback(async (projectId: string) => {
     try {
@@ -275,7 +244,6 @@ export function usePlotLineSync() {
     updatePlotLine: updatePlotLineData,
     deletePlotLine,
     reorderPlotLines,
-    generatePlotLines,
     getLineTypes,
     addCardsToLine,
     removeCardsFromLine,

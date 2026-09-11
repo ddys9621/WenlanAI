@@ -154,7 +154,11 @@ export interface AIJobState {
 
 export const AI_JOB_KIND_LABELS: Record<string, string> = {
   bridge_fill: '桥段填充',
+  bridge_expand: '桥段展开',
   character_generate: '角色生成',
+  organization_generate: '组织生成',
+  plot_lines_generate: '剧情线生成',
+  plot_cards_generate: '剧情卡生成',
 };
 
 export const kindLabel = (kind: string) => AI_JOB_KIND_LABELS[kind] ?? kind;

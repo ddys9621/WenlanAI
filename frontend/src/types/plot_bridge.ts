@@ -262,9 +262,9 @@ export interface ExpandAllBridgesRequest {
   model?: string;
 }
 
-/** 批量展开响应。 */
+/** 批量展开结果（后台任务 result 事件的 data；服务层汇总字典，没有 success 字段）。 */
 export interface ExpandAllBridgesResponse {
-  success: boolean;
+  success?: boolean;
   total: number;
   succeeded: string[];
   failed: Array<{ bridge_id: string; error: string }>;
