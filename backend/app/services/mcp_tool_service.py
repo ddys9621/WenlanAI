@@ -13,6 +13,7 @@ from app.models.mcp_plugin import MCPPlugin
 from app.mcp.registry import mcp_registry
 from app.mcp.config import mcp_config
 from app.logger import get_logger
+from app.services.generation_trace import current_trace, new_call_id, preview_args
 
 logger = get_logger(__name__)
 
@@ -469,6 +470,32 @@ class MCPToolService:
             return self._reload_locks[plugin_key]
 
     async def _call_tool_with_retry(
+        self,
+        user_id: str,
+        plugin_name: str,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        timeout: float
+    ) -> Any:
+        """带过程追踪的工具调用：绑定了 GenerationTrace 时发 tool_call running / done / error（重试细节仍在 inner）。"""
+        trace = current_trace()
+        if trace is None:
+            return await self._call_tool_with_retry_inner(user_id, plugin_name, tool_name, arguments, timeout)
+        call_id = new_call_id()
+        started = time.monotonic()
+        trace.tool_call(call_id, tool=tool_name, plugin=plugin_name, status="running", args_preview=preview_args(arguments))
+        try:
+            result = await self._call_tool_with_retry_inner(user_id, plugin_name, tool_name, arguments, timeout)
+        except BaseException as exc:  # noqa: BLE001 - 记录后原样抛出（含超时 / 取消）
+            trace.tool_call(call_id, tool=tool_name, plugin=plugin_name, status="error",
+                            elapsed_ms=(time.monotonic() - started) * 1000, error=str(exc))
+            raise
+        result_chars = len(json.dumps(result, ensure_ascii=False, default=str)) if result is not None else 0
+        trace.tool_call(call_id, tool=tool_name, plugin=plugin_name, status="done",
+                        elapsed_ms=(time.monotonic() - started) * 1000, result_chars=result_chars)
+        return result
+
+    async def _call_tool_with_retry_inner(
         self,
         user_id: str,
         plugin_name: str,

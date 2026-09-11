@@ -22,6 +22,8 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.services.generation_trace import GenerationTrace, bind_trace, reset_trace
+
 logger = logging.getLogger(__name__)
 
 # 只保留最新快照的事件类型（回放时不重播中间态）
@@ -218,6 +220,8 @@ class AIJobManager:
     # ---------------- runner ----------------
 
     async def _run(self, job: AIJob, runner: Runner) -> None:
+        # 绑定过程追踪：runner 内（含其 create_task 的子任务）调用的共享入口自动把 llm / tool_call / reference 写进任务日志
+        token = bind_trace(GenerationTrace(job.publish))
         try:
             result = await runner(job)
             if result is not None:
@@ -235,6 +239,8 @@ class AIJobManager:
             logger.error("[AIJob] %s(%s) 失败: %s", job.kind, job.id, exc, exc_info=True)
             job.publish({"type": "error", "error": f"{job.title}失败: {exc}", "code": 500})
             job.finish("error", str(exc))
+        finally:
+            reset_trace(token)
 
 
 class JobSession:

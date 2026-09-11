@@ -11,6 +11,7 @@ from app.models.project import Project
 from app.logger import get_logger
 from app.services.ai_service import ai_service
 from app.services.embedding_runtime import get_chroma_client, get_embedding_model
+from app.services.generation_trace import trace_reference
 
 logger = get_logger(__name__)
 
@@ -384,6 +385,12 @@ class WorldRuleService:
 
             parts.append("")  # 空行分隔
 
+        trace_reference(
+            "world_rules",
+            "世界规则（语义检索）",
+            [{"title": rule.name, "detail": category_names.get(rule.category, rule.category)} for rule in rules],
+            query=query[:80],
+        )
         return "\n".join(parts)
 
     async def generate_initial_rules_for_project(

@@ -31,6 +31,7 @@ from app.logger import get_logger
 from app.models.project_reference_pack import ProjectReferencePack
 from app.models.reference_pack import ReferencePack
 from app.services.ai_service import AIService
+from app.services.generation_trace import trace_reference
 from app.services.imitation_corpus import (
     ImitationCorpusRetriever,
     format_corpus_prompt,
@@ -174,6 +175,24 @@ class ReferenceBlock:
     @property
     def is_empty(self) -> bool:
         return not self.user_segment and not self.system_segment
+
+
+def trace_reference_block(block: "ReferenceBlock", *, scene: str) -> None:
+    """把本次实际生效的参考包上报给过程追踪（前端弹窗"参考了什么"面板）；没绑定追踪时 no-op。"""
+    if block.is_empty:
+        return
+    trace_reference(
+        "reference_pack",
+        "拆书参考包",
+        [
+            {"title": f"《{p['source_book_title']}》", "detail": "、".join(p["dimensions"]) or "—"}
+            for p in block.used_packs
+        ],
+        scene=scene,
+        strength=block.used_strength,
+        dimensions=list(block.used_dimensions),
+        chars=len(block.user_segment) + len(block.system_segment),
+    )
 
 
 # ============================================================
@@ -957,7 +976,7 @@ class ReferencePackInjector:
                 scene, ms_total, len(packs), used_dimensions,
             )
 
-        return ReferenceBlock(
+        block = ReferenceBlock(
             user_segment=user_segment,
             system_segment=system_segment,
             user_sections=ref_sections,
@@ -966,6 +985,8 @@ class ReferencePackInjector:
             used_strength=used_strength,
             debug_meta=debug_meta,
         )
+        trace_reference_block(block, scene=scene)
+        return block
 
     @staticmethod
     def _build_used_packs_meta(

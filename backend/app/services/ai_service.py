@@ -9,6 +9,7 @@ from openai import AsyncOpenAI
 from anthropic import AsyncAnthropic
 from app.config import settings as app_settings
 from app.logger import get_logger
+from app.services.generation_trace import current_trace, new_call_id
 import httpx
 import json
 
@@ -355,6 +356,61 @@ def _resolve_thinking_budget(
     return budget
 
 
+async def _traced_stream(inner: AsyncIterator[str], *, model: str, prompt_chars: int) -> AsyncGenerator[str, None]:
+    """给底层流套上过程追踪。
+
+    绑定了 GenerationTrace（后台任务里）时发 llm start / thinking / streaming / done / error；
+    没绑定则原样透传，零开销。reasoning 计数通过 _stream_reasoning_sink 观察钩子取得；若上层
+    （generate_text_stream_events 的生产者）已设置 sink，则串联调用、不抢占。
+    """
+    trace = current_trace()
+    if trace is None:
+        async for chunk in inner:
+            yield chunk
+        return
+
+    call_id = new_call_id()
+    started = time.monotonic()
+    content_chars = 0
+    reasoning_chars = 0
+    prev_sink = _stream_reasoning_sink.get()
+
+    def _sink(total: int) -> None:
+        nonlocal reasoning_chars
+        reasoning_chars = total
+        if prev_sink is not None:
+            prev_sink(total)
+        trace.llm(
+            call_id, "thinking" if content_chars == 0 else "streaming", model=model,
+            reasoning_chars=total, content_chars=content_chars, elapsed=time.monotonic() - started,
+        )
+
+    token = _stream_reasoning_sink.set(_sink)
+    trace.llm(call_id, "start", model=model, prompt_chars=prompt_chars)
+    try:
+        async for chunk in inner:
+            if chunk:
+                content_chars += len(chunk)
+                trace.llm(call_id, "streaming", model=model, reasoning_chars=reasoning_chars,
+                          content_chars=content_chars, elapsed=time.monotonic() - started)
+            yield chunk
+        trace.llm(call_id, "done", model=model, reasoning_chars=reasoning_chars, content_chars=content_chars,
+                  elapsed=time.monotonic() - started,
+                  finish_reason=_last_stream_finish_reason.get() or "stream_complete")
+    except asyncio.CancelledError:
+        raise
+    except BaseException as exc:  # noqa: BLE001 - 记录后原样抛出
+        trace.llm(call_id, "error", model=model, reasoning_chars=reasoning_chars, content_chars=content_chars,
+                  elapsed=time.monotonic() - started, error=str(exc))
+        raise
+    finally:
+        try:
+            _stream_reasoning_sink.reset(token)
+        except ValueError:
+            # 生成器在别的 Context 里被 aclose（如 GC 收尾）：token 不可用，直接恢复旧值
+            _stream_reasoning_sink.set(prev_sink)
+
+
 class AIService:
     """AI服务统一接口 - 支持从用户设置或全局配置初始化"""
 
@@ -551,20 +607,37 @@ class AIService:
         temperature = temperature if temperature is not None else self.default_temperature
         max_tokens = self.default_max_tokens
 
-        if provider == "openai":
-            return await self._generate_openai_with_tools(
-                prompt, model, temperature, max_tokens, system_prompt, tools, tool_choice,
-                response_format=response_format,
+        trace = current_trace()
+        call_id = new_call_id() if trace is not None else ""
+        started = time.monotonic()
+        if trace is not None:
+            trace.llm(call_id, "start", model=model, prompt_chars=len(prompt) + len(system_prompt or ""))
+        try:
+            if provider == "openai":
+                result = await self._generate_openai_with_tools(
+                    prompt, model, temperature, max_tokens, system_prompt, tools, tool_choice,
+                    response_format=response_format,
+                )
+            elif provider == "anthropic":
+                # Anthropic 不支持 response_format，需要 JSON 强制请使用 tool_use 模式
+                if response_format:
+                    logger.debug("Anthropic provider 忽略 response_format 参数")
+                result = await self._generate_anthropic_with_tools(
+                    prompt, model, temperature, max_tokens, system_prompt, tools, tool_choice
+                )
+            else:
+                raise ValueError(f"不支持的AI提供商: {provider}")
+        except Exception as exc:
+            if trace is not None:
+                trace.llm(call_id, "error", model=model, elapsed=time.monotonic() - started, error=str(exc))
+            raise
+        if trace is not None:
+            trace.llm(
+                call_id, "done", model=model, content_chars=len(result.get("content") or ""),
+                elapsed=time.monotonic() - started, finish_reason=result.get("finish_reason"),
+                tool_calls=len(result.get("tool_calls") or []),
             )
-        elif provider == "anthropic":
-            # Anthropic 不支持 response_format，需要 JSON 强制请使用 tool_use 模式
-            if response_format:
-                logger.debug("Anthropic provider 忽略 response_format 参数")
-            return await self._generate_anthropic_with_tools(
-                prompt, model, temperature, max_tokens, system_prompt, tools, tool_choice
-            )
-        else:
-            raise ValueError(f"不支持的AI提供商: {provider}")
+        return result
     
     async def generate_text_stream(
         self,
@@ -597,17 +670,13 @@ class AIService:
         max_tokens = self.default_max_tokens
 
         if provider == "openai":
-            async for chunk in self._generate_openai_stream(
-                prompt, model, temperature, max_tokens, system_prompt
-            ):
-                yield chunk
+            inner = self._generate_openai_stream(prompt, model, temperature, max_tokens, system_prompt)
         elif provider == "anthropic":
-            async for chunk in self._generate_anthropic_stream(
-                prompt, model, temperature, max_tokens, system_prompt
-            ):
-                yield chunk
+            inner = self._generate_anthropic_stream(prompt, model, temperature, max_tokens, system_prompt)
         else:
             raise ValueError(f"不支持的AI提供商: {provider}")
+        async for chunk in _traced_stream(inner, model=model, prompt_chars=len(prompt) + len(system_prompt or "")):
+            yield chunk
 
     async def generate_text_stream_collect(
         self,
