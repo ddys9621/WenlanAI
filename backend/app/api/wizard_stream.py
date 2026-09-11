@@ -27,9 +27,39 @@ from app.services.prompt_service import prompt_service
 from app.logger import get_logger
 from app.utils.role_type import normalize_role_type, is_protagonist_role
 from app.utils.sse_response import SSEResponse, create_sse_response
+from app.api.ai_jobs import job_sse_response
 from app.api.settings import get_user_ai_service
+from app.services.ai_jobs import AIJobConflictError, ai_jobs, job_session_factory
+from app.services.sse_job_adapter import make_sse_generator_runner
 router = APIRouter(prefix="/wizard-stream", tags=["项目创建向导(流式)"])
 logger = get_logger(__name__)
+
+WIZARD_CANCEL_MESSAGE = "已停止；本步已写入的数据保留，可重新生成"
+
+
+async def _start_wizard_job(request: Request, data: Dict[str, Any], *, kind: str, title: str, factory):
+    """向导一步 = 一个通用后台任务：生成器零改动，由 sse_job_adapter 转发事件（协议向后兼容：start / progress / result / done）。
+
+    同一项目四步共用互斥键 wizard:{project_id}（本来就是顺序执行）；重连 / 停止走 /api/ai-jobs/*。
+    """
+    user_id = getattr(request.state, "user_id", None)
+    if user_id:
+        data["user_id"] = user_id
+    project_id = data.get("project_id")
+    try:
+        job = await ai_jobs.start(
+            kind=kind,
+            title=title,
+            user_id=user_id or "system",
+            project_id=project_id,
+            scope=f"wizard:{project_id or user_id}",
+            runner=make_sse_generator_runner(factory, session_factory=job_session_factory(user_id or "system")),
+            cancel_message=WIZARD_CANCEL_MESSAGE,
+            meta={"step": kind, "mode": data.get("mode")},
+        )
+    except AIJobConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return job_sse_response(job)
 
 
 # ============================================================
@@ -662,22 +692,18 @@ async def world_building_generator(
         yield await SSEResponse.send_error(f"生成失败: {str(e)}")
 
 
-@router.post("/world-building", summary="流式生成世界构建")
+@router.post("/world-building", summary="流式生成世界构建（后台任务 + SSE）")
 async def generate_world_building_stream(
     request: Request,
     data: Dict[str, Any],
-    db: AsyncSession = Depends(get_db),
     user_ai_service: AIService = Depends(get_user_ai_service)
 ):
-    """
-    使用SSE流式生成世界构建，避免超时
-    前端使用EventSource接收实时进度和结果
-    """
-    # 从中间件注入user_id到data中
-    if hasattr(request.state, 'user_id'):
-        data['user_id'] = request.state.user_id
-    
-    return create_sse_response(world_building_generator(data, db, user_ai_service))
+    """向导步骤 1：世界构建（create / regenerate）。跑在通用后台任务上：切页 / 刷新不中断，托盘可见。"""
+    title = "向导：重新生成世界构建" if data.get("mode") == "regenerate" else "向导：生成世界构建"
+    return await _start_wizard_job(
+        request, data, kind="wizard_world_building", title=title,
+        factory=lambda db: world_building_generator(data, db, user_ai_service),
+    )
 
 
 async def characters_generator(
@@ -1338,22 +1364,17 @@ async def characters_generator(
         yield await SSEResponse.send_error(f"生成失败: {str(e)}")
 
 
-@router.post("/characters", summary="流式批量生成角色")
+@router.post("/characters", summary="流式批量生成角色（后台任务 + SSE）")
 async def generate_characters_stream(
     request: Request,
     data: Dict[str, Any],
-    db: AsyncSession = Depends(get_db),
     user_ai_service: AIService = Depends(get_user_ai_service)
 ):
-    """
-    使用SSE流式批量生成角色，避免超时
-    支持MCP工具增强
-    """
-    # 从中间件注入user_id到data中
-    if hasattr(request.state, 'user_id'):
-        data['user_id'] = request.state.user_id
-    
-    return create_sse_response(characters_generator(data, db, user_ai_service))
+    """向导步骤 2：批量生成角色（支持 MCP 工具增强）。跑在通用后台任务上。"""
+    return await _start_wizard_job(
+        request, data, kind="wizard_characters", title="向导：生成角色",
+        factory=lambda db: characters_generator(data, db, user_ai_service),
+    )
 
 
 def _parse_high_level_outline(ai_response: str) -> dict:
@@ -1762,28 +1783,22 @@ async def outline_generator(
         yield await SSEResponse.send_error(f"生成失败: {str(e)}")
 
 
-@router.post("/outline", summary="流式生成完整大纲")
+@router.post("/outline", summary="流式生成完整大纲（后台任务 + SSE）")
 async def generate_outline_stream(
     request: Request,
     data: Dict[str, Any],
-    db: AsyncSession = Depends(get_db),
     user_ai_service: AIService = Depends(get_user_ai_service)
 ):
-    """
-    使用SSE流式生成高层故事大纲，避免超时
-    支持MCP工具增强
-    """
-    # 从中间件注入user_id到data中
-    if hasattr(request.state, 'user_id'):
-        data['user_id'] = request.state.user_id
-    
+    """向导步骤 3：高层故事大纲（支持 MCP 工具增强）。跑在通用后台任务上。"""
     # 记录用户AI服务配置信息（用于排查）
-    logger.info(f"故事大纲生成开始 - 用户: {data.get('user_id', 'unknown')}")
+    logger.info(f"故事大纲生成开始 - 用户: {getattr(request.state, 'user_id', 'unknown')}")
     logger.info(f"  - AI提供商: {user_ai_service.api_provider}")
     logger.info(f"  - 默认模型: {user_ai_service.default_model}")
     logger.info(f"  - 请求参数: provider={data.get('provider')}, model={data.get('model')}")
-    
-    return create_sse_response(outline_generator(data, db, user_ai_service))
+    return await _start_wizard_job(
+        request, data, kind="wizard_outline", title="向导：生成故事大纲",
+        factory=lambda db: outline_generator(data, db, user_ai_service),
+    )
 
 
 class _PlotPipelineError(Exception):
@@ -1993,18 +2008,18 @@ def _log_detached_pipeline_result(task: "asyncio.Task") -> None:
         logger.info(f"剧情线后台流水线完成 - 主线《{main.get('title')}》，支线 {len(result.get('sub_lines') or [])} 条")
 
 
-@router.post("/plot-lines", summary="流式生成剧情线（向导步骤 4）")
+@router.post("/plot-lines", summary="流式生成剧情线（向导步骤 4，后台任务 + SSE）")
 async def generate_plot_lines_stream(
     request: Request,
     data: Dict[str, Any],
-    db: AsyncSession = Depends(get_db),
     user_ai_service: AIService = Depends(get_user_ai_service)
 ):
-    """向导步骤 4：主线 ×1（预计章节数 = chapter_count）+ 支线 ×sub_line_count，含节点。"""
-    if hasattr(request.state, 'user_id'):
-        data['user_id'] = request.state.user_id
-    logger.info(f"剧情线生成开始 - 用户: {data.get('user_id', 'unknown')}, 项目: {data.get('project_id')}")
-    return create_sse_response(plot_lines_generator(data, db, user_ai_service))
+    """向导步骤 4：主线 ×1（预计章节数 = chapter_count）+ 支线 ×sub_line_count，含节点。跑在通用后台任务上。"""
+    logger.info(f"剧情线生成开始 - 用户: {getattr(request.state, 'user_id', 'unknown')}, 项目: {data.get('project_id')}")
+    return await _start_wizard_job(
+        request, data, kind="wizard_plot_lines", title="向导：生成剧情线",
+        factory=lambda db: plot_lines_generator(data, db, user_ai_service),
+    )
 
 
 async def cleanup_wizard_generator(
