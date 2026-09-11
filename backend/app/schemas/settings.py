@@ -14,6 +14,15 @@ class SettingsBase(BaseModel):
     llm_model: Optional[str] = Field(default="gpt-4", description="模型名称")
     temperature: Optional[float] = Field(default=0.7, ge=0.0, le=2.0, description="温度参数")
     max_tokens: Optional[int] = Field(default=2000, ge=1, description="最大token数")
+    reasoning_enabled: Optional[bool] = Field(default=False, description="是否启用思考/推理模式（全局生效）")
+    reasoning_effort: Optional[str] = Field(
+        default="medium",
+        description="统一思考强度档位，同时作为 OpenAI reasoning_effort：none|minimal|low|medium|high|xhigh|max",
+    )
+    thinking_budget_tokens: Optional[int] = Field(
+        default=None, ge=0,
+        description="Anthropic 思考预算 budget_tokens；为空则按强度档位自动换算，须 ≥1024 且 < max_tokens",
+    )
     preferences: Optional[str] = Field(default=None, description="其他偏好设置(JSON)")
 
 

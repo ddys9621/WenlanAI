@@ -297,9 +297,73 @@ def _is_max_tokens_unsupported_error(body_text: str) -> bool:
     )
 
 
+# ============================================================
+# 思考 / 推理强度（reasoning effort / extended thinking）
+# ----------------------------------------------------------------
+# 统一档位 → 两家协议的落地方式（权威接口，2026-09 经 context7 核对）：
+# - OpenAI（/chat/completions）：请求体加 reasoning_effort，取值
+#   none|minimal|low|medium|high|xhigh|max，仅推理模型（GPT-5 / o 系列）支持。
+# - Anthropic（messages）：thinking={"type":"enabled","budget_tokens":N}，
+#   N 必须 >=1024 且 < max_tokens，且会计入 max_tokens；启用思考时
+#   temperature 必须为默认值 1（不能传自定义温度），故本模块启用时直接丢弃温度。
+# 用户可在设置里选统一档位（低/中/高…），也可对 Anthropic 直接手填 budget_tokens。
+# ============================================================
+
+# OpenAI reasoning_effort 合法取值（reasoning_effort 直接透传这些字符串）
+VALID_REASONING_EFFORTS: tuple[str, ...] = (
+    "none", "minimal", "low", "medium", "high", "xhigh", "max",
+)
+
+# 统一档位 → Anthropic budget_tokens 的换算（会再按 max_tokens 夹取）
+_REASONING_EFFORT_TO_BUDGET: Dict[str, int] = {
+    "none": 1024,
+    "minimal": 1024,
+    "low": 4096,
+    "medium": 8192,
+    "high": 16384,
+    "xhigh": 24576,
+    "max": 32000,
+}
+
+
+def _normalize_reasoning_effort(effort: Optional[str]) -> str:
+    """归一化思考强度档位；非法值回落 medium。"""
+    e = (effort or "").strip().lower()
+    return e if e in VALID_REASONING_EFFORTS else "medium"
+
+
+def _resolve_thinking_budget(
+    effort: Optional[str], explicit_budget: Optional[int], max_tokens: int
+) -> Optional[int]:
+    """把「统一档位 / 手填预算」解析成 Anthropic 合法的 budget_tokens。
+
+    规则（对齐官方约束 budget>=1024 且 budget<max_tokens）：
+    - explicit_budget（用户手填）优先，否则按档位换算
+    - 下界夹到 1024
+    - 上界夹到 max_tokens-1（thinking 计入 max_tokens，需给正文留出空间）
+    - 若 max_tokens 太小（<=1024）无法同时满足两个约束 → 返回 None（本次不启用思考）
+    """
+    if explicit_budget is not None and explicit_budget > 0:
+        budget = int(explicit_budget)
+    else:
+        budget = _REASONING_EFFORT_TO_BUDGET.get(_normalize_reasoning_effort(effort), 8192)
+    budget = max(budget, 1024)
+    if max_tokens and budget >= max_tokens:
+        budget = max_tokens - 1
+    if budget < 1024:
+        return None
+    return budget
+
+
 class AIService:
     """AI服务统一接口 - 支持从用户设置或全局配置初始化"""
-    
+
+    # 类级默认值：__init__ 会用实例值覆盖；测试里用 AIService.__new__(...) 构造的
+    # "裸实例"（不走 __init__）也能安全落到"未启用思考"的默认，避免 AttributeError。
+    reasoning_enabled: bool = False
+    reasoning_effort: str = "medium"
+    thinking_budget_tokens: Optional[int] = None
+
     def __init__(
         self,
         api_provider: Optional[str] = None,
@@ -307,7 +371,10 @@ class AIService:
         api_base_url: Optional[str] = None,
         default_model: Optional[str] = None,
         default_temperature: Optional[float] = None,
-        default_max_tokens: Optional[int] = None
+        default_max_tokens: Optional[int] = None,
+        reasoning_enabled: Optional[bool] = None,
+        reasoning_effort: Optional[str] = None,
+        thinking_budget_tokens: Optional[int] = None,
     ):
         """
         初始化AI客户端（优化并发性能）
@@ -319,6 +386,9 @@ class AIService:
             default_model: 默认模型，为None时使用全局配置
             default_temperature: 默认温度，为None时使用全局配置
             default_max_tokens: 默认最大tokens，为None时使用全局配置
+            reasoning_enabled: 是否启用思考/推理，为None时使用全局配置
+            reasoning_effort: 统一思考强度档位 / OpenAI reasoning_effort，为None时使用全局配置
+            thinking_budget_tokens: Anthropic 思考预算，为None时按档位自动换算
         """
         # 保存用户设置或使用全局配置
         # provider 先归一化（custom 等 OpenAI 兼容标识 → "openai"），
@@ -333,6 +403,20 @@ class AIService:
         # 使用 is not None 判断，允许 temperature=0 的有效值
         self.default_temperature = default_temperature if default_temperature is not None else app_settings.default_temperature
         self.default_max_tokens = default_max_tokens if default_max_tokens is not None else app_settings.default_max_tokens
+
+        # 思考/推理强度（全局生效）：4 个生成入口都会读取这三个字段
+        self.reasoning_enabled = (
+            reasoning_enabled if reasoning_enabled is not None
+            else app_settings.default_reasoning_enabled
+        )
+        self.reasoning_effort = _normalize_reasoning_effort(
+            reasoning_effort if reasoning_effort is not None
+            else app_settings.default_reasoning_effort
+        )
+        self.thinking_budget_tokens = (
+            thinking_budget_tokens if thinking_budget_tokens is not None
+            else app_settings.default_thinking_budget_tokens
+        )
 
         # 标记资源是否已关闭
         self._closed = False
@@ -696,6 +780,11 @@ class AIService:
                 "max_tokens": max_tokens
             }
 
+            # 思考/推理强度：启用时透传 reasoning_effort（仅推理模型 GPT-5 / o 系列生效）
+            if self.reasoning_enabled:
+                payload["reasoning_effort"] = self.reasoning_effort
+                logger.info(f"  - reasoning_effort: {self.reasoning_effort}")
+
             # 响应格式约束（DeepSeek/Qwen/OpenAI 兼容）：
             # 传 {"type": "json_object"} 后模型必返合法 JSON，大幅减少未转义引号等问题
             if response_format:
@@ -810,18 +899,39 @@ class AIService:
             kwargs = {
                 "model": model,
                 "max_tokens": max_tokens,
-                "temperature": temperature,
                 "messages": [{"role": "user", "content": prompt}]
             }
-            
+
+            # 思考模式：启用且能满足 budget 约束时加 thinking；官方要求此时 temperature 必须为默认(1)，故不再传温度
+            thinking_budget = (
+                _resolve_thinking_budget(self.reasoning_effort, self.thinking_budget_tokens, max_tokens)
+                if self.reasoning_enabled else None
+            )
+            if thinking_budget is not None:
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
+                logger.info(f"  - thinking: enabled, budget_tokens={thinking_budget}（温度已按官方要求置默认）")
+            else:
+                if self.reasoning_enabled:
+                    logger.warning(
+                        f"⚠️ 已启用思考但 max_tokens({max_tokens}) 无法容纳 budget_tokens(>=1024)，本次跳过思考"
+                    )
+                kwargs["temperature"] = temperature
+
             if system_prompt:
                 kwargs["system"] = system_prompt
             
             # 添加工具参数
             if tools:
                 kwargs["tools"] = tools
+                thinking_on = "thinking" in kwargs
                 if tool_choice == "required":
-                    kwargs["tool_choice"] = {"type": "any"}
+                    if thinking_on:
+                        # Anthropic 约束：扩展思考下不支持强制工具（any / 指定工具），必须 auto，
+                        # 否则接口 400。此处自动降级，保证 MCP + Claude + 思考三者可共存。
+                        kwargs["tool_choice"] = {"type": "auto"}
+                        logger.info("  - thinking 已启用：tool_choice 由 required 降级为 auto（Anthropic 约束）")
+                    else:
+                        kwargs["tool_choice"] = {"type": "any"}
                 elif tool_choice == "auto":
                     kwargs["tool_choice"] = {"type": "auto"}
             
@@ -895,6 +1005,11 @@ class AIService:
             "max_tokens": max_tokens,
             "stream": True
         }
+
+        # 思考/推理强度：启用时透传 reasoning_effort（仅推理模型 GPT-5 / o 系列生效）
+        if self.reasoning_enabled:
+            payload["reasoning_effort"] = self.reasoning_effort
+            logger.info(f"  - reasoning_effort: {self.reasoning_effort}")
 
         max_tokens_swapped = False
 
@@ -1019,9 +1134,24 @@ class AIService:
         stream_kwargs: Dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
-            "temperature": temperature,
             "messages": [{"role": "user", "content": prompt}],
         }
+
+        # 思考模式：启用且能满足 budget 约束时加 thinking；官方要求此时 temperature 必须为默认(1)，故不再传温度
+        thinking_budget = (
+            _resolve_thinking_budget(self.reasoning_effort, self.thinking_budget_tokens, max_tokens)
+            if self.reasoning_enabled else None
+        )
+        if thinking_budget is not None:
+            stream_kwargs["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
+            logger.info(f"  - thinking: enabled, budget_tokens={thinking_budget}（温度已按官方要求置默认）")
+        else:
+            if self.reasoning_enabled:
+                logger.warning(
+                    f"⚠️ 已启用思考但 max_tokens({max_tokens}) 无法容纳 budget_tokens(>=1024)，本次跳过思考"
+                )
+            stream_kwargs["temperature"] = temperature
+
         # 官方语义：system 可省略；不要传空串占位
         if system_prompt:
             stream_kwargs["system"] = system_prompt
@@ -1271,7 +1401,10 @@ def create_user_ai_service(
     api_base_url: str,
     model_name: str,
     temperature: float,
-    max_tokens: int
+    max_tokens: int,
+    reasoning_enabled: Optional[bool] = None,
+    reasoning_effort: Optional[str] = None,
+    thinking_budget_tokens: Optional[int] = None,
 ) -> AIService:
     """
     根据用户设置创建AI服务实例
@@ -1283,6 +1416,9 @@ def create_user_ai_service(
         model_name: 模型名称
         temperature: 温度参数
         max_tokens: 最大tokens
+        reasoning_enabled: 是否启用思考/推理（全局生效）
+        reasoning_effort: 统一思考强度档位 / OpenAI reasoning_effort
+        thinking_budget_tokens: Anthropic 思考预算（空=按档位自动换算）
         
     Returns:
         AIService实例
@@ -1293,5 +1429,8 @@ def create_user_ai_service(
         api_base_url=api_base_url,
         default_model=model_name,
         default_temperature=temperature,
-        default_max_tokens=max_tokens
+        default_max_tokens=max_tokens,
+        reasoning_enabled=reasoning_enabled,
+        reasoning_effort=reasoning_effort,
+        thinking_budget_tokens=thinking_budget_tokens,
     )

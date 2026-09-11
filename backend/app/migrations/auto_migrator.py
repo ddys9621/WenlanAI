@@ -475,6 +475,30 @@ PROJECT_ID_INDEX_TABLES: tuple[str, ...] = (
 )
 
 
+async def ensure_settings_reasoning_columns(engine: AsyncEngine):
+    """Ensure thinking/reasoning columns exist on settings table（思考强度全局设置）。
+
+    新增 3 列（旧库升级，均带默认值/可空，零数据迁移风险）：
+    - reasoning_enabled BOOLEAN NOT NULL DEFAULT 0  是否启用思考/推理
+    - reasoning_effort  VARCHAR(20) DEFAULT 'medium' 统一档位 / OpenAI reasoning_effort
+    - thinking_budget_tokens INTEGER NULL           Anthropic budget_tokens（空=按档位自动）
+    """
+    reasoning_columns = [
+        ("reasoning_enabled", "BOOLEAN NOT NULL DEFAULT 0"),
+        ("reasoning_effort", "VARCHAR(20) DEFAULT 'medium'"),
+        ("thinking_budget_tokens", "INTEGER"),
+    ]
+    async with engine.begin() as conn:
+        for col_name, col_def in reasoning_columns:
+            if not await column_exists(conn, "settings", col_name):
+                logger.info("🔧 Adding settings.%s column (思考强度)", col_name)
+                await apply_sql(conn, [
+                    f"ALTER TABLE settings ADD COLUMN {col_name} {col_def}",
+                ])
+            else:
+                logger.info("✅ settings.%s already exists", col_name)
+
+
 async def ensure_project_id_indexes(engine: AsyncEngine):
     """热表 project_id 索引：几乎所有查询都按 project_id 过滤，旧库此前全表扫描。
 
@@ -505,6 +529,7 @@ async def run_auto_migrations(engine: AsyncEngine):
         await ensure_plot_bridge_secondary_beats_column(engine)  # 工程化桥段流水线：副线任务
         await ensure_plot_bridge_generation_meta_column(engine)  # 桥段填充溯源
         await ensure_character_aliases_column(engine)  # 角色曾用名（改名级联兜底）
+        await ensure_settings_reasoning_columns(engine)  # 思考强度全局设置字段
         await ensure_project_id_indexes(engine)  # 热表 project_id 索引（旧库补建）
         logger.info("✅ Auto migrations finished")
     except Exception as exc:

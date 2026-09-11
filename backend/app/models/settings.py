@@ -1,5 +1,5 @@
 """设置数据模型"""
-from sqlalchemy import Column, String, Text, Float, Integer, DateTime, Index
+from sqlalchemy import Column, String, Text, Float, Integer, Boolean, DateTime, Index
 from sqlalchemy.sql import func
 from app.db_base import Base
 import uuid
@@ -17,6 +17,10 @@ class Settings(Base):
     llm_model = Column(String(100), default="gpt-4", comment="模型名称")
     temperature = Column(Float, default=0.7, comment="温度参数")
     max_tokens = Column(Integer, default=2000, comment="最大token数")
+    # 思考/推理强度（全局生效）：OpenAI 走 reasoning_effort，Anthropic 走 thinking.budget_tokens
+    reasoning_enabled = Column(Boolean, nullable=False, default=False, comment="是否启用思考/推理模式")
+    reasoning_effort = Column(String(20), default="medium", comment="统一思考强度档位/OpenAI reasoning_effort: none|minimal|low|medium|high|xhigh|max")
+    thinking_budget_tokens = Column(Integer, nullable=True, comment="Anthropic 思考预算 budget_tokens；为空则按强度档位自动换算")
     preferences = Column(Text, comment="其他偏好设置(JSON)")
     created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间")

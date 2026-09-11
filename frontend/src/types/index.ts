@@ -95,6 +95,9 @@ export interface AnnouncementUpdate extends Partial<AnnouncementContent> {
   end_at?: string;
 }
 
+// 思考/推理强度档位（统一档位，同时作为 OpenAI reasoning_effort 的取值）
+export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
 // 设置类型定义
 export interface Settings {
   id: string;
@@ -105,6 +108,9 @@ export interface Settings {
   llm_model: string;
   temperature: number;
   max_tokens: number;
+  reasoning_enabled: boolean;
+  reasoning_effort: ReasoningEffort;
+  thinking_budget_tokens?: number | null;
   preferences?: string;
   created_at: string;
   updated_at: string;
@@ -117,6 +123,9 @@ export interface SettingsUpdate {
   llm_model?: string;
   temperature?: number;
   max_tokens?: number;
+  reasoning_enabled?: boolean;
+  reasoning_effort?: ReasoningEffort;
+  thinking_budget_tokens?: number | null;
   preferences?: string;
 }
 

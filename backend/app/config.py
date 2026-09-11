@@ -74,6 +74,10 @@ class Settings(BaseSettings):
     default_model: str = "gpt-4"
     default_temperature: float = 0.7
     default_max_tokens: int = 2000
+    # 思考/推理强度默认值（新用户首次同步到 Settings；默认关闭以兼容非推理模型）
+    default_reasoning_enabled: bool = False
+    default_reasoning_effort: str = "medium"  # none|minimal|low|medium|high|xhigh|max
+    default_thinking_budget_tokens: Optional[int] = None  # Anthropic：空=按档位自动换算
 
     # 章节分析任务超时配置
     analysis_task_running_timeout_seconds: int = 300  # running 超过 5 分钟才视为卡死

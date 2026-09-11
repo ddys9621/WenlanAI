@@ -31,6 +31,9 @@ def read_env_defaults() -> Dict[str, Any]:
         "llm_model": app_settings.default_model,
         "temperature": app_settings.default_temperature,
         "max_tokens": app_settings.default_max_tokens,
+        "reasoning_enabled": app_settings.default_reasoning_enabled,
+        "reasoning_effort": app_settings.default_reasoning_effort,
+        "thinking_budget_tokens": app_settings.default_thinking_budget_tokens,
     }
 
 
@@ -59,14 +62,17 @@ async def get_user_ai_service(
         await db.refresh(settings)
         logger.info(f"用户 {user.user_id} 首次使用AI服务，已从.env同步设置到数据库")
     
-    # 使用用户设置创建AI服务实例
+    # 使用用户设置创建AI服务实例（思考强度随之全局生效）
     return create_user_ai_service(
         api_provider=settings.api_provider,
         api_key=settings.api_key,
         api_base_url=settings.api_base_url or "",
         model_name=settings.llm_model,
         temperature=settings.temperature,
-        max_tokens=settings.max_tokens
+        max_tokens=settings.max_tokens,
+        reasoning_enabled=settings.reasoning_enabled,
+        reasoning_effort=settings.reasoning_effort,
+        thinking_budget_tokens=settings.thinking_budget_tokens,
     )
 
 
