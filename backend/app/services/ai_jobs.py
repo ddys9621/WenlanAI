@@ -210,9 +210,12 @@ class AIJobManager:
             yield {"type": "error", "error": "任务不存在或已过期", "code": 404, "seq": 0}
             return
         last = since
+        # log 只追加且 seq 单调递增：用游标续读，避免每次唤醒都全量扫描（正文任务一章就有几百条 content）
+        log_idx = next((i for i, e in enumerate(job.log) if e["seq"] > since), len(job.log))
         while True:
             waiter = job._changed
-            pending = [e for e in job.log if e["seq"] > last]
+            pending = job.log[log_idx:]
+            log_idx = len(job.log)
             pending += [e for e in job.live.values() if e["seq"] > last]
             pending.sort(key=lambda e: e["seq"])
             terminal = job.is_terminal

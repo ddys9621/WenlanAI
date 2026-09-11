@@ -1,7 +1,7 @@
 /** 页面横幅：当前项目里正在后台运行的 AI 任务（弹窗最小化后仍能看到进度、重新打开或停止） */
 import { Loader2 } from 'lucide-react';
 import { useAIJobsStore, useRunningAIJobs } from '@/store/aiJobsStore';
-import type { AIJobState } from '@/types/ai_job';
+import type { AIJobSummary } from '@/types/ai_job';
 import { formatElapsed, llmSummary } from './format';
 import { useElapsedSeconds } from './useElapsedSeconds';
 
@@ -19,7 +19,7 @@ export function AIJobBanner({ projectId, kinds }: { projectId?: string | null; k
   );
 }
 
-function BannerRow({ job }: { job: AIJobState }) {
+function BannerRow({ job }: { job: AIJobSummary }) {
   const openModal = useAIJobsStore((s) => s.openModal);
   const cancel = useAIJobsStore((s) => s.cancel);
   const elapsed = useElapsedSeconds(job.startedAt, true, null);

@@ -67,15 +67,6 @@ export interface BridgeGenerationMeta {
   warnings: string[];
 }
 
-/** fill-stream 的 meta 事件（每个子批一次） */
-export interface FillMetaEvent {
-  type: 'meta';
-  beat_index: number;
-  bridge_numbers: number[];
-  provenance: BridgeGenerationMeta;
-  seq?: number;
-}
-
 /** 打字机快照：LLM 已写出的字段（半截 JSON 容错解析结果） */
 export type PartialBridge = { bridge_number: number } & Partial<
   Pick<

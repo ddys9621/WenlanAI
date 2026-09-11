@@ -177,17 +177,6 @@ def trace_reference(kind: str, label: str, items: Iterable[dict[str, Any]], **ex
         trace.reference(kind, label, items, **extra)
 
 
-def trace_tool_call(call_id: str, **kw: Any) -> None:
-    trace = current_trace()
-    if trace is not None:
-        trace.tool_call(call_id, **kw)
-
-
-def trace_llm(call_id: str, phase: str, **kw: Any) -> bool:
-    trace = current_trace()
-    return trace.llm(call_id, phase, **kw) if trace is not None else False
-
-
 class StageTimer:
     """线性代码用的显式阶段计时器（长函数里逐段 `async with` 会导致大面积重缩进时用它）。
 

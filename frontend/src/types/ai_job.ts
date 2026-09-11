@@ -154,6 +154,19 @@ export interface AIJobState {
   connection: AIJobConnection;
 }
 
+/**
+ * 任务摘要：横幅 / 托盘 / 页面列表只需要这些字段。
+ * 不含 content / stages / toolCalls / references / result，正文任务每秒几十条 content 事件就不会触发它们重渲染。
+ */
+export type AIJobSummary = Pick<
+  AIJobState,
+  'id' | 'kind' | 'title' | 'projectId' | 'meta' | 'status' | 'startedAt' | 'finishedAt' | 'progress' | 'wordCount' | 'llm' | 'error' | 'connection'
+>;
+
+export const AI_JOB_SUMMARY_KEYS: readonly (keyof AIJobSummary)[] = [
+  'id', 'kind', 'title', 'projectId', 'meta', 'status', 'startedAt', 'finishedAt', 'progress', 'wordCount', 'llm', 'error', 'connection',
+];
+
 export const AI_JOB_KIND_LABELS: Record<string, string> = {
   bridge_fill: '桥段填充',
   bridge_expand: '桥段展开',

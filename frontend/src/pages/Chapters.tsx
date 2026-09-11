@@ -519,7 +519,7 @@ export default function Chapters() {
       chapterTitle: job.title,
       progress: job.progress?.pct ?? 0,
       message: job.progress?.message ?? '正在生成…',
-      content: job.content,
+      content: useAIJobsStore.getState().jobs[job.id]?.content ?? '',
       mode: 'single',
     });
     void waitForAIJob(job.id)

@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { CheckCircle2, Loader2, Sparkles, Square, X, XCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAIJobsStore, useAllAIJobs } from '@/store/aiJobsStore';
-import { kindLabel, type AIJobState } from '@/types/ai_job';
+import { kindLabel, type AIJobSummary } from '@/types/ai_job';
 import { formatElapsed } from './format';
 
 export function AIJobTray() {
@@ -53,7 +53,7 @@ export function AIJobTray() {
   );
 }
 
-function TrayRow({ job, onOpened }: { job: AIJobState; onOpened: () => void }) {
+function TrayRow({ job, onOpened }: { job: AIJobSummary; onOpened: () => void }) {
   const openModal = useAIJobsStore((s) => s.openModal);
   const cancel = useAIJobsStore((s) => s.cancel);
   const dismiss = useAIJobsStore((s) => s.dismiss);

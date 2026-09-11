@@ -8,12 +8,13 @@
  * - 连接层中断（刷新 / 代理掐断）≠ 任务失败：用 lastSeq 重连 /api/ai-jobs/{id}/events
  * - 托盘 × （dismiss）同时让后端移除该终态任务：否则刷新后 syncFromServer 会把保留期内的它同步回来
  * - 监听者 / 定时器不放进 zustand state（避免无意义的重渲染）
+ * - 横幅 / 托盘 / 页面列表通过摘要选择器订阅（AIJobSummary + 判等），正文 content 事件不会让它们重渲染
  */
-import { useMemo } from 'react';
+import { useMemo, useRef, useSyncExternalStore } from 'react';
 import { toast } from 'sonner';
 import { create } from 'zustand';
 import { aiJobsApi } from '@/services/aiJobsApi';
-import type { AIJobSnapshot, AIJobState } from '@/types/ai_job';
+import { AI_JOB_SUMMARY_KEYS, type AIJobSnapshot, type AIJobState, type AIJobSummary } from '@/types/ai_job';
 import { applyEvent, createJobState, fromSnapshot, isTerminal } from '@/utils/aiJobReducer';
 import type { SSEClientOptions, SSEMessage } from '@/utils/sseClient';
 
@@ -320,29 +321,56 @@ export async function runAIJob<T = unknown>(
 /** 页面级：按 id 取任务状态（不存在 / null → null） */
 export const useAIJob = (jobId: string | null) => useAIJobsStore((s) => (jobId ? s.jobs[jobId] ?? null : null));
 
-const byRunningThenNewest = (a: AIJobState, b: AIJobState) =>
+const byRunningThenNewest = (a: AIJobSummary, b: AIJobSummary) =>
   Number(isTerminal(a)) - Number(isTerminal(b)) || b.startedAt - a.startedAt;
 
-/** 某项目正在运行的任务（横幅用）；kinds 可选过滤 */
-export function useRunningAIJobs(projectId?: string | null, kinds?: string[]) {
-  const jobs = useAIJobsStore((s) => s.jobs);
-  const kindKey = kinds?.join('|') ?? '';
-  return useMemo(
-    () =>
-      Object.values(jobs)
-        .filter(
-          (j) =>
-            j.status === 'running' &&
-            (!projectId || j.projectId === projectId) &&
-            (!kindKey || kindKey.split('|').includes(j.kind)),
-        )
-        .sort(byRunningThenNewest),
-    [jobs, projectId, kindKey],
-  );
+const toSummary = (job: AIJobState): AIJobSummary => {
+  const summary = {} as Record<string, unknown>;
+  for (const key of AI_JOB_SUMMARY_KEYS) summary[key] = job[key];
+  return summary as unknown as AIJobSummary;
+};
+
+/** 摘要字段逐个引用判等：reducer 只在对应事件到来时才新建 progress / llm / meta 对象，所以 content 事件不会让判等失败 */
+const summaryEqual = (a: AIJobSummary, b: AIJobSummary) => AI_JOB_SUMMARY_KEYS.every((key) => a[key] === b[key]);
+export const summariesEqual = (a: AIJobSummary[], b: AIJobSummary[]) =>
+  a.length === b.length && a.every((job, i) => summaryEqual(job, b[i]));
+
+type JobsState = Pick<AIJobsState, 'jobs'>;
+
+export function selectRunningSummaries(state: JobsState, projectId?: string | null, kinds?: readonly string[]): AIJobSummary[] {
+  return Object.values(state.jobs)
+    .filter((j) => j.status === 'running' && (!projectId || j.projectId === projectId) && (!kinds?.length || kinds.includes(j.kind)))
+    .sort(byRunningThenNewest)
+    .map(toSummary);
 }
 
-/** 全部任务（托盘用）：running 优先，其次开始时间倒序 */
-export function useAllAIJobs() {
-  const jobs = useAIJobsStore((s) => s.jobs);
-  return useMemo(() => Object.values(jobs).sort(byRunningThenNewest), [jobs]);
+export function selectAllSummaries(state: JobsState): AIJobSummary[] {
+  return Object.values(state.jobs).sort(byRunningThenNewest).map(toSummary);
+}
+
+/** 带自定义判等的订阅：判等相同就复用上一次的引用，React 才不会重渲染（zustand v5 默认只做 Object.is） */
+function useSummaries(selector: (state: JobsState) => AIJobSummary[]): AIJobSummary[] {
+  const cache = useRef<AIJobSummary[] | null>(null);
+  const getSnapshot = () => {
+    const next = selector(useAIJobsStore.getState());
+    if (cache.current && summariesEqual(cache.current, next)) return cache.current;
+    cache.current = next;
+    return next;
+  };
+  return useSyncExternalStore(useAIJobsStore.subscribe, getSnapshot, getSnapshot);
+}
+
+/** 某项目正在运行的任务摘要（横幅 / 页面列表用）；kinds 可选过滤。只在摘要变化时触发重渲染 */
+export function useRunningAIJobs(projectId?: string | null, kinds?: readonly string[]): AIJobSummary[] {
+  const kindKey = kinds?.join('|') ?? '';
+  const selector = useMemo(() => {
+    const kindList = kindKey ? kindKey.split('|') : undefined;
+    return (state: JobsState) => selectRunningSummaries(state, projectId, kindList);
+  }, [projectId, kindKey]);
+  return useSummaries(selector);
+}
+
+/** 全部任务摘要（托盘用）：running 优先，其次开始时间倒序 */
+export function useAllAIJobs(): AIJobSummary[] {
+  return useSummaries(selectAllSummaries);
 }

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AIJobSnapshot } from '@/types/ai_job';
 import type { SSEClientOptions, SSEMessage } from '@/utils/sseClient';
-import { createJobState } from '@/utils/aiJobReducer';
+import { applyEvent, createJobState } from '@/utils/aiJobReducer';
 
 vi.mock('sonner', () => ({ toast: { error: vi.fn(), info: vi.fn(), success: vi.fn() } }));
 vi.mock('@/services/aiJobsApi', () => ({
@@ -9,7 +9,15 @@ vi.mock('@/services/aiJobsApi', () => ({
 }));
 
 import { aiJobsApi } from '@/services/aiJobsApi';
-import { isConnectionLost, runAIJob, useAIJobsStore, waitForAIJob } from './aiJobsStore';
+import {
+  isConnectionLost,
+  runAIJob,
+  selectAllSummaries,
+  selectRunningSummaries,
+  summariesEqual,
+  useAIJobsStore,
+  waitForAIJob,
+} from './aiJobsStore';
 
 type Mocked = Record<'list' | 'get' | 'events' | 'cancel' | 'dismiss', ReturnType<typeof vi.fn>>;
 const api = aiJobsApi as unknown as Mocked;
@@ -240,5 +248,25 @@ describe('runAIJob / waitForAIJob', () => {
     await useAIJobsStore.getState().attach('w3');       // running 快照 → 从 0 回放 → error
     await expect(waitForAIJob('w3')).rejects.toMatchObject({ message: '炸了', job: { id: 'w3', status: 'error' } });
     await expect(waitForAIJob('nope')).rejects.toThrow('任务不存在');
+  });
+});
+describe('摘要选择器（横幅 / 托盘只关心摘要，正文 content 事件不应触发它们重渲染）', () => {
+  it('content 事件后摘要判等为 true；progress / 终态事件后为 false', async () => {
+    await useAIJobsStore.getState().start({
+      kind: 'chapter_generate', title: '生成', projectId: 'p1',
+      connect: scripted([ev({ type: 'start', job_id: 'js' })]),   // 不结束，保持 running
+    });
+    const before = selectRunningSummaries(useAIJobsStore.getState(), 'p1');
+    expect(before.map((j) => j.id)).toEqual(['js']);
+    useAIJobsStore.setState((s) => ({ jobs: { ...s.jobs, js: applyEvent(s.jobs.js, ev({ type: 'content', content: '很长的正文', seq: 5 })) } }));
+    const afterContent = selectRunningSummaries(useAIJobsStore.getState(), 'p1');
+    expect(summariesEqual(before, afterContent)).toBe(true);
+    expect('content' in afterContent[0]).toBe(false);
+    useAIJobsStore.setState((s) => ({ jobs: { ...s.jobs, js: applyEvent(s.jobs.js, ev({ type: 'progress', message: '写到一半', progress: 50, seq: 6 })) } }));
+    const afterProgress = selectRunningSummaries(useAIJobsStore.getState(), 'p1');
+    expect(summariesEqual(afterContent, afterProgress)).toBe(false);
+    expect(afterProgress[0].progress?.pct).toBe(50);
+    expect(selectRunningSummaries(useAIJobsStore.getState(), 'p1', ['plot_lines_generate'])).toEqual([]);
+    expect(selectAllSummaries(useAIJobsStore.getState()).map((j) => j.id)).toEqual(['js']);
   });
 });

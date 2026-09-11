@@ -256,10 +256,6 @@ export class SSEPostClient<TResult = unknown, TRequest = unknown> {
       this.reader = null;
     }
   }
-
-  getAccumulatedContent(): string {
-    return this.accumulatedContent;
-  }
 }
 
 export async function ssePost<TResult = unknown, TRequest = unknown>(

@@ -49,7 +49,7 @@ export function createJobState(init: {
   };
 }
 
-export const isTerminal = (s: AIJobState) => s.status !== 'running';
+export const isTerminal = (s: Pick<AIJobState, 'status'>) => s.status !== 'running';
 
 const num = (v: unknown, fallback = 0) => (typeof v === 'number' && Number.isFinite(v) ? v : fallback);
 
