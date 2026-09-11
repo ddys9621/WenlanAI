@@ -31,7 +31,11 @@ from app.schemas.regeneration import (
     ApplyRegenerationRequest,
     ChapterRegenerateRequest
 )
+from app.api.ai_jobs import job_sse_response
+from app.services.ai_jobs import AIJobConflictError, ai_jobs, job_session_factory
 from app.services.ai_service import AIService
+from app.services.chapter_analysis_jobs import create_analysis_task, start_chapter_analysis
+from app.services.generation_trace import stage_scope, trace_progress
 from app.services.prompt_service import prompt_service
 from app.services.plot_analyzer import PlotAnalyzer
 from app.services.chapter_consistency_service import chapter_consistency_service
@@ -1055,6 +1059,7 @@ async def analyze_chapter_background(
             task.started_at = datetime.now()
             task.progress = 10
             await db_session.commit()
+        trace_progress("读取章节…", 10)
         
         # 2. 获取章节信息（读操作）
         chapter_result = await db_session.execute(
@@ -1073,30 +1078,33 @@ async def analyze_chapter_background(
         async with write_lock:
             task.progress = 20
             await db_session.commit()
+        trace_progress("模型分析章节中…", 20)
         
         # 3. 并行执行：章节分析 + 实体提取
         analyzer = PlotAnalyzer(ai_service)
-        analysis_task_coro = analyzer.analyze_chapter(
-            chapter_number=chapter.chapter_number,
-            title=chapter.title,
-            content=chapter.content,
-            word_count=chapter.word_count or count_words(chapter.content)
-        )
-        entity_task_coro = analyzer.extract_entities(
-            chapter_number=chapter.chapter_number,
-            title=chapter.title,
-            content=chapter.content,
-        )
-        analysis_result, entity_result = await asyncio.gather(
-            analysis_task_coro, entity_task_coro, return_exceptions=True
-        )
-        # 处理异常：gather 可能返回 Exception 对象
-        if isinstance(analysis_result, Exception):
-            logger.error(f"❌ 章节分析异常: {analysis_result}")
-            analysis_result = None
-        if isinstance(entity_result, Exception):
-            logger.error(f"⚠️ 实体提取异常(非致命): {entity_result}")
-            entity_result = None
+        async with stage_scope("analyze", "模型分析章节 + 提取实体") as st:
+            analysis_task_coro = analyzer.analyze_chapter(
+                chapter_number=chapter.chapter_number,
+                title=chapter.title,
+                content=chapter.content,
+                word_count=chapter.word_count or count_words(chapter.content)
+            )
+            entity_task_coro = analyzer.extract_entities(
+                chapter_number=chapter.chapter_number,
+                title=chapter.title,
+                content=chapter.content,
+            )
+            analysis_result, entity_result = await asyncio.gather(
+                analysis_task_coro, entity_task_coro, return_exceptions=True
+            )
+            # 处理异常：gather 可能返回 Exception 对象
+            if isinstance(analysis_result, Exception):
+                logger.error(f"❌ 章节分析异常: {analysis_result}")
+                analysis_result = None
+            if isinstance(entity_result, Exception):
+                logger.error(f"⚠️ 实体提取异常(非致命): {entity_result}")
+                entity_result = None
+            st.note(analysis_ok=bool(analysis_result), entities_ok=bool(entity_result))
         
         if not analysis_result:
             async with write_lock:
@@ -1116,167 +1124,175 @@ async def analyze_chapter_background(
         async with write_lock:
             task.progress = 60
             await db_session.commit()
+        trace_progress("分析完成，写入结果…", 60)
         
         # 4. 保存分析结果到数据库（写操作，需要锁）
-        async with write_lock:
-            existing_analysis_result = await db_session.execute(
-                select(PlotAnalysis).where(PlotAnalysis.chapter_id == chapter_id)
-            )
-            existing_analysis = existing_analysis_result.scalar_one_or_none()
-            
-            if existing_analysis:
-                # 更新现有记录
-                logger.info(f"  更新现有分析记录: {existing_analysis.id}")
-                existing_analysis.plot_stage = analysis_result.get('plot_stage', '发展')
-                existing_analysis.conflict_level = analysis_result.get('conflict', {}).get('level', 0)
-                existing_analysis.conflict_types = analysis_result.get('conflict', {}).get('types', [])
-                existing_analysis.emotional_tone = analysis_result.get('emotional_arc', {}).get('primary_emotion', '')
-                existing_analysis.emotional_intensity = analysis_result.get('emotional_arc', {}).get('intensity', 0) / 10.0
-                existing_analysis.hooks = analysis_result.get('hooks', [])
-                existing_analysis.hooks_count = len(analysis_result.get('hooks', []))
-                existing_analysis.foreshadows = analysis_result.get('foreshadows', [])
-                existing_analysis.foreshadows_planted = sum(1 for f in analysis_result.get('foreshadows', []) if f.get('type') == 'planted')
-                existing_analysis.foreshadows_resolved = sum(1 for f in analysis_result.get('foreshadows', []) if f.get('type') == 'resolved')
-                existing_analysis.plot_points = analysis_result.get('plot_points', [])
-                existing_analysis.plot_points_count = len(analysis_result.get('plot_points', []))
-                existing_analysis.character_states = analysis_result.get('character_states', [])
-                existing_analysis.scenes = analysis_result.get('scenes', [])
-                existing_analysis.pacing = analysis_result.get('pacing', 'moderate')
-                existing_analysis.overall_quality_score = analysis_result.get('scores', {}).get('overall', 0)
-                existing_analysis.pacing_score = analysis_result.get('scores', {}).get('pacing', 0)
-                existing_analysis.engagement_score = analysis_result.get('scores', {}).get('engagement', 0)
-                existing_analysis.coherence_score = analysis_result.get('scores', {}).get('coherence', 0)
-                existing_analysis.analysis_report = analyzer.generate_analysis_summary(analysis_result)
-                existing_analysis.suggestions = analysis_result.get('suggestions', [])
-                existing_analysis.dialogue_ratio = analysis_result.get('dialogue_ratio', 0)
-                existing_analysis.description_ratio = analysis_result.get('description_ratio', 0)
-                # 刷新分析时间戳：用于前端"内容修改后分析过期"判断（is_stale）
-                # 注意必须用 func.now()（SQLite CURRENT_TIMESTAMP，UTC），
-                # 与 chapter.updated_at 的 onupdate=func.now() 保持同一时钟，
-                # 否则 datetime.now()（本地时区）会让 stale 比较在时差窗口内失效
-                existing_analysis.created_at = func.now()
-            else:
-                # 创建新记录
-                logger.info(f"  创建新的分析记录")
-                plot_analysis = PlotAnalysis(
-                    chapter_id=chapter_id,
-                    project_id=project_id,
-                    plot_stage=analysis_result.get('plot_stage', '发展'),
-                    conflict_level=analysis_result.get('conflict', {}).get('level', 0),
-                    conflict_types=analysis_result.get('conflict', {}).get('types', []),
-                    emotional_tone=analysis_result.get('emotional_arc', {}).get('primary_emotion', ''),
-                    emotional_intensity=analysis_result.get('emotional_arc', {}).get('intensity', 0) / 10.0,
-                    hooks=analysis_result.get('hooks', []),
-                    hooks_count=len(analysis_result.get('hooks', [])),
-                    foreshadows=analysis_result.get('foreshadows', []),
-                    foreshadows_planted=sum(1 for f in analysis_result.get('foreshadows', []) if f.get('type') == 'planted'),
-                    foreshadows_resolved=sum(1 for f in analysis_result.get('foreshadows', []) if f.get('type') == 'resolved'),
-                    plot_points=analysis_result.get('plot_points', []),
-                    plot_points_count=len(analysis_result.get('plot_points', [])),
-                    character_states=analysis_result.get('character_states', []),
-                    scenes=analysis_result.get('scenes', []),
-                    pacing=analysis_result.get('pacing', 'moderate'),
-                    overall_quality_score=analysis_result.get('scores', {}).get('overall', 0),
-                    pacing_score=analysis_result.get('scores', {}).get('pacing', 0),
-                    engagement_score=analysis_result.get('scores', {}).get('engagement', 0),
-                    coherence_score=analysis_result.get('scores', {}).get('coherence', 0),
-                    analysis_report=analyzer.generate_analysis_summary(analysis_result),
-                    suggestions=analysis_result.get('suggestions', []),
-                    dialogue_ratio=analysis_result.get('dialogue_ratio', 0),
-                    description_ratio=analysis_result.get('description_ratio', 0)
+        async with stage_scope("persist_analysis", "写入分析结果"):
+            async with write_lock:
+                existing_analysis_result = await db_session.execute(
+                    select(PlotAnalysis).where(PlotAnalysis.chapter_id == chapter_id)
                 )
-                db_session.add(plot_analysis)
+                existing_analysis = existing_analysis_result.scalar_one_or_none()
             
-            await db_session.commit()
+                if existing_analysis:
+                    # 更新现有记录
+                    logger.info(f"  更新现有分析记录: {existing_analysis.id}")
+                    existing_analysis.plot_stage = analysis_result.get('plot_stage', '发展')
+                    existing_analysis.conflict_level = analysis_result.get('conflict', {}).get('level', 0)
+                    existing_analysis.conflict_types = analysis_result.get('conflict', {}).get('types', [])
+                    existing_analysis.emotional_tone = analysis_result.get('emotional_arc', {}).get('primary_emotion', '')
+                    existing_analysis.emotional_intensity = analysis_result.get('emotional_arc', {}).get('intensity', 0) / 10.0
+                    existing_analysis.hooks = analysis_result.get('hooks', [])
+                    existing_analysis.hooks_count = len(analysis_result.get('hooks', []))
+                    existing_analysis.foreshadows = analysis_result.get('foreshadows', [])
+                    existing_analysis.foreshadows_planted = sum(1 for f in analysis_result.get('foreshadows', []) if f.get('type') == 'planted')
+                    existing_analysis.foreshadows_resolved = sum(1 for f in analysis_result.get('foreshadows', []) if f.get('type') == 'resolved')
+                    existing_analysis.plot_points = analysis_result.get('plot_points', [])
+                    existing_analysis.plot_points_count = len(analysis_result.get('plot_points', []))
+                    existing_analysis.character_states = analysis_result.get('character_states', [])
+                    existing_analysis.scenes = analysis_result.get('scenes', [])
+                    existing_analysis.pacing = analysis_result.get('pacing', 'moderate')
+                    existing_analysis.overall_quality_score = analysis_result.get('scores', {}).get('overall', 0)
+                    existing_analysis.pacing_score = analysis_result.get('scores', {}).get('pacing', 0)
+                    existing_analysis.engagement_score = analysis_result.get('scores', {}).get('engagement', 0)
+                    existing_analysis.coherence_score = analysis_result.get('scores', {}).get('coherence', 0)
+                    existing_analysis.analysis_report = analyzer.generate_analysis_summary(analysis_result)
+                    existing_analysis.suggestions = analysis_result.get('suggestions', [])
+                    existing_analysis.dialogue_ratio = analysis_result.get('dialogue_ratio', 0)
+                    existing_analysis.description_ratio = analysis_result.get('description_ratio', 0)
+                    # 刷新分析时间戳：用于前端"内容修改后分析过期"判断（is_stale）
+                    # 注意必须用 func.now()（SQLite CURRENT_TIMESTAMP，UTC），
+                    # 与 chapter.updated_at 的 onupdate=func.now() 保持同一时钟，
+                    # 否则 datetime.now()（本地时区）会让 stale 比较在时差窗口内失效
+                    existing_analysis.created_at = func.now()
+                else:
+                    # 创建新记录
+                    logger.info(f"  创建新的分析记录")
+                    plot_analysis = PlotAnalysis(
+                        chapter_id=chapter_id,
+                        project_id=project_id,
+                        plot_stage=analysis_result.get('plot_stage', '发展'),
+                        conflict_level=analysis_result.get('conflict', {}).get('level', 0),
+                        conflict_types=analysis_result.get('conflict', {}).get('types', []),
+                        emotional_tone=analysis_result.get('emotional_arc', {}).get('primary_emotion', ''),
+                        emotional_intensity=analysis_result.get('emotional_arc', {}).get('intensity', 0) / 10.0,
+                        hooks=analysis_result.get('hooks', []),
+                        hooks_count=len(analysis_result.get('hooks', [])),
+                        foreshadows=analysis_result.get('foreshadows', []),
+                        foreshadows_planted=sum(1 for f in analysis_result.get('foreshadows', []) if f.get('type') == 'planted'),
+                        foreshadows_resolved=sum(1 for f in analysis_result.get('foreshadows', []) if f.get('type') == 'resolved'),
+                        plot_points=analysis_result.get('plot_points', []),
+                        plot_points_count=len(analysis_result.get('plot_points', [])),
+                        character_states=analysis_result.get('character_states', []),
+                        scenes=analysis_result.get('scenes', []),
+                        pacing=analysis_result.get('pacing', 'moderate'),
+                        overall_quality_score=analysis_result.get('scores', {}).get('overall', 0),
+                        pacing_score=analysis_result.get('scores', {}).get('pacing', 0),
+                        engagement_score=analysis_result.get('scores', {}).get('engagement', 0),
+                        coherence_score=analysis_result.get('scores', {}).get('coherence', 0),
+                        analysis_report=analyzer.generate_analysis_summary(analysis_result),
+                        suggestions=analysis_result.get('suggestions', []),
+                        dialogue_ratio=analysis_result.get('dialogue_ratio', 0),
+                        description_ratio=analysis_result.get('description_ratio', 0)
+                    )
+                    db_session.add(plot_analysis)
             
-            task.progress = 80
-            await db_session.commit()
+                await db_session.commit()
+            
+                task.progress = 80
+                await db_session.commit()
+        trace_progress("分析结果已写入，提取记忆…", 80)
         
         # 5. 提取记忆并保存到向量数据库（传入章节内容用于计算位置）
-        memories = analyzer.extract_memories_from_analysis(
-            analysis=analysis_result,
-            chapter_id=chapter_id,
-            chapter_number=chapter.chapter_number,
-            chapter_content=chapter.content or "",
-            chapter_title=chapter.title or ""
-        )
-        
-        # 先删除该章节的旧记忆（写操作，需要锁）
-        async with write_lock:
-            old_memories_result = await db_session.execute(
-                select(StoryMemory).where(StoryMemory.chapter_id == chapter_id)
+        async with stage_scope("memories", "提取记忆 / 结算状态 / 一致性审计") as st:
+            memories = analyzer.extract_memories_from_analysis(
+                analysis=analysis_result,
+                chapter_id=chapter_id,
+                chapter_number=chapter.chapter_number,
+                chapter_content=chapter.content or "",
+                chapter_title=chapter.title or ""
             )
-            old_memories = old_memories_result.scalars().all()
-            for old_mem in old_memories:
-                await db_session.delete(old_mem)
-            await db_session.commit()
-            logger.info(f"  删除旧记忆: {len(old_memories)}条")
         
-        # 准备批量添加的记忆数据（不需要锁）
-        memory_records = []
-        for mem in memories:
-            memory_id = f"{chapter_id}_{mem['type']}_{len(memory_records)}"
-            memory_records.append({
-                'id': memory_id,
-                'content': mem['content'],
-                'type': mem['type'],
-                'metadata': mem['metadata']
-            })
-            
-        # 保存到关系数据库（写操作，需要锁）
-        async with write_lock:
-            for mem in memories:
-                memory_id = memory_records[memories.index(mem)]['id']
-                text_position = mem['metadata'].get('text_position', -1)
-                text_length = mem['metadata'].get('text_length', 0)
-                
-                story_memory = StoryMemory(
-                    id=memory_id,
-                    project_id=project_id,
-                    chapter_id=chapter_id,
-                    memory_type=mem['type'],
-                    content=mem['content'],
-                    title=mem['title'],
-                    importance_score=mem['metadata'].get('importance_score', 0.5),
-                    tags=mem['metadata'].get('tags', []),
-                    is_foreshadow=mem['metadata'].get('is_foreshadow', 0),
-                    story_timeline=chapter.chapter_number,
-                    chapter_position=text_position,
-                    text_length=text_length,
-                    related_characters=mem['metadata'].get('related_characters', []),
-                    related_locations=mem['metadata'].get('related_locations', [])
+            # 先删除该章节的旧记忆（写操作，需要锁）
+            async with write_lock:
+                old_memories_result = await db_session.execute(
+                    select(StoryMemory).where(StoryMemory.chapter_id == chapter_id)
                 )
-                db_session.add(story_memory)
+                old_memories = old_memories_result.scalars().all()
+                for old_mem in old_memories:
+                    await db_session.delete(old_mem)
+                await db_session.commit()
+                logger.info(f"  删除旧记忆: {len(old_memories)}条")
+        
+            # 准备批量添加的记忆数据（不需要锁）
+            memory_records = []
+            for mem in memories:
+                memory_id = f"{chapter_id}_{mem['type']}_{len(memory_records)}"
+                memory_records.append({
+                    'id': memory_id,
+                    'content': mem['content'],
+                    'type': mem['type'],
+                    'metadata': mem['metadata']
+                })
+            
+            # 保存到关系数据库（写操作，需要锁）
+            async with write_lock:
+                for mem in memories:
+                    memory_id = memory_records[memories.index(mem)]['id']
+                    text_position = mem['metadata'].get('text_position', -1)
+                    text_length = mem['metadata'].get('text_length', 0)
                 
-                if text_position >= 0:
-                    logger.debug(f"  保存记忆 {memory_id}: position={text_position}, length={text_length}")
+                    story_memory = StoryMemory(
+                        id=memory_id,
+                        project_id=project_id,
+                        chapter_id=chapter_id,
+                        memory_type=mem['type'],
+                        content=mem['content'],
+                        title=mem['title'],
+                        importance_score=mem['metadata'].get('importance_score', 0.5),
+                        tags=mem['metadata'].get('tags', []),
+                        is_foreshadow=mem['metadata'].get('is_foreshadow', 0),
+                        story_timeline=chapter.chapter_number,
+                        chapter_position=text_position,
+                        text_length=text_length,
+                        related_characters=mem['metadata'].get('related_characters', []),
+                        related_locations=mem['metadata'].get('related_locations', [])
+                    )
+                    db_session.add(story_memory)
+                
+                    if text_position >= 0:
+                        logger.debug(f"  保存记忆 {memory_id}: position={text_position}, length={text_length}")
             
-            await db_session.commit()
+                await db_session.commit()
             
-            settlement_stats = await narrative_state_service.settle_chapter_state(
-                db=db_session,
-                project_id=project_id,
-                chapter=chapter,
-                analysis=analysis_result,
-            )
-            consistency_stats = await chapter_consistency_service.settle_signals_and_audit(
-                db=db_session,
-                project_id=project_id,
-                chapter=chapter,
-                analysis=analysis_result,
-            )
-            task.progress = 90
-            await db_session.commit()
-            logger.info(f"✅ 章节状态结算完成: {settlement_stats}, 一致性审计: {consistency_stats}")
+                settlement_stats = await narrative_state_service.settle_chapter_state(
+                    db=db_session,
+                    project_id=project_id,
+                    chapter=chapter,
+                    analysis=analysis_result,
+                )
+                consistency_stats = await chapter_consistency_service.settle_signals_and_audit(
+                    db=db_session,
+                    project_id=project_id,
+                    chapter=chapter,
+                    analysis=analysis_result,
+                )
+                task.progress = 90
+                await db_session.commit()
+                logger.info(f"✅ 章节状态结算完成: {settlement_stats}, 一致性审计: {consistency_stats}")
+            st.note(memories=len(memories))
+        trace_progress("记忆已结算，写入向量库…", 90)
         
         # 批量添加到向量数据库
-        if memory_records:
-            added_count = await memory_service.batch_add_memories(
-                user_id=user_id,
-                project_id=project_id,
-                memories=memory_records
-            )
-            logger.info(f"✅ 添加{added_count}条记忆到向量库")
+        async with stage_scope("vector", "写入向量库") as st:
+            if memory_records:
+                added_count = await memory_service.batch_add_memories(
+                    user_id=user_id,
+                    project_id=project_id,
+                    memories=memory_records
+                )
+                logger.info(f"✅ 添加{added_count}条记忆到向量库")
+            st.note(records=len(memory_records))
         
         # 最终更新任务状态（写操作，需要锁）- 增加重试机制
         update_success = False
@@ -2294,79 +2310,54 @@ async def get_chapter_annotations(
     }
 
 
-@router.post("/{chapter_id}/analyze", summary="手动触发章节分析")
-async def trigger_chapter_analysis(
+@router.post("/{chapter_id}/analyze-stream", summary="手动触发章节分析（后台任务 + SSE 事件流）")
+async def trigger_chapter_analysis_stream(
     chapter_id: str,
     request: Request,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     user_ai_service: AIService = Depends(get_user_ai_service)
 ):
+    """手动触发章节分析（重新分析 / 分析旧章节）。
+
+    建 AnalysisTask 行 → 启动 chapter_analyze 后台任务并从头流式输出其事件
+    （stage：analyze / persist_analysis / memories / vector；llm 进度自动上报）。
+    AnalysisTask 行仍由 analyze_chapter_background 维护，/analysis/status 照常可查；同章已在分析 → 409。
     """
-    手动触发章节分析(用于重新分析或分析旧章节)
-    """
-    # 从请求中获取用户ID
     user_id = getattr(request.state, "user_id", None)
     if not user_id:
         raise HTTPException(status_code=401, detail="未登录")
     
-    # 验证章节存在
     chapter_result = await db.execute(
         select(Chapter).where(Chapter.id == chapter_id)
     )
     chapter = chapter_result.scalar_one_or_none()
-    
     if not chapter:
         raise HTTPException(status_code=404, detail="章节不存在")
-    
     if not chapter.content or chapter.content.strip() == "":
         raise HTTPException(status_code=400, detail="章节内容为空，无法分析")
     
-    # 获取项目信息
     project_result = await db.execute(
         select(Project).where(Project.id == chapter.project_id)
     )
     project = project_result.scalar_one_or_none()
-    
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
     
-    # 创建分析任务
-    analysis_task = AnalysisTask(
-        chapter_id=chapter_id,
-        user_id=user_id,
-        project_id=project.id,
-        status='pending',
-        progress=0
-    )
-    db.add(analysis_task)
-    await db.commit()
-    
-    task_id = analysis_task.id
+    task_id = await create_analysis_task(db, chapter_id=chapter_id, user_id=user_id, project_id=project.id)
     logger.info(f"📋 创建分析任务: {task_id}, 章节: {chapter_id}")
-    
-    # 刷新数据库会话，确保其他会话可以看到新任务
-    await db.refresh(analysis_task)
-    
-    # 短暂延迟确保SQLite WAL完成写入（让其他会话可见）
-    await asyncio.sleep(3)
-    
-    # 直接启动后台分析（并发执行）
-    background_tasks.add_task(
-        analyze_chapter_background,
-        chapter_id=chapter_id,
-        user_id=user_id,
-        project_id=project.id,
-        task_id=task_id,
-        ai_service=user_ai_service
-    )
-    
-    return {
-        "task_id": task_id,
-        "chapter_id": chapter_id,
-        "status": "pending",
-        "message": "分析任务已创建并开始执行"
-    }
+    try:
+        job = await start_chapter_analysis(
+            chapter_id=chapter_id,
+            chapter_number=chapter.chapter_number,
+            chapter_title=chapter.title,
+            user_id=user_id,
+            project_id=project.id,
+            task_id=task_id,
+            ai_service=user_ai_service,
+        )
+    except AIJobConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return job_sse_response(job)
 
 
 
