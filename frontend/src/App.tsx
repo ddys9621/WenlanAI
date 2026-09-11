@@ -3,7 +3,6 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { AppLayout } from '@/components/layout/AppLayout'
 import { ProtectedRoute } from '@/components/ProtectedRoute'
 import { PageLoading } from '@/components/ui/PageLoading'
-import { AIJobHost } from '@/components/ai-job/AIJobHost'
 
 // 页面懒加载
 const Login = lazy(() => import('@/pages/Login'))
@@ -32,8 +31,6 @@ const PlotBridges = lazy(() => import('@/pages/PlotBridges'))
 export default function App() {
   return (
     <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
-      {/* 通用 AI 任务弹窗 + 路由变化时同步后台任务（挂在路由内以便读 location） */}
-      <AIJobHost />
       <Suspense fallback={<PageLoading />}>
         <Routes>
           {/* 公开页面 - 无布局 */}
