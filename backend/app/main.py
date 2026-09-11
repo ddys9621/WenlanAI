@@ -77,12 +77,12 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # 停掉仍在跑的桥段填充任务（桥段保持 draft，下次可续跑）
+    # 停掉仍在跑的 AI 后台任务（桥段填充 / 角色生成 …；各业务表状态由 runner 保证可续跑）
     try:
-        from app.services.bridge_fill_jobs import bridge_fill_jobs
-        await bridge_fill_jobs.shutdown()
+        from app.services.ai_jobs import ai_jobs
+        await ai_jobs.shutdown()
     except Exception as e:
-        logger.warning(f"⚠️ 桥段填充任务清理失败: {str(e)}")
+        logger.warning(f"⚠️ AI 后台任务清理失败: {str(e)}")
 
     # 清理AI服务HTTP客户端资源
     try:
@@ -260,6 +260,10 @@ app.include_router(chapter_outlines.router, prefix="/api")
 # V4.1 K2 桥段四章结构 API
 from app.api import plot_bridges as _plot_bridges
 app.include_router(_plot_bridges.router, prefix="/api")
+
+# 通用 AI 后台任务：列表 / 快照 / 回放续尾 / 取消（各业务的发起端点仍在各自模块）
+from app.api import ai_jobs as _ai_jobs_api
+app.include_router(_ai_jobs_api.router, prefix="/api")
 
 # 世界规则系统API
 app.include_router(world_rules.router, prefix="/api")
