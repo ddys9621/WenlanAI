@@ -1,12 +1,13 @@
 """通用 AI 后台任务 API：列出 / 快照 / 事件回放续尾 / 取消。
 
 各业务的"发起"端点仍在各自模块（带自己的校验与请求体，返回 job_sse_response），发起之后的
-重连（刷新 / 切页 / 断网）与停止统一走这里；前端 aiJobsStore 只认这四个端点。
+重连（刷新 / 切页 / 断网）、停止与移除统一走这里；前端 aiJobsStore 只认这五个端点。
 
 - GET    /api/ai-jobs?project_id=      当前用户的任务（running 优先 + 保留期内的终态）
 - GET    /api/ai-jobs/{job_id}         快照
 - POST   /api/ai-jobs/{job_id}/events  SSE：从 since 之后回放并续尾到终态（POST 以复用前端 ssePost）
-- DELETE /api/ai-jobs/{job_id}         取消
+- DELETE /api/ai-jobs/{job_id}         取消（运行中 → 已停止，仍留在列表）
+- POST   /api/ai-jobs/{job_id}/dismiss 移除终态任务（托盘 ×）：不移除的话刷新后 GET 列表会把它同步回托盘
 """
 from __future__ import annotations
 
@@ -76,3 +77,9 @@ async def job_events_endpoint(
 async def cancel_job_endpoint(job_id: str, user: User = Depends(require_login)):
     _owned_job(job_id, user.user_id)
     return {"cancelled": await ai_jobs.cancel(job_id)}
+
+
+@router.post("/{job_id}/dismiss")
+async def dismiss_job_endpoint(job_id: str, user: User = Depends(require_login)):
+    _owned_job(job_id, user.user_id)
+    return {"dismissed": ai_jobs.dismiss(job_id)}

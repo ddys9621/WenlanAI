@@ -6,6 +6,7 @@
  * - 通用事件（progress / stage / tool_call / reference / llm / content / result / done / error）归约进 AIJobState；
  *   场景级事件（partial / bridges / meta …）通过 subscribe 原样交给页面
  * - 连接层中断（刷新 / 代理掐断）≠ 任务失败：用 lastSeq 重连 /api/ai-jobs/{id}/events
+ * - 托盘 × （dismiss）同时让后端移除该终态任务：否则刷新后 syncFromServer 会把保留期内的它同步回来
  * - 监听者 / 定时器不放进 zustand state（避免无意义的重渲染）
  */
 import { useMemo } from 'react';
@@ -247,6 +248,9 @@ export const useAIJobsStore = create<AIJobsState>((set, get) => {
         return { jobs, openJobId: s.openJobId === jobId ? null : s.openJobId };
       });
       settledFired.delete(jobId);
+      // 后端保留期内 GET 列表仍会返回它，刷新时 syncFromServer 会再捞回托盘 → 一并让后端移除。
+      // pending-* 是还没拿到后端 id 就失败的任务，后端没这条记录；已过保留期被 gc 的 404 也无需提示。
+      if (!jobId.startsWith('pending-')) void aiJobsApi.dismiss(jobId).catch(() => {});
     },
 
     openModal: (jobId) => set({ openJobId: jobId }),

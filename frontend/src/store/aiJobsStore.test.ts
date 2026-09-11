@@ -5,13 +5,13 @@ import { createJobState } from '@/utils/aiJobReducer';
 
 vi.mock('sonner', () => ({ toast: { error: vi.fn(), info: vi.fn(), success: vi.fn() } }));
 vi.mock('@/services/aiJobsApi', () => ({
-  aiJobsApi: { list: vi.fn(), get: vi.fn(), events: vi.fn(), cancel: vi.fn() },
+  aiJobsApi: { list: vi.fn(), get: vi.fn(), events: vi.fn(), cancel: vi.fn(), dismiss: vi.fn() },
 }));
 
 import { aiJobsApi } from '@/services/aiJobsApi';
 import { isConnectionLost, useAIJobsStore } from './aiJobsStore';
 
-type Mocked = { list: ReturnType<typeof vi.fn>; get: ReturnType<typeof vi.fn>; events: ReturnType<typeof vi.fn>; cancel: ReturnType<typeof vi.fn> };
+type Mocked = Record<'list' | 'get' | 'events' | 'cancel' | 'dismiss', ReturnType<typeof vi.fn>>;
 const api = aiJobsApi as unknown as Mocked;
 
 /** 造一个"后端"：按脚本把消息推给 onMessage，然后按 outcome 结束 */
@@ -144,6 +144,7 @@ describe('onSettled / dismiss', () => {
   });
 
   it('dismiss 只允许移除终态任务，并关掉对应弹窗', () => {
+    api.dismiss.mockResolvedValue({ dismissed: true });
     useAIJobsStore.setState({
       jobs: {
         a: { ...createJobState({ id: 'a', kind: 'k', title: 't' }), status: 'done' },
@@ -155,6 +156,25 @@ describe('onSettled / dismiss', () => {
     useAIJobsStore.getState().dismiss('b');
     expect(Object.keys(useAIJobsStore.getState().jobs)).toEqual(['b']);
     expect(useAIJobsStore.getState().openJobId).toBeNull();
+  });
+
+  it('dismiss 同步告知后端移除，刷新后 syncFromServer 才不会把它捞回来；后端失败静默', async () => {
+    api.dismiss.mockRejectedValue(new Error('network'));
+    useAIJobsStore.setState({ jobs: { a: { ...createJobState({ id: 'a', kind: 'k', title: 't' }), status: 'done' } }, openJobId: null });
+    useAIJobsStore.getState().dismiss('a');
+    expect(api.dismiss).toHaveBeenCalledWith('a');
+    await microtasks();
+    expect(useAIJobsStore.getState().jobs).toEqual({});
+  });
+
+  it('尚未拿到后端 id 就失败的任务（pending-*）dismiss 不打后端', () => {
+    useAIJobsStore.setState({
+      jobs: { 'pending-9': { ...createJobState({ id: 'pending-9', kind: 'k', title: 't' }), status: 'error' } },
+      openJobId: null,
+    });
+    useAIJobsStore.getState().dismiss('pending-9');
+    expect(api.dismiss).not.toHaveBeenCalled();
+    expect(useAIJobsStore.getState().jobs).toEqual({});
   });
 });
 

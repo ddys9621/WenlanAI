@@ -20,4 +20,7 @@ export const aiJobsApi = {
 
   /** 停止 DELETE /api/ai-jobs/{id} */
   cancel: (jobId: string) => api.delete<unknown, { cancelled: boolean }>(`/ai-jobs/${jobId}`),
+
+  /** 移除终态任务（托盘 ×）POST /api/ai-jobs/{id}/dismiss：否则刷新后 list 会把它同步回来 */
+  dismiss: (jobId: string) => api.post<unknown, { dismissed: boolean }>(`/ai-jobs/${jobId}/dismiss`),
 };
