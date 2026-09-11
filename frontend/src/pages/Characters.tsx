@@ -5,14 +5,16 @@ import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 import { useStore } from '@/store';
 import { useCharacterSync } from '@/store/hooks';
+import { useAIJobsStore, useRunningAIJobs } from '@/store/aiJobsStore';
 import { characterApi, organizationApi } from '@/services/api';
+import { AIJobBanner } from '@/components/ai-job/AIJobBanner';
 import { MCPSelector } from '@/components/MCPSelector';
 import {
   ReferencePackSelector,
   DEFAULT_SELECTOR_VALUE,
   type ReferencePackSelectorValue,
 } from '@/components/ReferencePackSelector';
-import type { Character } from '@/types';
+import type { Character, GenerateCharacterRequest } from '@/types';
 import { ROLE_OPTIONS, getRoleDisplayName, normalizeRoleType } from '@/utils/characterRole';
 
 interface FormData {
@@ -30,13 +32,15 @@ const EMPTY_FORM: FormData = { name: '', role_type: 'protagonist', personality: 
 
 export default function Characters() {
   const { currentProject, characters } = useStore();
-  const { refreshCharacters, deleteCharacter, generateCharacter } = useCharacterSync();
+  const { refreshCharacters, deleteCharacter } = useCharacterSync();
 
   const [showModal, setShowModal] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<FormData>(EMPTY_FORM);
   const [submitting, setSubmitting] = useState(false);
-  const [generating, setGenerating] = useState(false);
+  const startJob = useAIJobsStore((s) => s.start);
+  // 本项目是否有角色生成任务在跑（按钮禁用态由 store 派生，刷新后仍正确）
+  const generating = useRunningAIJobs(currentProject?.id, ['character_generate']).length > 0;
   const [showGenModal, setShowGenModal] = useState(false);
   const [genForm, setGenForm] = useState({ name: '', role_type: 'supporting', background: '', requirements: '' });
   const [enableMcp, setEnableMcp] = useState(false);
@@ -215,33 +219,41 @@ export default function Characters() {
     }
   };
 
+  /** AI 生成角色：交给通用后台任务（弹窗展示阶段 / 工具 / 参考；可最小化、可停止、刷新后可重连） */
   const handleGenerate = async () => {
     if (!currentProject) return;
-    setGenerating(true);
+    const name = genForm.name.trim();
+    const payload: GenerateCharacterRequest = {
+      project_id: currentProject.id,
+      name: name || undefined,
+      role_type: genForm.role_type || undefined,
+      background: genForm.background.trim() || undefined,
+      requirements: genForm.requirements.trim() || undefined,
+      enable_mcp: enableMcp,
+      selected_plugins: selectedPlugins,
+      // R8：仅 enabled 时透传拆书参考包参数
+      ...(genRefPack.enabled ? {
+        pack_ids: genRefPack.packIds.length > 0 ? genRefPack.packIds : undefined,
+        dimensions: genRefPack.dimensions.length > 0 ? genRefPack.dimensions : undefined,
+        strength: genRefPack.strength,
+      } : {}),
+    };
+    setShowGenModal(false);
     try {
-      await generateCharacter({
-        project_id: currentProject.id,
-        name: genForm.name.trim() || undefined,
-        role_type: genForm.role_type || undefined,
-        background: genForm.background.trim() || undefined,
-        requirements: genForm.requirements.trim() || undefined,
-        enable_mcp: enableMcp,
-        selected_plugins: selectedPlugins,
-        // R8：仅 enabled 时透传拆书参考包参数
-        ...(genRefPack.enabled ? {
-          pack_ids: genRefPack.packIds.length > 0 ? genRefPack.packIds : undefined,
-          dimensions: genRefPack.dimensions.length > 0 ? genRefPack.dimensions : undefined,
-          strength: genRefPack.strength,
-        } : {}),
+      await startJob({
+        kind: 'character_generate',
+        title: name ? `AI 生成角色「${name}」` : 'AI 生成角色',
+        projectId: currentProject.id,
+        connect: (options) => characterApi.generateCharacterStream(payload, options),
+        onSettled: (job) => {
+          if (job.status !== 'done') return;
+          toast.success('AI 角色已生成');
+          void refreshCharacters();
+          setGenForm({ name: '', role_type: 'supporting', background: '', requirements: '' });
+        },
       });
-      toast.success('AI 角色已生成');
-      await refreshCharacters();
-      setShowGenModal(false);
-      setGenForm({ name: '', role_type: 'supporting', background: '', requirements: '' });
-    } catch {
-      toast.error('AI 生成失败');
-    } finally {
-      setGenerating(false);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'AI 生成失败');
     }
   };
 
@@ -280,6 +292,9 @@ export default function Characters() {
           </button>
         </div>
       </section>
+
+      {/* 后台 AI 任务横幅：通用弹窗最小化后在这里看进度 / 重新打开 / 停止 */}
+      <AIJobBanner projectId={currentProject?.id} />
 
       <div className="inline-flex border border-surface-border bg-white/60 p-1">
         {([

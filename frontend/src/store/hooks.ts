@@ -20,7 +20,6 @@ import type {
   ChapterCreate,
   ChapterUpdate,
   ChapterGenerateRequest,
-  GenerateCharacterRequest
 } from '../types';
 
 /**
@@ -94,7 +93,7 @@ export function useProjectSync() {
  * 角色数据同步 Hook
  */
 export function useCharacterSync() {
-  const { currentProject, setCharacters, addCharacter, removeCharacter } = useStore();
+  const { currentProject, setCharacters, removeCharacter } = useStore();
 
   // 刷新角色列表
   const refreshCharacters = useCallback(async (projectId?: string) => {
@@ -124,22 +123,9 @@ export function useCharacterSync() {
     }
   }, [removeCharacter]);
 
-  // AI生成角色（带同步）
-  const generateCharacter = useCallback(async (data: GenerateCharacterRequest) => {
-    try {
-      const generated = await characterApi.generateCharacter(data);
-      addCharacter(generated);
-      return generated;
-    } catch (error) {
-      console.error('AI生成角色失败:', error);
-      throw error;
-    }
-  }, [addCharacter]);
-
   return {
     refreshCharacters,
     deleteCharacter,
-    generateCharacter,
   };
 }
 

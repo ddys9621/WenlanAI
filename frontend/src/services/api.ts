@@ -383,8 +383,9 @@ export const characterApi = {
   
   deleteCharacter: (id: string) => api.delete(`/characters/${id}`),
   
-  generateCharacter: (data: GenerateCharacterRequest) =>
-    api.post<unknown, Character>('/characters/generate', data),
+  /** AI 生成角色：启动后台任务并从头订阅事件（重连 / 停止走 aiJobsApi）POST /api/characters/generate-stream */
+  generateCharacterStream: (data: GenerateCharacterRequest, options?: SSEClientOptions<Character>) =>
+    ssePost<Character>('/api/characters/generate-stream', data, options),
 };
 
 export const chapterApi = {
