@@ -5,10 +5,13 @@ import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { useStore } from '@/store';
 import { useChapterSync } from '@/store/hooks';
-import { chapterApi, writingStyleApi, chapterOutlineLinkApi } from '@/services/api';
-import { SSEPostClient } from '@/utils/sseClient';
+import { AIJobError, runAIJob, useAIJob, useAIJobsStore, useRunningAIJobs, waitForAIJob } from '@/store/aiJobsStore';
+import { chapterApi, writingStyleApi, chapterOutlineLinkApi, type ChapterWriteResult, type ChapterRegenerateResult } from '@/services/api';
+import type { SSEClientOptions } from '@/utils/sseClient';
 import { normalizeAnalysisData, type NormalizedAnalysisData } from '@/utils/chapterAnalysis';
 import type { Chapter, ChapterCanGenerateResponse, ChapterGenerateRequest, PlotCardWithLinks, WritingStyle } from '@/types';
+import { AIJobBanner } from '@/components/ai-job/AIJobBanner';
+import { AIJobProcess } from '@/components/ai-job/AIJobProcess';
 import { SceneGenerator } from '@/components/SceneGenerator';
 import { MCPSelector } from '@/components/MCPSelector';
 import {
@@ -52,9 +55,11 @@ interface BatchStatusState {
   errorMessage?: string;
 }
 
-const ANALYSIS_POLL_INTERVAL_MS = 1500;
-// 前端等待时间要略大于后端自动恢复阈值，避免后端仍在分析时前端先误判超时
-const ANALYSIS_TIMEOUT_MS = 6 * 60 * 1000;
+/** 页面自带面板承担正文任务；横幅只兜底其它任务，面板隐藏（后台运行）时才把正文任务也放进横幅 */
+const WRITE_JOB_KINDS = ['chapter_generate', 'chapter_regenerate'];
+const OTHER_JOB_KINDS = ['chapter_analyze', 'scene_generate', 'chapter_imitate'];
+
+const abortError = () => new DOMException('Request aborted', 'AbortError');
 
 interface RegenVersionItem {
   task_id: string;
@@ -77,9 +82,16 @@ export default function Chapters() {
   const [submitting, setSubmitting] = useState(false);
   const [loadingContent, setLoadingContent] = useState(false);
 
-  // 流式生成状态
+  // 流式生成状态：任务由全局 store 持有（关面板 / 切页 / 刷新都不中断），页面面板只是它的一个视图
   const [streamState, setStreamState] = useState<StreamState | null>(null);
-  const sseClientRef = useRef<SSEPostClient | null>(null);
+  const [streamJobId, setStreamJobId] = useState<string | null>(null);
+  const streamJob = useAIJob(streamJobId);
+  const [panelHidden, setPanelHidden] = useState(false);
+  const [showProcess, setShowProcess] = useState(true);
+  const cancelJob = useAIJobsStore((s) => s.cancel);
+  const attachJob = useAIJobsStore((s) => s.attach);
+  const runningWriteJobs = useRunningAIJobs(currentProject?.id, WRITE_JOB_KINDS);
+  const runningAnalyses = useRunningAIJobs(currentProject?.id, ['chapter_analyze']);
   const [streamDone, setStreamDone] = useState(false);
   const [relatedCards, setRelatedCards] = useState<PlotCardWithLinks[]>([]);
   const [loadingCards, setLoadingCards] = useState(false);
@@ -276,11 +288,10 @@ export default function Chapters() {
     if (currentProject?.id) refreshChapters();
   }, [currentProject?.id, refreshChapters]);
 
-  // 清理
+  // 清理：只停掉前端的批量编排循环；正在跑的任务归 store，切页不中断
   useEffect(() => {
     return () => {
       batchCancelRef.current = true;
-      sseClientRef.current?.abort();
     };
   }, []);
 
@@ -447,9 +458,6 @@ export default function Chapters() {
     ) {
       return;
     }
-    const endpoint = isRegenerate
-      ? `/api/chapters/${chapter.id}/regenerate-stream`
-      : `/api/chapters/${chapter.id}/generate-stream`;
     const requestBody = (isRegenerate
       ? buildRegenerateRequest()
       : buildChapterGenerateRequest()) as Record<string, unknown>;
@@ -460,7 +468,7 @@ export default function Chapters() {
     try {
       await startStream({
         chapter,
-        url: endpoint,
+        isRegenerate,
         requestBody,
         mode: 'single',
       });
@@ -474,20 +482,70 @@ export default function Chapters() {
     }
   };
 
+  /** 面板视图跟随任务状态：进度 / 文案 / 正文都来自 store（生成完成后正文转为可编辑的本地副本） */
+  useEffect(() => {
+    if (!streamJob || streamDone) return;
+    setStreamState((prev) => {
+      if (!prev || prev.chapterId !== (streamJob.meta.chapter_id ?? prev.chapterId)) return prev;
+      const next = {
+        ...prev,
+        progress: streamJob.progress?.pct ?? prev.progress,
+        message: streamJob.progress?.message || prev.message,
+        content: streamJob.content,
+      };
+      if (next.content !== prev.content) {
+        requestAnimationFrame(() => {
+          if (streamContentRef.current) {
+            streamContentRef.current.scrollTop = streamContentRef.current.scrollHeight;
+          }
+        });
+      }
+      return next;
+    });
+  }, [streamJob, streamDone]);
+
+  /** 刷新 / 切页回来：接管仍在运行的正文任务（store 已从后端同步进来） */
+  useEffect(() => {
+    if (streamJobId || runningWriteJobs.length === 0) return;
+    const job = runningWriteJobs[0];
+    const chapterId = typeof job.meta.chapter_id === 'string' ? job.meta.chapter_id : null;
+    if (!chapterId) return;
+    setStreamJobId(job.id);
+    setStreamDone(false);
+    setPanelHidden(false);
+    setExpandedId(chapterId);
+    setStreamState({
+      chapterId,
+      chapterTitle: job.title,
+      progress: job.progress?.pct ?? 0,
+      message: job.progress?.message ?? '正在生成…',
+      content: job.content,
+      mode: 'single',
+    });
+    void waitForAIJob(job.id)
+      .then(async (done) => {
+        setPreviewContent((prev) => ({ ...prev, [chapterId]: done.content || prev[chapterId] || '' }));
+        setStreamDone(true);
+        await refreshChapters();
+      })
+      .catch(() => { /* 失败 / 停止：面板保留错误态由任务弹窗展示 */ });
+  }, [streamJobId, runningWriteJobs, refreshChapters]);
+
   const startStream = useCallback(async ({
     chapter,
-    url,
+    isRegenerate,
     requestBody,
     mode,
   }: {
     chapter: Chapter;
-    url: string;
+    isRegenerate: boolean;
     requestBody: Record<string, unknown>;
     mode: 'single' | 'batch';
-  }) => {
-    sseClientRef.current?.abort();
+  }): Promise<ChapterWriteResult | ChapterRegenerateResult | null> => {
     setExpandedId(chapter.id);
     setStreamDone(false);
+    setPanelHidden(false);
+    setStreamJobId(null);
     setPreviewContent(prev => ({ ...prev, [chapter.id]: '' }));
     await loadRelatedCardsForChapter(chapter);
 
@@ -500,128 +558,113 @@ export default function Chapters() {
       mode,
     });
 
-    const client = new SSEPostClient(url, requestBody, {
-      onProgress: (message, progress) => {
-        setStreamState(prev => prev ? { ...prev, message, progress } : null);
-        if (mode === 'batch') {
-          setBatchStatus(prev => {
-            if (!prev || prev.status !== 'running') return prev;
-            return {
-              ...prev,
-              progress: Math.min(((prev.completed + progress / 100) / prev.total) * 100, 99),
-              message,
-            };
-          });
-        }
-      },
-      onChunk: (chunk) => {
-        setStreamState(prev => {
-          if (!prev) return null;
-          const updated = { ...prev, content: prev.content + chunk };
-          requestAnimationFrame(() => {
-            if (streamContentRef.current) {
-              streamContentRef.current.scrollTop = streamContentRef.current.scrollHeight;
-            }
-          });
-          return updated;
-        });
-      },
-    });
-
-    sseClientRef.current = client;
     try {
-      await client.connect();
-      const finalContent = client.getAccumulatedContent();
+      const job = await runAIJob({
+        kind: isRegenerate ? 'chapter_regenerate' : 'chapter_generate',
+        title: `${isRegenerate ? '重写' : '生成'}第 ${chapter.chapter_number} 章《${chapter.title}》`,
+        projectId: chapter.project_id,
+        openModal: false,
+        meta: { chapter_id: chapter.id },
+        onStarted: setStreamJobId,
+        connect: (options: SSEClientOptions<unknown>) =>
+          isRegenerate
+            ? chapterApi.regenerateChapterStream(chapter.id, requestBody, options as SSEClientOptions<ChapterRegenerateResult>)
+            : chapterApi.generateChapterStream(chapter.id, requestBody as unknown as ChapterGenerateRequest, options as SSEClientOptions<ChapterWriteResult>),
+        onEvent: (m) => {
+          if (mode === 'batch' && m.type === 'progress' && typeof m.progress === 'number') {
+            const pct = m.progress;
+            const message = typeof m.message === 'string' ? m.message : undefined;
+            setBatchStatus(prev => {
+              if (!prev || prev.status !== 'running') return prev;
+              return {
+                ...prev,
+                progress: Math.min(((prev.completed + pct / 100) / prev.total) * 100, 99),
+                message: message ?? prev.message,
+              };
+            });
+          }
+        },
+      });
+      const finalContent = job.content;
+      setStreamState(prev => (prev && prev.chapterId === chapter.id ? { ...prev, progress: 100, content: finalContent } : prev));
       setPreviewContent(prev => ({ ...prev, [chapter.id]: finalContent || prev[chapter.id] || '' }));
       setStreamDone(true);
       await refreshChapters();
       if (mode === 'single') {
         toast.success(`「${chapter.title}」生成完成`);
       }
+      return (job.result as ChapterWriteResult | ChapterRegenerateResult | null) ?? null;
     } catch (error) {
-      if ((error as DOMException)?.name === 'AbortError') {
-        throw error;
+      if (error instanceof AIJobError && error.job.status === 'cancelled') {
+        throw abortError();
       }
       toast.error((error as Error)?.message || '生成失败');
       setStreamState(null);
       throw error;
-    } finally {
-      if (sseClientRef.current === client) {
-        sseClientRef.current = null;
-      }
     }
   }, [loadRelatedCardsForChapter, refreshChapters]);
 
-  const waitForChapterAnalysis = useCallback(async (chapter: Chapter) => {
-    const startAt = Date.now();
+  /** 等待本章分析任务（正文任务 result 里带 analysis_job_id）结束；没有分析任务则直接返回 */
+  const waitForChapterAnalysis = useCallback(async (chapter: Chapter, analysisJobId: string | null | undefined) => {
+    if (!analysisJobId) return;
     setAnalyzingIds(prev => new Set(prev).add(chapter.id));
-
+    const unsubscribe = useAIJobsStore.getState().subscribe(analysisJobId, (m) => {
+      if (m.type !== 'progress' || typeof m.message !== 'string') return;
+      const waitingMessage = `正在分析第 ${chapter.chapter_number} 章：${m.message}`;
+      setBatchStatus(prev => prev && prev.status === 'running' && prev.currentChapterId === chapter.id
+        ? { ...prev, message: waitingMessage }
+        : prev);
+      setStreamState(prev => prev && prev.chapterId === chapter.id
+        ? { ...prev, message: waitingMessage, progress: 100 }
+        : prev);
+    });
     try {
-      while (true) {
-        if (batchCancelRef.current) {
-          throw new DOMException('Request aborted', 'AbortError');
-        }
-
-        const status = await chapterApi.getAnalysisStatus(chapter.id);
-        const progress = Math.max(0, Math.min(100, status.progress ?? 0));
-        const waitingMessage = !status.has_task || status.status === 'none'
-          ? `等待第 ${chapter.chapter_number} 章分析任务启动…`
-          : `正在分析第 ${chapter.chapter_number} 章（${progress}%）`;
-
-        setBatchStatus(prev => prev && prev.status === 'running' && prev.currentChapterId === chapter.id
-          ? { ...prev, message: waitingMessage }
-          : prev);
-        setStreamState(prev => prev && prev.chapterId === chapter.id
-          ? { ...prev, message: waitingMessage, progress: 100 }
-          : prev);
-
-        if (status.status === 'completed') {
-          await refreshChapters();
-          setBatchStatus(prev => prev && prev.status === 'running' && prev.currentChapterId === chapter.id
-            ? { ...prev, message: `第 ${chapter.chapter_number} 章分析完成，开始整理记忆…` }
-            : prev);
-          return;
-        }
-
-        if (status.status === 'failed') {
-          throw new Error(status.error_message || `第 ${chapter.chapter_number} 章分析失败`);
-        }
-
-        if (Date.now() - startAt > ANALYSIS_TIMEOUT_MS) {
-          throw new Error(`第 ${chapter.chapter_number} 章分析等待超时，请重试`);
-        }
-
-        await new Promise(resolve => setTimeout(resolve, ANALYSIS_POLL_INTERVAL_MS));
+      if (batchCancelRef.current) throw abortError();
+      await attachJob(analysisJobId).catch(() => { /* 已在 store 中 / 已过期 → 由 waitForAIJob 判定 */ });
+      await waitForAIJob(analysisJobId);
+      await refreshChapters();
+      setBatchStatus(prev => prev && prev.status === 'running' && prev.currentChapterId === chapter.id
+        ? { ...prev, message: `第 ${chapter.chapter_number} 章分析完成，开始整理记忆…` }
+        : prev);
+    } catch (error) {
+      if (error instanceof AIJobError) {
+        throw new Error(error.job.error || `第 ${chapter.chapter_number} 章分析失败`);
       }
+      throw error;
     } finally {
+      unsubscribe();
       setAnalyzingIds(prev => {
         const next = new Set(prev);
         next.delete(chapter.id);
         return next;
       });
     }
-  }, [refreshChapters]);
+  }, [attachJob, refreshChapters]);
 
   const closeStreamPanel = () => {
     setStreamState(null);
+    setStreamJobId(null);
     setStreamDone(false);
     setRelatedCards([]);
     setGenTarget(null);
     setLoadingCards(false);
   };
 
+  /** 后台运行：收起面板，任务继续；顶部横幅 / 托盘可再打开 */
+  const hideStreamPanel = () => setPanelHidden(true);
+
   const cancelStream = () => {
     if (batchStatus?.status === 'running') {
       cancelBatch();
       return;
     }
-    sseClientRef.current?.abort();
-    sseClientRef.current = null;
+    if (streamJobId) void cancelJob(streamJobId);
     setStreamState(null);
+    setStreamJobId(null);
     setStreamDone(false);
     setRelatedCards([]);
     setLoadingCards(false);
-    toast.info('已取消生成');
+    toast.info('已停止生成');
   };
 
   /** 拉取某章一致性审计中的严重问题数（失败按 0 处理，不阻塞批量流程） */
@@ -693,9 +736,9 @@ export default function Chapters() {
           progress: (prev.completed / prev.total) * 100,
         } : prev);
 
-        await startStream({
+        const result = await startStream({
           chapter,
-          url: `/api/chapters/${chapter.id}/generate-stream`,
+          isRegenerate: false,
           requestBody: {
             target_word_count: 3000,
             enable_mcp: true,
@@ -703,7 +746,7 @@ export default function Chapters() {
           mode: 'batch',
         });
 
-        await waitForChapterAnalysis(chapter);
+        await waitForChapterAnalysis(chapter, (result as ChapterWriteResult | null)?.analysis_job_id);
 
         if (batchCancelRef.current) {
           break;
@@ -772,9 +815,9 @@ export default function Chapters() {
     if (!batchStatus || batchStatus.status !== 'running') return;
 
     batchCancelRef.current = true;
-    sseClientRef.current?.abort();
-    sseClientRef.current = null;
+    if (streamJobId) void cancelJob(streamJobId);
     setStreamState(null);
+    setStreamJobId(null);
     setStreamDone(false);
     setRelatedCards([]);
     setLoadingCards(false);
@@ -786,23 +829,31 @@ export default function Chapters() {
     toast.info('已取消批量生成');
   };
 
-  // ========== 5. 触发分析 ==========
+  // ========== 5. 触发分析（通用后台任务 + 弹窗：阶段 / 模型进度可见，可后台运行） ==========
   const handleAnalyze = async (chapter: Chapter) => {
-    setAnalyzingIds(prev => new Set(prev).add(chapter.id));
+    if (!currentProject) return;
     try {
-      await chapterApi.analyzeChapter(chapter.id);
-      toast.success(`「${chapter.title}」分析已启动`);
-    } catch {
-      toast.error('分析启动失败');
-    } finally {
-      setAnalyzingIds(prev => {
-        const next = new Set(prev);
-        next.delete(chapter.id);
-        return next;
+      await useAIJobsStore.getState().start({
+        kind: 'chapter_analyze',
+        title: `分析第 ${chapter.chapter_number} 章《${chapter.title}》`,
+        projectId: currentProject.id,
+        meta: { chapter_id: chapter.id },
+        connect: (options) => chapterApi.analyzeChapterStream(chapter.id, options),
+        onSettled: (job) => {
+          if (job.status === 'done') {
+            toast.success(`「${chapter.title}」分析完成`);
+            void refreshChapters();
+          }
+        },
       });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '分析启动失败');
     }
   };
 
+  const runningAnalysisChapterIds = new Set(
+    runningAnalyses.map((j) => (typeof j.meta.chapter_id === 'string' ? j.meta.chapter_id : '')),
+  );
   const batchRunning = batchStatus?.status === 'running';
   const isGenerating = (id: string) => streamState?.chapterId === id && !streamDone;
   const completedPreviousChapters = genCheck?.previous_chapters.filter(chapter => chapter.has_content) ?? [];
@@ -895,8 +946,11 @@ export default function Chapters() {
         </section>
       )}
 
-      {/* AI 创作面板 */}
-      {streamState && (
+      {/* 后台 AI 任务横幅：分析 / 场景 / 仿写常驻；正文任务在面板收起（后台运行）时也进横幅 */}
+      <AIJobBanner projectId={currentProject?.id} kinds={panelHidden || !streamState ? [...WRITE_JOB_KINDS, ...OTHER_JOB_KINDS] : OTHER_JOB_KINDS} />
+
+      {/* AI 创作面板（全局任务的页面视图：关面板 / 切页 / 刷新都不影响任务） */}
+      {streamState && !panelHidden && (
         <section className="hh-panel overflow-hidden border-brand/30">
           <div className="border-b border-surface-border/80 px-5 py-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -905,16 +959,26 @@ export default function Chapters() {
                   <Zap className="h-4 w-4" />
                 </span>
                 <span className="text-sm font-semibold text-content">
-                  {batchRunning ? '批量串行生成：' : 'AI 创作中：'}
+                  {batchRunning ? '批量串行生成：' : streamDone ? '已完成：' : 'AI 创作中：'}
                   {streamState.chapterTitle}
                 </span>
                 {streamState.mode === 'batch' && <span className="hh-tag">串行队列</span>}
                 <span className="text-xs text-content-tertiary tabular-nums">{streamState.content.length.toLocaleString()} 字</span>
               </div>
               <div className="flex items-center gap-2">
+                {streamJob && (
+                  <button onClick={() => setShowProcess((v) => !v)} className="hh-btn-ghost hh-btn-sm">
+                    {showProcess ? '收起过程' : '查看过程'}
+                  </button>
+                )}
+                {!streamDone && !batchRunning && (
+                  <button onClick={hideStreamPanel} className="hh-btn-ghost hh-btn-sm">
+                    后台运行
+                  </button>
+                )}
                 {(!streamDone || batchRunning) && (
                   <button onClick={cancelStream} className="hh-btn-ghost hh-btn-sm text-red-500 hover:bg-red-50 hover:text-red-600">
-                    {batchRunning ? '取消批量' : '取消生成'}
+                    {batchRunning ? '取消批量' : '停止生成'}
                   </button>
                 )}
                 {streamDone && !batchRunning && (
@@ -926,12 +990,21 @@ export default function Chapters() {
             </div>
             <div className="hh-progress mt-3">
               <div
-                className={cn('hh-progress-bar', streamDone && 'bg-emerald-500')}
+                className={cn('hh-progress-bar', streamDone && 'bg-emerald-500', streamJob?.status === 'error' && 'bg-red-500')}
                 style={{ width: `${Math.min(streamState.progress, 100)}%` }}
               />
             </div>
-            <p className="mt-2 text-xs text-content-tertiary">{streamState.message}</p>
+            <p className="mt-2 text-xs text-content-tertiary">
+              {streamJob?.status === 'error' ? `生成失败：${streamJob.error ?? ''}` : streamState.message}
+            </p>
           </div>
+
+          {/* 过程面板：阶段 / MCP 工具 / 参考资料（记忆、剧情卡、参考包） */}
+          {streamJob && showProcess && (
+            <div className="border-b border-surface-border/80 bg-white/40 px-5 py-4">
+              <AIJobProcess job={streamJob} />
+            </div>
+          )}
 
           <div className="flex min-h-[400px]">
             {/* 左侧：关联卡片 */}
@@ -1011,7 +1084,7 @@ export default function Chapters() {
             const activeStreamChapter = streamState?.chapterId === c.id;
             const generating = isGenerating(c.id);
             const currentBatchChapter = batchRunning && batchStatus?.currentChapterId === c.id;
-            const analyzing = analyzingIds.has(c.id);
+            const analyzing = analyzingIds.has(c.id) || runningAnalysisChapterIds.has(c.id);
             return (
               <div key={c.id} className={cn('px-5 py-3.5 transition-colors', currentBatchChapter ? 'bg-brand/[0.06]' : 'hover:bg-brand/[0.04]')}>
                 <div className="flex items-center gap-4">

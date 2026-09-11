@@ -9,7 +9,7 @@ vi.mock('@/services/aiJobsApi', () => ({
 }));
 
 import { aiJobsApi } from '@/services/aiJobsApi';
-import { isConnectionLost, useAIJobsStore } from './aiJobsStore';
+import { isConnectionLost, runAIJob, useAIJobsStore, waitForAIJob } from './aiJobsStore';
 
 type Mocked = Record<'list' | 'get' | 'events' | 'cancel' | 'dismiss', ReturnType<typeof vi.fn>>;
 const api = aiJobsApi as unknown as Mocked;
@@ -184,5 +184,61 @@ describe('isConnectionLost', () => {
     expect(isConnectionLost('Failed to fetch')).toBe(true);
     expect(isConnectionLost('HTTP error! status: 502')).toBe(true);
     expect(isConnectionLost('该项目已有填充任务在运行')).toBe(false);
+  });
+});
+
+describe('meta', () => {
+  it('start 时可附带 meta；快照的 meta 也带进状态', async () => {
+    await useAIJobsStore.getState().start({
+      kind: 'demo', title: '演示', meta: { chapter_id: 'c1' },
+      connect: scripted([ev({ type: 'start', job_id: 'jm' }), ev({ type: 'done', seq: 1 })]),
+    });
+    expect(useAIJobsStore.getState().jobs.jm.meta).toEqual({ chapter_id: 'c1' });
+    api.list.mockResolvedValue({ jobs: [snapshot({ id: 'r9', status: 'done', finished_at: 2000, meta: { chapter_id: 'c9' } })] });
+    await useAIJobsStore.getState().syncFromServer();
+    expect(useAIJobsStore.getState().jobs.r9.meta).toEqual({ chapter_id: 'c9' });
+  });
+});
+
+describe('runAIJob / waitForAIJob', () => {
+  it('runAIJob 在任务 done 后 resolve 终态，onStarted 拿到真实 id', async () => {
+    const onStarted = vi.fn();
+    const job = await runAIJob({
+      kind: 'demo', title: '演示', onStarted,
+      connect: scripted([ev({ type: 'start', job_id: 'jr' }), ev({ type: 'result', data: { n: 1 }, seq: 1 }), ev({ type: 'done', seq: 2 })]),
+    });
+    expect(job.id).toBe('jr');
+    expect(job.status).toBe('done');
+    expect(job.result).toEqual({ n: 1 });
+    expect(onStarted).toHaveBeenCalledWith('jr');
+  });
+
+  it('runAIJob 在任务 error / cancelled 时 reject（带 job）', async () => {
+    await expect(runAIJob({
+      kind: 'demo', title: '演示',
+      connect: scripted([ev({ type: 'start', job_id: 'je' }), ev({ type: 'error', error: '模型超时', seq: 1 })]),
+    })).rejects.toMatchObject({ message: '模型超时', job: { id: 'je', status: 'error' } });
+    await expect(runAIJob({
+      kind: 'demo', title: '演示',
+      connect: scripted([ev({ type: 'start', job_id: 'jc' }), ev({ type: 'error', error: '已停止', code: 499, seq: 1 })]),
+    })).rejects.toMatchObject({ job: { status: 'cancelled' } });
+  });
+
+  it('runAIJob 发起即失败（409）→ reject 原错误', async () => {
+    await expect(runAIJob({ kind: 'demo', title: '演示', connect: scripted([], new Error('已有任务在运行')) })).rejects.toThrow('已有任务');
+  });
+
+  it('waitForAIJob：已终态立即返回；接管中的任务等到终态事件（失败 → reject）', async () => {
+    useAIJobsStore.setState({ jobs: { w1: { ...createJobState({ id: 'w1', kind: 'k', title: 't' }), status: 'done' } }, openJobId: null });
+    expect((await waitForAIJob('w1')).status).toBe('done');
+
+    api.get.mockResolvedValue(snapshot({ id: 'w3' }));
+    api.events.mockImplementation(async (_id: string, _since: number, options: SSEClientOptions<unknown>) => {
+      options.onMessage?.(ev({ type: 'error', error: '炸了', seq: 1 }));
+      return true;
+    });
+    await useAIJobsStore.getState().attach('w3');       // running 快照 → 从 0 回放 → error
+    await expect(waitForAIJob('w3')).rejects.toMatchObject({ message: '炸了', job: { id: 'w3', status: 'error' } });
+    await expect(waitForAIJob('nope')).rejects.toThrow('任务不存在');
   });
 });

@@ -105,6 +105,12 @@ describe('fromSnapshot', () => {
     expect(s.connection).toBe('connecting');
   });
 
+  it('快照的 meta 进入状态；createJobState 默认空对象', () => {
+    expect(fromSnapshot({ ...snapshot, meta: { chapter_id: 'c1' } }).meta).toEqual({ chapter_id: 'c1' });
+    expect(createJobState({ id: 'x', kind: 'k', title: 't' }).meta).toEqual({});
+    expect(createJobState({ id: 'x', kind: 'k', title: 't', meta: { a: 1 } }).meta).toEqual({ a: 1 });
+  });
+
   it('终态快照带出 error / result / finishedAt', () => {
     const s = fromSnapshot({ ...snapshot, status: 'error', error: '模型超时', finished_at: 1700000100, live: {}, last_progress: null });
     expect(s.status).toBe('error');

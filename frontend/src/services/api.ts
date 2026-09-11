@@ -27,6 +27,7 @@ import type {
   CharacterUpdate,
   Chapter,
   ChapterCreate,
+  ChapterGenerateRequest,
   ChapterUpdate,
   GenerateCharacterRequest,
   GenerateCharactersResponse,
@@ -86,6 +87,23 @@ import type {
 } from '../types';
 
 type ChapterListApiResponse = Chapter[] | { items?: Chapter[] };
+
+/** 正文生成任务的 result 事件 data */
+export interface ChapterWriteResult {
+  word_count: number;
+  analysis_task_id: string | null;
+  analysis_job_id: string | null;
+}
+
+/** 正文重生成任务的 result 事件 data */
+export interface ChapterRegenerateResult {
+  task_id: string;
+  word_count: number;
+  version_number: number;
+  auto_applied: boolean;
+  diff_stats: Record<string, unknown>;
+  analysis_job_id: string | null;
+}
 
 const api = axios.create({
   baseURL: '/api',
@@ -458,9 +476,17 @@ export const chapterApi = {
   getAnalysis: (chapterId: string) =>
     api.get<unknown, ChapterAnalysisResponse>(`/chapters/${chapterId}/analysis`),
 
-  // 获取章节标注
-  analyzeChapter: (chapterId: string) =>
-    api.post<unknown, { task_id: string; status: string }>(`/chapters/${chapterId}/analyze`),
+  /** 手动分析章节：后台任务 + SSE（重连 / 停止走 aiJobsApi）POST /api/chapters/{id}/analyze-stream */
+  analyzeChapterStream: (chapterId: string, options?: SSEClientOptions<{ task_id: string; chapter_id: string; status: string }>) =>
+    ssePost<{ task_id: string; chapter_id: string; status: string }>(`/api/chapters/${chapterId}/analyze-stream`, {}, options),
+
+  /** AI 创作正文：后台任务 + SSE；result = { word_count, analysis_task_id, analysis_job_id } */
+  generateChapterStream: (chapterId: string, data: ChapterGenerateRequest, options?: SSEClientOptions<ChapterWriteResult>) =>
+    ssePost<ChapterWriteResult>(`/api/chapters/${chapterId}/generate-stream`, data, options),
+
+  /** 按修改意见重写正文：后台任务 + SSE；result = { task_id, version_number, auto_applied, diff_stats, analysis_job_id } */
+  regenerateChapterStream: (chapterId: string, data: Record<string, unknown>, options?: SSEClientOptions<ChapterRegenerateResult>) =>
+    ssePost<ChapterRegenerateResult>(`/api/chapters/${chapterId}/regenerate-stream`, data, options),
 
   // 批量生成章节
 };

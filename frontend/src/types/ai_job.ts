@@ -133,6 +133,8 @@ export interface AIJobState {
   kind: string;
   title: string;
   projectId: string | null;
+  /** 业务附加信息（后端 AIJob.meta，如 chapter_id / plot_card_id）；前端 start() 也可传 */
+  meta: Record<string, unknown>;
   status: AIJobStatus;
   /** 毫秒时间戳 */
   startedAt: number;
@@ -159,6 +161,11 @@ export const AI_JOB_KIND_LABELS: Record<string, string> = {
   organization_generate: '组织生成',
   plot_lines_generate: '剧情线生成',
   plot_cards_generate: '剧情卡生成',
+  chapter_generate: '正文生成',
+  chapter_regenerate: '正文重生成',
+  chapter_analyze: '章节分析',
+  scene_generate: '场景生成',
+  chapter_imitate: '一键仿写',
 };
 
 export const kindLabel = (kind: string) => AI_JOB_KIND_LABELS[kind] ?? kind;

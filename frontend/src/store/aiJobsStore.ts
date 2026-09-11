@@ -40,6 +40,8 @@ export interface StartAIJobParams<TResult = unknown> {
   onSettled?: AIJobSettled;
   /** 默认 true：发起后立刻打开通用弹窗 */
   openModal?: boolean;
+  /** 业务附加信息（如 chapter_id）；后端 start 事件之前先用它，快照到达后以后端 meta 为准 */
+  meta?: Record<string, unknown>;
 }
 
 interface AIJobsState {
@@ -169,7 +171,9 @@ export const useAIJobsStore = create<AIJobsState>((set, get) => {
       set((s) => ({
         jobs: {
           ...s.jobs,
-          [tempId]: createJobState({ id: tempId, kind: params.kind, title: params.title, projectId: params.projectId ?? null }),
+          [tempId]: createJobState({
+            id: tempId, kind: params.kind, title: params.title, projectId: params.projectId ?? null, meta: params.meta,
+          }),
         },
         openJobId: params.openModal === false ? s.openJobId : tempId,
       }));
@@ -280,6 +284,38 @@ export const useAIJobsStore = create<AIJobsState>((set, get) => {
     },
   };
 });
+
+/** 任务以 error / cancelled 结束时 runAIJob / waitForAIJob 抛出的错误（带终态 job 便于分支处理） */
+export class AIJobError extends Error {
+  readonly job: AIJobState;
+
+  constructor(job: AIJobState) {
+    super(job.error ?? (job.status === 'cancelled' ? '任务已停止' : '任务失败'));
+    this.name = 'AIJobError';
+    this.job = job;
+  }
+}
+
+/** 等待某个已跟踪任务的终态：done → resolve；error / cancelled → reject AIJobError；未跟踪 → reject */
+export function waitForAIJob(jobId: string): Promise<AIJobState> {
+  return new Promise((resolve, reject) => {
+    if (!useAIJobsStore.getState().jobs[jobId]) {
+      reject(new Error('任务不存在或尚未跟踪'));
+      return;
+    }
+    useAIJobsStore.getState().onSettled(jobId, (job) => (job.status === 'done' ? resolve(job) : reject(new AIJobError(job))));
+  });
+}
+
+/** 发起并等到终态（批量编排 / 对话框流程用）；onStarted 在拿到后端 job id 时回调 */
+export async function runAIJob<T = unknown>(
+  params: StartAIJobParams<T> & { onStarted?: (jobId: string) => void },
+): Promise<AIJobState> {
+  const { onStarted, ...startParams } = params;
+  const jobId = await useAIJobsStore.getState().start(startParams);
+  onStarted?.(jobId);
+  return waitForAIJob(jobId);
+}
 
 /** 页面级：按 id 取任务状态（不存在 / null → null） */
 export const useAIJob = (jobId: string | null) => useAIJobsStore((s) => (jobId ? s.jobs[jobId] ?? null : null));

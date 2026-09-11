@@ -19,7 +19,6 @@ import type {
   OutlineUpdate,
   ChapterCreate,
   ChapterUpdate,
-  ChapterGenerateRequest,
 } from '../types';
 
 /**
@@ -279,150 +278,11 @@ export function useChapterSync() {
     }
   }, [removeChapter]);
 
-  // AI流式生成章节内容（带同步）
-  const generateChapterContentStream = useCallback(async (
-    chapterId: string,
-    onProgress?: (content: string) => void,
-    styleId?: number,
-    targetWordCount?: number,
-    onProgressUpdate?: (message: string, progress: number) => void,
-    enableMcp?: boolean,
-    selectedPlugins?: string[]
-  ) => {
-    // 创建 AbortController 用于超时控制
-    const abortController = new AbortController();
-    // 设置超时：15分钟（足够生成一章内容）
-    const timeoutId = setTimeout(() => {
-      abortController.abort();
-    }, 15 * 60 * 1000); // 15分钟
-
-    try {
-      const requestBody: ChapterGenerateRequest = {
-        style_id: styleId,
-        target_word_count: targetWordCount,
-        enable_mcp: enableMcp,
-        selected_plugins: enableMcp && selectedPlugins && selectedPlugins.length > 0
-          ? selectedPlugins
-          : undefined,
-      };
-
-      // 使用fetch处理流式响应
-      const response = await fetch(`/api/chapters/${chapterId}/generate-stream`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(requestBody),
-        signal: abortController.signal, // 添加超时控制
-        keepalive: true, // 保持连接活跃
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
-
-      if (!reader) {
-        throw new Error('无法获取响应流');
-      }
-
-      let buffer = '';
-      let fullContent = '';
-      let analysisTaskId: string | undefined;
-
-      while (true) {
-        const { done, value } = await reader.read();
-
-        if (done) {
-          break;
-        }
-
-        buffer += decoder.decode(value, { stream: true });
-        
-        // 处理缓冲区中的完整消息
-        const lines = buffer.split('\n\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (line.trim() === '' || line.startsWith(':')) {
-            continue;
-          }
-
-          try {
-            const dataMatch = line.match(/^data: (.+)$/m);
-            if (dataMatch) {
-              const message = JSON.parse(dataMatch[1]);
-              
-              if (message.type === 'start') {
-                // 开始生成
-                if (onProgressUpdate) {
-                  onProgressUpdate(message.message || '开始生成...', 0);
-                }
-              } else if (message.type === 'progress') {
-                // 进度更新
-                if (onProgressUpdate) {
-                  onProgressUpdate(
-                    message.message || '生成中...',
-                    message.progress || 0
-                  );
-                }
-              } else if (message.type === 'content' && message.content) {
-                fullContent += message.content;
-                if (onProgress) {
-                  onProgress(fullContent);
-                }
-              } else if (message.type === 'error') {
-                throw new Error(message.error || '生成失败');
-              } else if (message.type === 'done') {
-                // 生成完成，保存分析任务ID
-                analysisTaskId = message.analysis_task_id;
-                if (onProgressUpdate) {
-                  onProgressUpdate('生成完成', 100);
-                }
-                // 生成完成，刷新章节数据
-                await refreshChapters();
-              } else if (message.type === 'analysis_started') {
-                // 分析已开始
-                analysisTaskId = message.task_id;
-                if (onProgressUpdate) {
-                  onProgressUpdate('章节分析已开始...', 100);
-                }
-              } else if (message.type === 'analysis_queued') {
-                // 分析任务已加入队列
-                analysisTaskId = message.task_id;
-              }
-            }
-          } catch (error) {
-            console.error('解析SSE消息失败:', error);
-          }
-        }
-      }
-
-      return {
-        content: fullContent,
-        analysis_task_id: analysisTaskId
-      };
-    } catch (error) {
-      // 检查是否是超时错误
-      if (error instanceof Error && error.name === 'AbortError') {
-        console.error('章节生成超时（15分钟）');
-        throw new Error('生成超时，请重试或联系管理员');
-      }
-      console.error('AI流式生成章节内容失败:', error);
-      throw error;
-    } finally {
-      // 清除超时定时器
-      clearTimeout(timeoutId);
-    }
-  }, [refreshChapters]);
 
   return {
     refreshChapters,
     createChapter,
     updateChapter: updateChapterSync,
     deleteChapter,
-    generateChapterContentStream,
   };
 }

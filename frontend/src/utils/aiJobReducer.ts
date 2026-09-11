@@ -23,12 +23,14 @@ export function createJobState(init: {
   title: string;
   projectId?: string | null;
   startedAt?: number;
+  meta?: Record<string, unknown>;
 }): AIJobState {
   return {
     id: init.id,
     kind: init.kind,
     title: init.title,
     projectId: init.projectId ?? null,
+    meta: init.meta ?? {},
     status: 'running',
     startedAt: init.startedAt ?? Date.now(),
     finishedAt: null,
@@ -162,6 +164,7 @@ export function fromSnapshot(s: AIJobSnapshot): AIJobState {
     title: s.title,
     projectId: s.project_id,
     startedAt: s.started_at * 1000,
+    meta: s.meta ?? {},
   });
   const live = Object.values(s.live ?? {}).sort((a, b) => num(a.seq) - num(b.seq));
   for (const e of live) state = applyEvent(state, e as unknown as SSEMessage);
