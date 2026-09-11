@@ -18,6 +18,9 @@ from app.schemas.link_schemas import (
     ChapterOutlineWithLinks, PlotCardWithLinks,
     LinkChapterOutlinesRequest, LinkPlotCardsToLineRequest, UnlinkRequest
 )
+from app.api.ai_jobs import job_sse_response
+from app.api.deps import verify_project_access
+from app.services.ai_jobs import AIJob, AIJobConflictError, Runner, ai_jobs, job_session_factory
 from app.services.ai_service import AIService
 from app.services.plot_link_service import PlotLinkService
 from app.services.plot_generation_service import PlotGenerationService
@@ -282,86 +285,76 @@ async def reorder_plot_lines(
     return {"message": "剧情线排序更新成功"}
 
 
-@router.post("/generate", response_model=List[PlotLineResponse])
-async def generate_plot_lines(
+def make_plot_lines_runner(
+    *,
+    user_id: Optional[str],
+    request: PlotLineGenerateRequest,
+    ai_service: AIService,
+    session_factory,
+) -> Runner:
+    """AI 生成剧情线的后台任务 runner：独立会话里跑 PlotGenerationService，返回序列化后的剧情线列表（result 事件）。
+
+    MCP 未触发 / 规划失败 / 大纲不存在等异常直接抛出 → 管理器转成任务 error 事件（文案即异常信息）。
+    """
+
+    async def runner(job: AIJob) -> List[Dict[str, Any]]:
+        async with session_factory() as db:
+            lines = await PlotGenerationService(ai_service).generate_plot_lines(
+                db=db,
+                project_id=request.project_id,
+                outline_id=request.story_outline_id,
+                line_type=normalize_plot_line_type(request.line_type),
+                based_on_cards=request.based_on_cards,
+                based_on_lines=request.based_on_lines,
+                custom_prompt=request.prompt,
+                count=request.count,
+                enable_mcp=request.enable_mcp,
+                selected_plugins=request.selected_plugins,
+                user_id=user_id,
+                pack_ids=request.pack_ids,
+                dimensions=request.dimensions,
+                strength=request.strength,
+            )
+            return [(await _serialize_plot_line(db, line)).model_dump(mode="json") for line in lines]
+
+    return runner
+
+
+@router.post("/generate-stream")
+async def generate_plot_lines_stream(
     generate_data: PlotLineGenerateRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
     user_ai_service: AIService = Depends(get_user_ai_service)
 ):
-    """AI生成剧情线"""
-    
-    from app.services.plot_generation_service import PlotGenerationService
-    
-    # 记录MCP状态日志
-    mcp_status = "启用MCP" if generate_data.enable_mcp else "禁用MCP"
-    logger.info(f"🎯 [剧情线生成] 项目 {generate_data.project_id}（{mcp_status}）")
-    logger.info(f"  - DEBUG: enable_mcp={generate_data.enable_mcp}, selected_plugins={generate_data.selected_plugins}")
-    if generate_data.enable_mcp and generate_data.selected_plugins:
-        logger.info(f"  - 选择的插件：{generate_data.selected_plugins}")
-    logger.info(f"  - 大纲ID：{generate_data.story_outline_id or '无'}")
-    normalized_line_type = normalize_plot_line_type(generate_data.line_type)
-    logger.info(f"  - line_type={normalized_line_type}")
-    logger.info(f"  - 生成数量：{generate_data.count}条")
-    
+    """AI 生成剧情线（后台任务 + SSE 事件流）。
+
+    start → stage(context / reference_pack / line-i / beats / persist) / tool_call / reference / llm → result(剧情线列表) → done。
+    任务寿命独立于本连接；重连与停止走 /api/ai-jobs/*；同项目已有剧情线生成在跑 → 409。
+    """
+    user_id = getattr(request.state, 'user_id', None)
+    project = await verify_project_access(generate_data.project_id, user_id, db)
+    logger.info(
+        "🎯 [剧情线生成] 项目 %s（%s）line_type=%s count=%d 大纲=%s",
+        project.id, "启用MCP" if generate_data.enable_mcp else "禁用MCP",
+        normalize_plot_line_type(generate_data.line_type), generate_data.count, generate_data.story_outline_id or "无",
+    )
+    runner = make_plot_lines_runner(
+        user_id=user_id, request=generate_data, ai_service=user_ai_service, session_factory=job_session_factory(user_id),
+    )
     try:
-        # 使用用户配置的 AI 服务创建生成服务实例
-        plot_generation_service = PlotGenerationService(user_ai_service)
-        
-        # 调用生成服务（R6/R8：透传拆书参考包覆盖字段，未传时走项目挂载关系自动注入）
-        lines = await plot_generation_service.generate_plot_lines(
-            db=db,
-            project_id=generate_data.project_id,
-            outline_id=generate_data.story_outline_id,
-            line_type=normalized_line_type,
-            based_on_cards=generate_data.based_on_cards,
-            based_on_lines=generate_data.based_on_lines,
-            custom_prompt=generate_data.prompt,
-            count=generate_data.count,
-            enable_mcp=generate_data.enable_mcp,
-            selected_plugins=generate_data.selected_plugins,
-            user_id=getattr(request.state, 'user_id', None),
-            pack_ids=generate_data.pack_ids,
-            dimensions=generate_data.dimensions,
-            strength=generate_data.strength,
+        job = await ai_jobs.start(
+            kind="plot_lines_generate",
+            title=f"AI 生成剧情线（{generate_data.count} 条）",
+            user_id=user_id,
+            project_id=project.id,
+            runner=runner,
+            cancel_message="已停止生成剧情线；已写入的剧情线已保存",
+            meta={"line_type": generate_data.line_type, "count": generate_data.count, "enable_mcp": generate_data.enable_mcp},
         )
-        
-        responses: List[PlotLineResponse] = []
-        for line in lines:
-            responses.append(await _serialize_plot_line(db, line))
-
-        return responses
-        
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        # 特殊处理 MCP 异常
-        from app.exceptions import MCPToolNotTriggeredError, MCPPlanningFailedError
-
-        if isinstance(e, MCPToolNotTriggeredError):
-            # 简化日志：底层已记录详细信息
-            logger.warning("⚠️ MCP 工具未触发，返回 400 错误")
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": "mcp_tool_not_triggered",
-                    "message": str(e),
-                    "suggestion": "请检查 MCP 插件选择，或禁用 MCP 后重试"
-                }
-            )
-        elif isinstance(e, MCPPlanningFailedError):
-            # 简化日志：底层已记录详细信息
-            logger.warning("⚠️ MCP 规划失败，返回 500 错误")
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    "error": "mcp_planning_failed",
-                    "message": str(e),
-                    "suggestion": "MCP 规划阶段失败，请稍后重试或联系管理员"
-                }
-            )
-        else:
-            raise HTTPException(status_code=500, detail=f"生成失败: {str(e)}")
+    except AIJobConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return job_sse_response(job)
 
 
 @router.get("/project/{project_id}/types")

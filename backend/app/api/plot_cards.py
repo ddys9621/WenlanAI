@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, delete, func
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 import json
 
 from app.database import get_db
@@ -18,7 +18,11 @@ from app.schemas.link_schemas import (
     PlotCardPlotLineLinkBatch, PlotCardChapterOutlineLinkBatch,
     PlotLineWithLinks, ChapterOutlineWithLinks, UnlinkRequest
 )
+from app.api.ai_jobs import job_sse_response
+from app.api.deps import verify_project_access
+from app.services.ai_jobs import AIJob, AIJobConflictError, Runner, ai_jobs, job_session_factory
 from app.services.ai_service import AIService
+from app.services.plot_generation_service import PlotGenerationService
 from app.api.settings import get_user_ai_service
 from app.logger import get_logger
 
@@ -270,100 +274,90 @@ async def reorder_plot_cards(
     return {"message": "剧情卡片排序更新成功"}
 
 
-@router.post("/generate", response_model=List[PlotCardResponse])
-async def generate_plot_cards(
+def make_plot_cards_runner(
+    *,
+    user_id: Optional[str],
+    request: PlotCardGenerateRequest,
+    ai_service: AIService,
+    session_factory,
+) -> Runner:
+    """AI 生成剧情卡的后台任务 runner：独立会话里跑 PlotGenerationService，返回序列化后的卡片列表（result 事件）。
+
+    MCP 未触发 / 规划失败 / 大纲不存在等异常直接抛出 → 管理器转成任务 error 事件（文案即异常信息）。
+    """
+    outline_id = request.outline_id or request.story_outline_id   # 字段兼容：优先新字段名
+
+    async def runner(job: AIJob) -> List[Dict[str, Any]]:
+        async with session_factory() as db:
+            cards = await PlotGenerationService(ai_service).generate_plot_cards(
+                db=db,
+                project_id=request.project_id,
+                outline_id=outline_id,
+                chapter_outline_id=request.chapter_outline_id,
+                card_type=request.card_type,
+                count=request.count,
+                extend_from_card_id=request.extend_from_card_id,
+                custom_prompt=request.prompt,
+                enable_mcp=request.enable_mcp,
+                selected_plugins=request.selected_plugins,
+                user_id=user_id,
+                pack_ids=request.pack_ids,
+                dimensions=request.dimensions,
+                strength=request.strength,
+            )
+            payload: List[Dict[str, Any]] = []
+            for card in cards:
+                data = PlotCardResponse.model_validate(card).model_dump(mode="json")
+                try:
+                    data["tags"] = json.loads(card.tags) if card.tags else []
+                except (TypeError, ValueError):
+                    data["tags"] = []
+                payload.append(data)
+            return payload
+
+    return runner
+
+
+@router.post("/generate-stream")
+async def generate_plot_cards_stream(
     generate_data: PlotCardGenerateRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
     user_ai_service: AIService = Depends(get_user_ai_service)
 ):
-    """AI生成剧情卡片（必须基于故事大纲）"""
-    
-    from app.services.plot_generation_service import PlotGenerationService
-    
-    # 记录MCP状态日志
-    mcp_status = "启用MCP" if generate_data.enable_mcp else "禁用MCP"
-    logger.info(f"🎯 [剧情卡片生成] 项目 {generate_data.project_id}（{mcp_status}）")
-    logger.info(f"  - DEBUG: enable_mcp={generate_data.enable_mcp}, selected_plugins={generate_data.selected_plugins}")
-    if generate_data.enable_mcp and generate_data.selected_plugins:
-        logger.info(f"  - 选择的插件：{generate_data.selected_plugins}")
-    logger.info(f"  - 卡片类型：{generate_data.card_type}")
-    logger.info(f"  - 生成数量：{generate_data.count}个")
-    
-    try:
-        # 字段兼容性处理：优先使用新字段名，兼容旧字段名
-        outline_id = generate_data.outline_id or generate_data.story_outline_id
-        
-        # 校验：至少需要提供大纲ID或章纲ID之一
-        if not outline_id and not generate_data.chapter_outline_id:
-            raise HTTPException(
-                status_code=400, 
-                detail="至少需要提供 outline_id 或 chapter_outline_id 之一作为生成上下文"
-            )
-        
-        # 使用用户配置的 AI 服务创建生成服务实例
-        plot_generation_service = PlotGenerationService(user_ai_service)
-        
-        # 调用生成服务（R6/R8：透传拆书参考包字段，未传则用项目挂载关系自动注入）
-        cards = await plot_generation_service.generate_plot_cards(
-            db=db,
-            project_id=generate_data.project_id,
-            outline_id=outline_id,
-            chapter_outline_id=generate_data.chapter_outline_id,
-            card_type=generate_data.card_type,
-            count=generate_data.count,
-            extend_from_card_id=generate_data.extend_from_card_id,
-            custom_prompt=generate_data.prompt,
-            enable_mcp=generate_data.enable_mcp,
-            selected_plugins=generate_data.selected_plugins,
-            user_id=getattr(request.state, 'user_id', None),
-            pack_ids=generate_data.pack_ids,
-            dimensions=generate_data.dimensions,
-            strength=generate_data.strength,
-        )
-        
-        # 处理返回的 tags 字段
-        for card in cards:
-            if card.tags:
-                try:
-                    card.tags = json.loads(card.tags)
-                except:
-                    card.tags = []
-            else:
-                card.tags = []
-        
-        return cards
-        
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        # 特殊处理 MCP 异常
-        from app.exceptions import MCPToolNotTriggeredError, MCPPlanningFailedError
+    """AI 生成剧情卡片（后台任务 + SSE 事件流；必须基于故事大纲或章纲）。
 
-        if isinstance(e, MCPToolNotTriggeredError):
-            # 简化日志：底层已记录详细信息
-            logger.warning("⚠️ MCP 工具未触发，返回 400 错误")
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": "mcp_tool_not_triggered",
-                    "message": str(e),
-                    "suggestion": "请检查 MCP 插件选择，或禁用 MCP 后重试"
-                }
-            )
-        elif isinstance(e, MCPPlanningFailedError):
-            # 简化日志：底层已记录详细信息
-            logger.warning("⚠️ MCP 规划失败，返回 500 错误")
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    "error": "mcp_planning_failed",
-                    "message": str(e),
-                    "suggestion": "MCP 规划阶段失败，请稍后重试或联系管理员"
-                }
-            )
-        else:
-            raise HTTPException(status_code=500, detail=f"生成失败: {str(e)}")
+    start → stage(context / mcp / reference_pack / llm / persist) / tool_call / reference / llm → result(卡片列表) → done。
+    任务寿命独立于本连接；重连与停止走 /api/ai-jobs/*；同项目已有剧情卡生成在跑 → 409。
+    """
+    user_id = getattr(request.state, 'user_id', None)
+    project = await verify_project_access(generate_data.project_id, user_id, db)
+    # 校验：至少需要提供大纲ID或章纲ID之一
+    if not (generate_data.outline_id or generate_data.story_outline_id) and not generate_data.chapter_outline_id:
+        raise HTTPException(
+            status_code=400,
+            detail="至少需要提供 outline_id 或 chapter_outline_id 之一作为生成上下文"
+        )
+    logger.info(
+        "🎯 [剧情卡片生成] 项目 %s（%s）card_type=%s count=%d",
+        project.id, "启用MCP" if generate_data.enable_mcp else "禁用MCP", generate_data.card_type, generate_data.count,
+    )
+    runner = make_plot_cards_runner(
+        user_id=user_id, request=generate_data, ai_service=user_ai_service, session_factory=job_session_factory(user_id),
+    )
+    try:
+        job = await ai_jobs.start(
+            kind="plot_cards_generate",
+            title=f"AI 生成剧情卡（{generate_data.count} 张）",
+            user_id=user_id,
+            project_id=project.id,
+            runner=runner,
+            cancel_message="已停止生成剧情卡",
+            meta={"card_type": generate_data.card_type, "count": generate_data.count, "enable_mcp": generate_data.enable_mcp},
+        )
+    except AIJobConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return job_sse_response(job)
 
 
 @router.get("/project/{project_id}/types")

@@ -9,6 +9,7 @@ from app.models.character import Character
 from app.services.plot_prompts import PlotPromptService
 from app.services.ai_service import AIService
 from app.services.bridge_slot_planner import VALID_MODES, primary_quota
+from app.services.generation_trace import stage_scope
 from app.services.sub_line_anchors import normalize_sub_line_anchors
 from app.services.world_rule_service import WorldRuleService
 from app.services.prompt_service import prompt_service as project_prompt_service
@@ -333,69 +334,75 @@ class PlotGenerationService:
         dimensions: Optional[List[str]] = None,
         strength: Optional[str] = None,
     ) -> List[PlotCard]:
-        """生成剧情卡片（必须基于大纲）"""
+        """生成剧情卡片（必须基于大纲）
+
+        过程追踪（后台任务里绑定了 GenerationTrace 时）：context → [mcp] → reference_pack → llm → persist；
+        世界规则检索 / MCP 工具 / 参考包 / LLM 进度由共享入口自动上报。
+        """
         
-        # 获取项目信息
-        project_result = await db.execute(select(Project).where(Project.id == project_id))
-        project = project_result.scalar_one_or_none()
-        if not project:
-            raise ValueError("项目不存在")
+        async with stage_scope("context", "加载项目 / 大纲 / 世界规则") as st:
+            # 获取项目信息
+            project_result = await db.execute(select(Project).where(Project.id == project_id))
+            project = project_result.scalar_one_or_none()
+            if not project:
+                raise ValueError("项目不存在")
 
-        # 获取大纲内容（必填）
-        outline_result = await db.execute(select(StoryOutline).where(StoryOutline.id == outline_id))
-        outline = outline_result.scalar_one_or_none()
-        if not outline:
-            raise ValueError(f"故事大纲不存在: {outline_id}")
+            # 获取大纲内容（必填）
+            outline_result = await db.execute(select(StoryOutline).where(StoryOutline.id == outline_id))
+            outline = outline_result.scalar_one_or_none()
+            if not outline:
+                raise ValueError(f"故事大纲不存在: {outline_id}")
 
-        # 验证大纲属于该项目
-        if outline.project_id != project_id:
-            raise ValueError("大纲不属于该项目")
+            # 验证大纲属于该项目
+            if outline.project_id != project_id:
+                raise ValueError("大纲不属于该项目")
 
-        outline_content = outline.content
-        if not outline_content:
-            raise ValueError("大纲内容为空，无法生成剧情卡片")
+            outline_content = outline.content
+            if not outline_content:
+                raise ValueError("大纲内容为空，无法生成剧情卡片")
 
-        # 构建查询文本（用于智能检索世界规则）
-        query_text = f"{project.theme or ''} {project.genre or ''} {outline_content[:500]}"
+            # 构建查询文本（用于智能检索世界规则）
+            query_text = f"{project.theme or ''} {project.genre or ''} {outline_content[:500]}"
 
-        # 增强世界规则（使用语义检索）
-        enhanced_world_rules = await self._enhance_world_rules(
-            db, project_id, project.world_rules, query=query_text
-        )
+            # 增强世界规则（使用语义检索）
+            enhanced_world_rules = await self._enhance_world_rules(
+                db, project_id, project.world_rules, query=query_text
+            )
 
-        project_data = {
-            "title": project.title,
-            "genre": project.genre,
-            "theme": project.theme,
-            "target_words": project.target_words,
-            "narrative_perspective": project.narrative_perspective,
-            "world_time_period": project.world_time_period,
-            "world_location": project.world_location,
-            "world_atmosphere": project.world_atmosphere,
-            "world_rules": enhanced_world_rules,
-            "generation_prompt": project.generation_prompt
-        }
-        
-        # 获取章纲内容（优先级高于大纲）
-        if chapter_outline_id:
-            from app.models.chapter_outline import ChapterOutline
-            chapter_outline_result = await db.execute(select(ChapterOutline).where(ChapterOutline.id == chapter_outline_id))
-            chapter_outline = chapter_outline_result.scalar_one_or_none()
-            if chapter_outline:
-                # 使用章纲内容，如果有大纲内容则合并
-                chapter_content = f"第{chapter_outline.chapter_number}章：{chapter_outline.title}\n{chapter_outline.summary or ''}"
-                if outline_content:
-                    outline_content = f"{outline_content}\n\n【章纲详情】\n{chapter_content}"
-                else:
-                    outline_content = chapter_content
-        
-        # 获取延伸基础内容
-        extend_from = None
-        if extend_from_card_id:
-            card_result = await db.execute(select(PlotCard).where(PlotCard.id == extend_from_card_id))
-            base_card = card_result.scalar_one_or_none()
-            if base_card:
-                extend_from = f"{base_card.title}: {base_card.content}"
+            project_data = {
+                "title": project.title,
+                "genre": project.genre,
+                "theme": project.theme,
+                "target_words": project.target_words,
+                "narrative_perspective": project.narrative_perspective,
+                "world_time_period": project.world_time_period,
+                "world_location": project.world_location,
+                "world_atmosphere": project.world_atmosphere,
+                "world_rules": enhanced_world_rules,
+                "generation_prompt": project.generation_prompt
+            }
+            
+            # 获取章纲内容（优先级高于大纲）
+            if chapter_outline_id:
+                from app.models.chapter_outline import ChapterOutline
+                chapter_outline_result = await db.execute(select(ChapterOutline).where(ChapterOutline.id == chapter_outline_id))
+                chapter_outline = chapter_outline_result.scalar_one_or_none()
+                if chapter_outline:
+                    # 使用章纲内容，如果有大纲内容则合并
+                    chapter_content = f"第{chapter_outline.chapter_number}章：{chapter_outline.title}\n{chapter_outline.summary or ''}"
+                    if outline_content:
+                        outline_content = f"{outline_content}\n\n【章纲详情】\n{chapter_content}"
+                    else:
+                        outline_content = chapter_content
+            
+            # 获取延伸基础内容
+            extend_from = None
+            if extend_from_card_id:
+                card_result = await db.execute(select(PlotCard).where(PlotCard.id == extend_from_card_id))
+                base_card = card_result.scalar_one_or_none()
+                if base_card:
+                    extend_from = f"{base_card.title}: {base_card.content}"
+            st.note(outline_chars=len(outline_content), world_rules_chars=len(enhanced_world_rules or ""))
         
         # 生成 Prompt
         prompt = self.prompt_service.generate_plot_card_prompt(
@@ -432,20 +439,21 @@ class PlotGenerationService:
                 logger.info(f"🚀 [剧情卡片生成] 使用 MCP 两段式增强模式")
                 
                 # ========== 阶段 1: MCP 规划（资料收集）==========
-                planning_result = await self._plan_with_mcp(
-                    context_type="plot_card",
-                    project_data=project_data,
-                    outline_content=outline_content,
-                    user_id=user_id,
-                    db_session=db,
-                    selected_plugins=selected_plugins,
-                    provider=provider,
-                    model=model
-                )
-                
-                # 拼接参考资料到 prompt
-                reference_materials = planning_result['reference_materials']
-                final_prompt = f"""{prompt}
+                async with stage_scope("mcp", "MCP 规划收集资料") as st:
+                    planning_result = await self._plan_with_mcp(
+                        context_type="plot_card",
+                        project_data=project_data,
+                        outline_content=outline_content,
+                        user_id=user_id,
+                        db_session=db,
+                        selected_plugins=selected_plugins,
+                        provider=provider,
+                        model=model
+                    )
+                    
+                    # 拼接参考资料到 prompt
+                    reference_materials = planning_result['reference_materials']
+                    final_prompt = f"""{prompt}
 
 【参考资料】
 以下是通过 MCP 工具收集的真实背景资料，请参考这些信息生成更真实的剧情卡片：
@@ -453,39 +461,46 @@ class PlotGenerationService:
 {reference_materials}
 
 请结合上述资料，生成符合要求的剧情卡片。"""
+                    st.note(tools=len(planning_result.get("tools_used") or []), chars=len(reference_materials))
 
                 logger.info(f"📚 [剧情卡片生成] MCP 参考资料已拼接到 prompt")
 
             # ========== R6：拆书参考包注入（无论是否启用 MCP 都尝试）==========
             # 设计文档：@/agent-docs/features/dissect_to_creation_pipeline.md §A.2
-            try:
-                from app.services.reference_pack_injector import ReferencePackInjector
-                _injector = ReferencePackInjector()
-                _anchor = (
-                    f"{project.theme or ''} {project.genre or ''} "
-                    f"{(extend_from or '')[:200]} {outline_content[:300]}"
-                ).strip() or "剧情卡片"
-                _ref_block = await _injector.build_reference_block(
-                    db, project_id,
-                    scene="plot_card",
-                    pack_ids=pack_ids,
-                    dimensions=dimensions,
-                    strength=strength,
-                    fallback_dimensions=("synopsis", "structure", "methodology"),
-                    anchor_query=_anchor,
-                )
-                if _ref_block.user_segment:
-                    final_prompt = f"{final_prompt}\n\n{_ref_block.user_segment}"
-                    logger.info(
-                        "[R6-剧情卡片] 已注入参考包：dims=%s strength=%s 字符=%d",
-                        _ref_block.metadata.get("dimensions"),
-                        _ref_block.metadata.get("strength"),
-                        len(_ref_block.user_segment),
+            async with stage_scope("reference_pack", "组装拆书参考包") as st:
+                try:
+                    from app.services.reference_pack_injector import ReferencePackInjector
+                    _injector = ReferencePackInjector()
+                    _anchor = (
+                        f"{project.theme or ''} {project.genre or ''} "
+                        f"{(extend_from or '')[:200]} {outline_content[:300]}"
+                    ).strip() or "剧情卡片"
+                    _ref_block = await _injector.build_reference_block(
+                        db, project_id,
+                        scene="plot_card",
+                        pack_ids=pack_ids,
+                        dimensions=dimensions,
+                        strength=strength,
+                        fallback_dimensions=("synopsis", "structure", "methodology"),
+                        anchor_query=_anchor,
                     )
-            except ValueError:
-                logger.info("[R6-剧情卡片] 项目未挂载参考包或无可用维度，跳过注入")
-            except Exception as _e:  # pragma: no cover - 防御性兜底
-                logger.warning("[R6-剧情卡片] 拆书参考注入失败（已跳过）：%s", _e)
+                    if _ref_block.user_segment:
+                        final_prompt = f"{final_prompt}\n\n{_ref_block.user_segment}"
+                        logger.info(
+                            "[R6-剧情卡片] 已注入参考包：dims=%s strength=%s 字符=%d",
+                            _ref_block.used_dimensions,
+                            _ref_block.used_strength,
+                            len(_ref_block.user_segment),
+                        )
+                        st.note(dimensions="、".join(_ref_block.used_dimensions), strength=_ref_block.used_strength)
+                    else:
+                        st.skip("参考包无可用内容")
+                except ValueError:
+                    logger.info("[R6-剧情卡片] 项目未挂载参考包或无可用维度，跳过注入")
+                    st.skip("项目未挂载参考包或无可用维度")
+                except Exception as _e:  # pragma: no cover - 防御性兜底
+                    logger.warning("[R6-剧情卡片] 拆书参考注入失败（已跳过）：%s", _e)
+                    st.skip("注入失败，已跳过")
 
             # ========== 阶段 2: 内容生成 ==========
             final_prompt = project_prompt_service.apply_project_generation_prompt(
@@ -497,14 +512,17 @@ class PlotGenerationService:
             
             generation_start_time = time.time()
             
-            # 流式累积调 LLM（免疫中转代理 30s 网关 timeout，与桥段规划路径一致）
-            response = await self.ai_service.generate_text_stream_collect(
-                prompt=final_prompt,
-                provider=provider,
-                model=model,
-                temperature=0.8,
-                context=f"PlotCardGen-{model or 'default'}"
-            )
+            async with stage_scope("llm", "模型生成剧情卡") as st:
+                # 流式累积调 LLM（免疫中转代理 30s 网关 timeout，与桥段规划路径一致）
+                response = await self.ai_service.generate_text_stream_collect(
+                    prompt=final_prompt,
+                    provider=provider,
+                    model=model,
+                    temperature=0.8,
+                    context=f"PlotCardGen-{model or 'default'}"
+                )
+                ai_content = response if isinstance(response, str) else response.get("content", "")
+                st.note(content_chars=len(ai_content))
             
             generation_time = time.time() - generation_start_time
             total_time = time.time() - total_start_time
@@ -513,70 +531,71 @@ class PlotGenerationService:
             logger.info(f"  - 生成耗时: {generation_time:.2f}s")
             logger.info(f"  - 总耗时: {total_time:.2f}s")
             
-            # 解析 AI 响应
-            ai_content = response if isinstance(response, str) else response.get("content", "")
-            cards_data = self._parse_ai_response(ai_content, "plot_cards")
-            
-            # 创建卡片对象
-            created_cards = []
-            for i, card_data in enumerate(cards_data[:count]):
-                # 获取当前最大排序序号
-                max_order_result = await db.execute(
-                    select(PlotCard.order_index).where(PlotCard.project_id == project_id)
-                    .order_by(PlotCard.order_index.desc()).limit(1)
-                )
-                max_order = max_order_result.scalar() or 0
+            async with stage_scope("persist", "写入卡片 / 关联章纲") as st:
+                # 解析 AI 响应
+                cards_data = self._parse_ai_response(ai_content, "plot_cards")
                 
-                # 处理标签
-                tags_json = None
-                if card_data.get("tags"):
-                    tags_json = json.dumps(card_data["tags"], ensure_ascii=False)
-                
-                card = PlotCard(
-                    project_id=project_id,
-                    title=card_data.get("title", f"剧情卡片 {i+1}"),
-                    content=card_data.get("content", ""),
-                    card_type=card_data.get("card_type", card_type),
-                    order_index=max_order + i + 1,
-                    tags=tags_json
-                )
-                
-                db.add(card)
-                created_cards.append(card)
-            
-            await db.commit()
-
-            # 刷新对象以获取生成的 ID
-            for card in created_cards:
-                await db.refresh(card)
-
-            # 如果指定了章纲，自动创建关联
-            if chapter_outline_id:
-                from app.models import PlotCardChapterOutlineLink
-                import uuid
-
-                for card in created_cards:
-                    # 检查是否已存在关联（防止重复）
-                    existing_link_result = await db.execute(
-                        select(PlotCardChapterOutlineLink).where(
-                            PlotCardChapterOutlineLink.plot_card_id == card.id,
-                            PlotCardChapterOutlineLink.chapter_outline_id == chapter_outline_id
-                        )
+                # 创建卡片对象
+                created_cards = []
+                for i, card_data in enumerate(cards_data[:count]):
+                    # 获取当前最大排序序号
+                    max_order_result = await db.execute(
+                        select(PlotCard.order_index).where(PlotCard.project_id == project_id)
+                        .order_by(PlotCard.order_index.desc()).limit(1)
                     )
-                    existing_link = existing_link_result.scalar_one_or_none()
-
-                    if not existing_link:
-                        # 创建新关联
-                        link = PlotCardChapterOutlineLink(
-                            id=str(uuid.uuid4()),
-                            plot_card_id=card.id,
-                            chapter_outline_id=chapter_outline_id,
-                            usage_type="reference"  # 默认为参考类型
-                        )
-                        db.add(link)
-                        logger.info(f"  - 自动关联剧情卡片 {card.title} 到章纲 {chapter_outline_id}")
-
+                    max_order = max_order_result.scalar() or 0
+                    
+                    # 处理标签
+                    tags_json = None
+                    if card_data.get("tags"):
+                        tags_json = json.dumps(card_data["tags"], ensure_ascii=False)
+                    
+                    card = PlotCard(
+                        project_id=project_id,
+                        title=card_data.get("title", f"剧情卡片 {i+1}"),
+                        content=card_data.get("content", ""),
+                        card_type=card_data.get("card_type", card_type),
+                        order_index=max_order + i + 1,
+                        tags=tags_json
+                    )
+                    
+                    db.add(card)
+                    created_cards.append(card)
+                
                 await db.commit()
+
+                # 刷新对象以获取生成的 ID
+                for card in created_cards:
+                    await db.refresh(card)
+
+                # 如果指定了章纲，自动创建关联
+                if chapter_outline_id:
+                    from app.models import PlotCardChapterOutlineLink
+                    import uuid
+
+                    for card in created_cards:
+                        # 检查是否已存在关联（防止重复）
+                        existing_link_result = await db.execute(
+                            select(PlotCardChapterOutlineLink).where(
+                                PlotCardChapterOutlineLink.plot_card_id == card.id,
+                                PlotCardChapterOutlineLink.chapter_outline_id == chapter_outline_id
+                            )
+                        )
+                        existing_link = existing_link_result.scalar_one_or_none()
+
+                        if not existing_link:
+                            # 创建新关联
+                            link = PlotCardChapterOutlineLink(
+                                id=str(uuid.uuid4()),
+                                plot_card_id=card.id,
+                                chapter_outline_id=chapter_outline_id,
+                                usage_type="reference"  # 默认为参考类型
+                            )
+                            db.add(link)
+                            logger.info(f"  - 自动关联剧情卡片 {card.title} 到章纲 {chapter_outline_id}")
+
+                    await db.commit()
+                st.note(cards=len(created_cards))
 
             logger.info(f"成功生成 {len(created_cards)} 个剧情卡片")
             return created_cards
@@ -971,113 +990,120 @@ class PlotGenerationService:
         # 支线篇幅预算上限（章）：向导按全书 40% 均分下发；None = 不夹紧
         sub_budget_cap: Optional[int] = None,
     ) -> List[PlotLine]:
-        """生成剧情线"""
+        """生成剧情线
+
+        过程追踪（后台任务里绑定了 GenerationTrace 时）：context → reference_pack → line-{i}（每条结构，含 MCP 规划）
+        → beats → persist；世界规则检索 / MCP 工具 / 参考包 / LLM 进度由共享入口自动上报。
+        """
         
         # 获取项目信息
         line_type = normalize_plot_line_type(line_type)
 
-        project_result = await db.execute(select(Project).where(Project.id == project_id))
-        project = project_result.scalar_one_or_none()
-        if not project:
-            raise ValueError("项目不存在")
+        async with stage_scope("context", "加载项目 / 大纲 / 世界规则 / 角色") as st:
+            project_result = await db.execute(select(Project).where(Project.id == project_id))
+            project = project_result.scalar_one_or_none()
+            if not project:
+                raise ValueError("项目不存在")
 
-        # 获取大纲内容（用于语义检索）
-        outline_content = None
-        if outline_id:
-            outline_result = await db.execute(select(StoryOutline).where(StoryOutline.id == outline_id))
-            outline = outline_result.scalar_one_or_none()
-            if outline:
-                outline_content = outline.content
+            # 获取大纲内容（用于语义检索）
+            outline_content = None
+            if outline_id:
+                outline_result = await db.execute(select(StoryOutline).where(StoryOutline.id == outline_id))
+                outline = outline_result.scalar_one_or_none()
+                if outline:
+                    outline_content = outline.content
 
-        # 构建查询文本（用于智能检索世界规则）
-        query_parts = [project.theme or "", project.genre or ""]
-        if outline_content:
-            query_parts.append(outline_content[:500])  # 限制长度
-        query_text = " ".join(query_parts)
+            # 构建查询文本（用于智能检索世界规则）
+            query_parts = [project.theme or "", project.genre or ""]
+            if outline_content:
+                query_parts.append(outline_content[:500])  # 限制长度
+            query_text = " ".join(query_parts)
 
-        # 增强世界规则（使用语义检索）
-        enhanced_world_rules = await self._enhance_world_rules(
-            db, project_id, project.world_rules, query=query_text
-        )
-
-        project_data = {
-            "title": project.title,
-            "genre": project.genre,
-            "theme": project.theme,
-            "target_words": project.target_words,
-            "narrative_perspective": project.narrative_perspective,
-            "world_time_period": project.world_time_period,
-            "world_location": project.world_location,
-            "world_atmosphere": project.world_atmosphere,
-            "world_rules": enhanced_world_rules,
-            "generation_prompt": project.generation_prompt
-        }
-        
-        # 获取角色信息（限制数量以控制 token）
-        characters_result = await db.execute(
-            select(Character).where(
-                Character.project_id == project_id,
-                Character.is_organization == False
-            ).limit(10)
-        )
-        characters = characters_result.scalars().all()
-        project_data["characters"] = [
-            {
-                "name": char.name,
-                "role_type": char.role_type,
-                "personality": char.personality,
-                "background": char.background
-            } for char in characters if char.name
-        ]
-        
-        # 获取组织信息
-        organizations_result = await db.execute(
-            select(Character).where(
-                Character.project_id == project_id,
-                Character.is_organization == True
-            ).limit(5)
-        )
-        organizations = organizations_result.scalars().all()
-        project_data["organizations"] = [
-            {
-                "name": org.name,
-                "organization_type": org.organization_type,
-                "organization_purpose": org.organization_purpose,
-                "personality": org.personality
-            } for org in organizations if org.name
-        ]
-
-        # 获取相关剧情卡片
-        plot_cards = None
-        if based_on_cards:
-            cards_result = await db.execute(
-                select(PlotCard).where(PlotCard.id.in_(based_on_cards))
+            # 增强世界规则（使用语义检索）
+            enhanced_world_rules = await self._enhance_world_rules(
+                db, project_id, project.world_rules, query=query_text
             )
-            cards = cards_result.scalars().all()
-            plot_cards = [{"title": card.title, "content": card.content} for card in cards]
-        
-        # 准备剧情线上下文（历史背景和上一条剧情线）
-        historical_context, previous_line_summary = await self._prepare_plot_line_context(
-            db, project_id, based_on_lines
-        )
 
-        # 支线锚定：项目已有带节点的主线时 → 支线在主线时间轴上生成（不再"承接"主线）
-        main_ctx: Optional[Dict[str, Any]] = None
-        existing_subs: List[Dict[str, Any]] = []
-        if line_type != "main":
-            main_ctx = await self._load_main_timeline(db, project_id)
-            if main_ctx is not None:
-                from app.services.bridge_slot_planner import parse_plot_line
-                subs_result = await db.execute(
-                    select(PlotLine).where(PlotLine.project_id == project_id, PlotLine.line_type != "main")
-                    .order_by(PlotLine.order_index)
+            project_data = {
+                "title": project.title,
+                "genre": project.genre,
+                "theme": project.theme,
+                "target_words": project.target_words,
+                "narrative_perspective": project.narrative_perspective,
+                "world_time_period": project.world_time_period,
+                "world_location": project.world_location,
+                "world_atmosphere": project.world_atmosphere,
+                "world_rules": enhanced_world_rules,
+                "generation_prompt": project.generation_prompt
+            }
+        
+            # 获取角色信息（限制数量以控制 token）
+            characters_result = await db.execute(
+                select(Character).where(
+                    Character.project_id == project_id,
+                    Character.is_organization == False
+                ).limit(10)
+            )
+            characters = characters_result.scalars().all()
+            project_data["characters"] = [
+                {
+                    "name": char.name,
+                    "role_type": char.role_type,
+                    "personality": char.personality,
+                    "background": char.background
+                } for char in characters if char.name
+            ]
+        
+            # 获取组织信息
+            organizations_result = await db.execute(
+                select(Character).where(
+                    Character.project_id == project_id,
+                    Character.is_organization == True
+                ).limit(5)
+            )
+            organizations = organizations_result.scalars().all()
+            project_data["organizations"] = [
+                {
+                    "name": org.name,
+                    "organization_type": org.organization_type,
+                    "organization_purpose": org.organization_purpose,
+                    "personality": org.personality
+                } for org in organizations if org.name
+            ]
+
+            # 获取相关剧情卡片
+            plot_cards = None
+            if based_on_cards:
+                cards_result = await db.execute(
+                    select(PlotCard).where(PlotCard.id.in_(based_on_cards))
                 )
-                for s in subs_result.scalars().all():
-                    sd = parse_plot_line(s)
-                    existing_subs.append({
-                        "title": sd.title, "description": s.description or "", "mode": sd.mode,
-                        "anchor_start_beat": sd.anchor_start_beat, "anchor_end_beat": sd.anchor_end_beat,
-                    })
+                cards = cards_result.scalars().all()
+                plot_cards = [{"title": card.title, "content": card.content} for card in cards]
+        
+            # 准备剧情线上下文（历史背景和上一条剧情线）
+            historical_context, previous_line_summary = await self._prepare_plot_line_context(
+                db, project_id, based_on_lines
+            )
+
+            # 支线锚定：项目已有带节点的主线时 → 支线在主线时间轴上生成（不再"承接"主线）
+            main_ctx: Optional[Dict[str, Any]] = None
+            existing_subs: List[Dict[str, Any]] = []
+            if line_type != "main":
+                main_ctx = await self._load_main_timeline(db, project_id)
+                if main_ctx is not None:
+                    from app.services.bridge_slot_planner import parse_plot_line
+                    subs_result = await db.execute(
+                        select(PlotLine).where(PlotLine.project_id == project_id, PlotLine.line_type != "main")
+                        .order_by(PlotLine.order_index)
+                    )
+                    for s in subs_result.scalars().all():
+                        sd = parse_plot_line(s)
+                        existing_subs.append({
+                            "title": sd.title, "description": s.description or "", "mode": sd.mode,
+                            "anchor_start_beat": sd.anchor_start_beat, "anchor_end_beat": sd.anchor_end_beat,
+                        })
+            st.note(characters=len(project_data["characters"]), organizations=len(project_data["organizations"]),
+                    outline_chars=len(outline_content or ""), anchored_to_main=main_ctx is not None)
         
         logger.info(f"📋 [剧情线生成] 开始两阶段生成流程")
         logger.info(f"  - 项目ID: {project_id}")
@@ -1098,36 +1124,42 @@ class PlotGenerationService:
             # 项目挂了 pack 自动用，无需用户每次去 selector 选；用户显式传 R8 字段则覆盖。
             # 设计文档：@/agent-docs/features/dissect_to_creation_pipeline.md §A.2
             dissect_ref_block = ""
-            try:
-                from app.services.reference_pack_injector import ReferencePackInjector
-                _injector = ReferencePackInjector()
-                _anchor = (
-                    f"{project.theme or ''} {project.genre or ''} "
-                    f"{(outline_content or '')[:300]}"
-                ).strip() or "剧情线生成"
-                _ref_block = await _injector.build_reference_block(
-                    db, project_id,
-                    scene="plot_line",
-                    pack_ids=pack_ids,
-                    dimensions=dimensions,
-                    strength=strength,
-                    # 剧情线生成关注故事骨架/结构/方法论；corpus/style 主要给章节正文用，可由 default_dimensions 决定是否启用
-                    fallback_dimensions=("synopsis", "structure", "methodology"),
-                    anchor_query=_anchor,
-                )
-                if _ref_block.user_segment:
-                    dissect_ref_block = _ref_block.user_segment
-                    logger.info(
-                        "[R6-剧情线] 已注入参考包：dims=%s strength=%s 字符=%d",
-                        _ref_block.metadata.get("dimensions"),
-                        _ref_block.metadata.get("strength"),
-                        len(dissect_ref_block),
+            async with stage_scope("reference_pack", "组装拆书参考包") as st:
+                try:
+                    from app.services.reference_pack_injector import ReferencePackInjector
+                    _injector = ReferencePackInjector()
+                    _anchor = (
+                        f"{project.theme or ''} {project.genre or ''} "
+                        f"{(outline_content or '')[:300]}"
+                    ).strip() or "剧情线生成"
+                    _ref_block = await _injector.build_reference_block(
+                        db, project_id,
+                        scene="plot_line",
+                        pack_ids=pack_ids,
+                        dimensions=dimensions,
+                        strength=strength,
+                        # 剧情线生成关注故事骨架/结构/方法论；corpus/style 主要给章节正文用，可由 default_dimensions 决定是否启用
+                        fallback_dimensions=("synopsis", "structure", "methodology"),
+                        anchor_query=_anchor,
                     )
-            except ValueError:
-                # 项目未挂载参考包等情况，优雅降级
-                logger.info("[R6-剧情线] 项目未挂载参考包或无可用维度，跳过注入")
-            except Exception as _e:  # pragma: no cover - 防御性兜底
-                logger.warning("[R6-剧情线] 拆书参考注入失败（已跳过）：%s", _e)
+                    if _ref_block.user_segment:
+                        dissect_ref_block = _ref_block.user_segment
+                        logger.info(
+                            "[R6-剧情线] 已注入参考包：dims=%s strength=%s 字符=%d",
+                            _ref_block.used_dimensions,
+                            _ref_block.used_strength,
+                            len(dissect_ref_block),
+                        )
+                        st.note(dimensions="、".join(_ref_block.used_dimensions), strength=_ref_block.used_strength)
+                    else:
+                        st.skip("参考包无可用内容")
+                except ValueError:
+                    # 项目未挂载参考包等情况，优雅降级
+                    logger.info("[R6-剧情线] 项目未挂载参考包或无可用维度，跳过注入")
+                    st.skip("项目未挂载参考包或无可用维度")
+                except Exception as _e:  # pragma: no cover - 防御性兜底
+                    logger.warning("[R6-剧情线] 拆书参考注入失败（已跳过）：%s", _e)
+                    st.skip("注入失败，已跳过")
 
             # ========== 阶段 1：生成剧情线基本信息（title + description） ==========
             logger.info(f"🔹 [阶段 1] 开始生成剧情线基本信息")
@@ -1136,151 +1168,154 @@ class PlotGenerationService:
             current_previous_line = previous_line_summary  # 当前参考的上一条剧情线
 
             for i in range(count):
-                logger.info(f"📝 [阶段 1] 生成第 {i+1}/{count} 条结构")
+                async with stage_scope(f"line-{i+1}", f"第 {i+1}/{count} 条剧情线结构") as st:
+                    logger.info(f"📝 [阶段 1] 生成第 {i+1}/{count} 条结构")
 
-                # 生成当前条的 Prompt（只要求结构）；支线锚定路径用主线时间轴代替"承接上一条"
-                if main_ctx is not None:
-                    current_prompt = self.prompt_service.generate_sub_line_prompt(
-                        project_data=project_data,
-                        outline_content=outline_content,
-                        main_ctx=main_ctx,
-                        existing_subs=existing_subs,
-                        line_type=line_type,
-                        custom_prompt=custom_prompt,
-                        sequence_index=i + 1,
-                        total=count,
-                        budget_cap=sub_budget_cap,
+                    # 生成当前条的 Prompt（只要求结构）；支线锚定路径用主线时间轴代替"承接上一条"
+                    if main_ctx is not None:
+                        current_prompt = self.prompt_service.generate_sub_line_prompt(
+                            project_data=project_data,
+                            outline_content=outline_content,
+                            main_ctx=main_ctx,
+                            existing_subs=existing_subs,
+                            line_type=line_type,
+                            custom_prompt=custom_prompt,
+                            sequence_index=i + 1,
+                            total=count,
+                            budget_cap=sub_budget_cap,
+                        )
+                    else:
+                        current_prompt = self.prompt_service.generate_plot_line_prompt(
+                            project_data=project_data,
+                            outline_content=outline_content,
+                            plot_cards=plot_cards,
+                            line_type=line_type,
+                            custom_prompt=custom_prompt,
+                            count=1,  # 每次只生成一条
+                            historical_context=historical_context,
+                            previous_line_summary=current_previous_line,
+                            sequence_index=i + 1
+                        )
+
+                    # MCP 增强处理
+                    final_prompt = current_prompt
+                    if enable_mcp and user_id:
+                        logger.info(f"🚀 [阶段 1] 第 {i+1} 条使用 MCP 增强")
+
+                        planning_result = await self._plan_with_mcp(
+                            context_type="plot_line",
+                            project_data=project_data,
+                            outline_content=outline_content,
+                            user_id=user_id,
+                            db_session=db,
+                            selected_plugins=selected_plugins,
+                            provider=provider,
+                            model=model
+                        )
+
+                        reference_materials = planning_result['reference_materials']
+                        final_prompt = f"""{current_prompt}
+
+    【参考资料】
+    以下是通过 MCP 工具收集的真实背景资料，请参考这些信息生成更合理的剧情线：
+
+    {reference_materials}
+
+    请结合上述资料，生成符合要求的剧情线。"""
+
+                    # R6：拼拆书参考包 user_segment（每条剧情线复用同一份 block，避免重复 IO）
+                    if dissect_ref_block:
+                        final_prompt = f"{final_prompt}\n\n{dissect_ref_block}"
+
+                    final_prompt = project_prompt_service.apply_project_generation_prompt(
+                        final_prompt,
+                        project.generation_prompt or ''
                     )
-                else:
-                    current_prompt = self.prompt_service.generate_plot_line_prompt(
-                        project_data=project_data,
-                        outline_content=outline_content,
-                        plot_cards=plot_cards,
-                        line_type=line_type,
-                        custom_prompt=custom_prompt,
-                        count=1,  # 每次只生成一条
-                        historical_context=historical_context,
-                        previous_line_summary=current_previous_line,
-                        sequence_index=i + 1
-                    )
 
-                # MCP 增强处理
-                final_prompt = current_prompt
-                if enable_mcp and user_id:
-                    logger.info(f"🚀 [阶段 1] 第 {i+1} 条使用 MCP 增强")
+                    # 调用 AI 生成单条剧情线结构（流式累积）
+                    generation_start_time = time.time()
 
-                    planning_result = await self._plan_with_mcp(
-                        context_type="plot_line",
-                        project_data=project_data,
-                        outline_content=outline_content,
-                        user_id=user_id,
-                        db_session=db,
-                        selected_plugins=selected_plugins,
+                    response = await self.ai_service.generate_text_stream_collect(
+                        prompt=final_prompt,
                         provider=provider,
-                        model=model
+                        model=model,
+                        temperature=0.7,
+                        context=f"PlotLineStruct-{model or 'default'}"
                     )
 
-                    reference_materials = planning_result['reference_materials']
-                    final_prompt = f"""{current_prompt}
+                    generation_time = time.time() - generation_start_time
+                    logger.info(f"  - 第 {i+1} 条结构生成耗时: {generation_time:.2f}s")
 
-【参考资料】
-以下是通过 MCP 工具收集的真实背景资料，请参考这些信息生成更合理的剧情线：
+                    # 解析 AI 响应
+                    ai_content = response if isinstance(response, str) else response.get("content", "")
+                    lines_data = self._parse_ai_response(ai_content, "plot_lines")
 
-{reference_materials}
+                    if not lines_data:
+                        logger.warning(f"⚠️ [阶段 1] 第 {i+1} 条剧情线结构生成失败，跳过")
+                        st.skip("结构解析为空")
+                        continue
 
-请结合上述资料，生成符合要求的剧情线。"""
+                    # 取第一条结果
+                    line_data = lines_data[0]
 
-                # R6：拼拆书参考包 user_segment（每条剧情线复用同一份 block，避免重复 IO）
-                if dissect_ref_block:
-                    final_prompt = f"{final_prompt}\n\n{dissect_ref_block}"
+                    # 提取并规范化预计章节数（严格模式：必须是 >=1 的整数）
+                    raw_estimated = line_data.get("estimated_chapters")
+                    normalized_estimated: Optional[int] = None
+                    if isinstance(raw_estimated, int):
+                        normalized_estimated = raw_estimated
+                    elif isinstance(raw_estimated, str):
+                        import re
+                        match = re.search(r"\d+", raw_estimated)
+                        if match:
+                            normalized_estimated = int(match.group(0))
 
-                final_prompt = project_prompt_service.apply_project_generation_prompt(
-                    final_prompt,
-                    project.generation_prompt or ''
-                )
+                    if normalized_estimated is None or normalized_estimated < 1:
+                        logger.error(
+                            "❌ [阶段 1] 第 %s 条剧情线的 estimated_chapters 非法或缺失: %r",
+                            i + 1,
+                            raw_estimated,
+                        )
+                        raise ValueError(
+                            "AI 返回格式不完整: 缺少合法的 estimated_chapters 字段(必须是>=1的整数), "
+                            "请重试或调整提示词，让 AI 明确给出本剧情线的预计章节数。"
+                        )
 
-                # 调用 AI 生成单条剧情线结构（流式累积）
-                generation_start_time = time.time()
+                    # 支线篇幅预算夹紧（只在锚定路径下生效；主线不受影响）
+                    if main_ctx is not None and sub_budget_cap:
+                        normalized_estimated = min(normalized_estimated, sub_budget_cap)
 
-                response = await self.ai_service.generate_text_stream_collect(
-                    prompt=final_prompt,
-                    provider=provider,
-                    model=model,
-                    temperature=0.7,
-                    context=f"PlotLineStruct-{model or 'default'}"
-                )
-
-                generation_time = time.time() - generation_start_time
-                logger.info(f"  - 第 {i+1} 条结构生成耗时: {generation_time:.2f}s")
-
-                # 解析 AI 响应
-                ai_content = response if isinstance(response, str) else response.get("content", "")
-                lines_data = self._parse_ai_response(ai_content, "plot_lines")
-
-                if not lines_data:
-                    logger.warning(f"⚠️ [阶段 1] 第 {i+1} 条剧情线结构生成失败，跳过")
-                    continue
-
-                # 取第一条结果
-                line_data = lines_data[0]
-
-                # 提取并规范化预计章节数（严格模式：必须是 >=1 的整数）
-                raw_estimated = line_data.get("estimated_chapters")
-                normalized_estimated: Optional[int] = None
-                if isinstance(raw_estimated, int):
-                    normalized_estimated = raw_estimated
-                elif isinstance(raw_estimated, str):
-                    import re
-                    match = re.search(r"\d+", raw_estimated)
-                    if match:
-                        normalized_estimated = int(match.group(0))
-
-                if normalized_estimated is None or normalized_estimated < 1:
-                    logger.error(
-                        "❌ [阶段 1] 第 %s 条剧情线的 estimated_chapters 非法或缺失: %r",
-                        i + 1,
-                        raw_estimated,
-                    )
-                    raise ValueError(
-                        "AI 返回格式不完整: 缺少合法的 estimated_chapters 字段(必须是>=1的整数), "
-                        "请重试或调整提示词，让 AI 明确给出本剧情线的预计章节数。"
-                    )
-
-                # 支线篇幅预算夹紧（只在锚定路径下生效；主线不受影响）
-                if main_ctx is not None and sub_budget_cap:
-                    normalized_estimated = min(normalized_estimated, sub_budget_cap)
-
-                # 保存到阶段 1 结果列表
-                generated_lines_data.append({
-                    "index": i + 1,
-                    "title": line_data.get("title", f"剧情线 {i+1}"),
-                    "description": line_data.get("description", ""),
-                    "line_type": normalize_plot_line_type(
-                        line_data.get("line_type", line_type),
-                        default=line_type
-                    ),
-                    "plot_cards": line_data.get("plot_cards", []),
-                    "estimated_chapters": normalized_estimated,
-                    "mode": line_data.get("mode") if main_ctx is not None else None,
-                    "anchor_start_beat": line_data.get("anchor_start_beat") if main_ctx is not None else None,
-                    "anchor_end_beat": line_data.get("anchor_end_beat") if main_ctx is not None else None,
-                })
-
-                logger.info(f"  - 第 {i+1} 条结构已生成: {line_data.get('title')}")
-
-                # 锚定路径：本条进入"已有支线"，后续支线避免重复
-                if main_ctx is not None:
-                    existing_subs.append({
-                        "title": line_data.get("title", ""), "description": line_data.get("description", ""),
-                        "mode": line_data.get("mode"), "anchor_start_beat": line_data.get("anchor_start_beat"),
-                        "anchor_end_beat": line_data.get("anchor_end_beat"),
+                    # 保存到阶段 1 结果列表
+                    generated_lines_data.append({
+                        "index": i + 1,
+                        "title": line_data.get("title", f"剧情线 {i+1}"),
+                        "description": line_data.get("description", ""),
+                        "line_type": normalize_plot_line_type(
+                            line_data.get("line_type", line_type),
+                            default=line_type
+                        ),
+                        "plot_cards": line_data.get("plot_cards", []),
+                        "estimated_chapters": normalized_estimated,
+                        "mode": line_data.get("mode") if main_ctx is not None else None,
+                        "anchor_start_beat": line_data.get("anchor_start_beat") if main_ctx is not None else None,
+                        "anchor_end_beat": line_data.get("anchor_end_beat") if main_ctx is not None else None,
                     })
 
-                # 更新下一条的参考剧情线（用于承接）
-                current_previous_line = {
-                    "title": line_data.get("title", ""),
-                    "description": line_data.get("description", "")
-                }
+                    logger.info(f"  - 第 {i+1} 条结构已生成: {line_data.get('title')}")
+
+                    # 锚定路径：本条进入"已有支线"，后续支线避免重复
+                    if main_ctx is not None:
+                        existing_subs.append({
+                            "title": line_data.get("title", ""), "description": line_data.get("description", ""),
+                            "mode": line_data.get("mode"), "anchor_start_beat": line_data.get("anchor_start_beat"),
+                            "anchor_end_beat": line_data.get("anchor_end_beat"),
+                        })
+
+                    # 更新下一条的参考剧情线（用于承接）
+                    current_previous_line = {
+                        "title": line_data.get("title", ""),
+                        "description": line_data.get("description", "")
+                    }
+                    st.note(title=line_data.get("title", ""), estimated_chapters=normalized_estimated)
 
             stage1_time = time.time() - total_start_time
             logger.info(f"✅ [阶段 1] 完成，共生成 {len(generated_lines_data)} 条剧情线结构")
@@ -1296,14 +1331,16 @@ class PlotGenerationService:
             stage2_start_time = time.time()
 
             # 调用批量 beats 生成（R6：透传同一份拆书参考块，避免阶段 2 重复查库）
-            index_to_beats = await self._generate_beats_for_lines_with_ai(
-                project_data=project_data,
-                lines=generated_lines_data,
-                provider=provider,
-                model=model,
-                dissect_ref_block=dissect_ref_block,
-                main_ctx=main_ctx,
-            )
+            async with stage_scope("beats", "批量规划节点") as st:
+                index_to_beats = await self._generate_beats_for_lines_with_ai(
+                    project_data=project_data,
+                    lines=generated_lines_data,
+                    provider=provider,
+                    model=model,
+                    dissect_ref_block=dissect_ref_block,
+                    main_ctx=main_ctx,
+                )
+                st.note(ai_lines=len(index_to_beats), fallback=len(generated_lines_data) - len(index_to_beats))
 
             stage2_time = time.time() - stage2_start_time
             logger.info(f"✅ [阶段 2] 节点规划完成")
@@ -1314,80 +1351,82 @@ class PlotGenerationService:
             # ========== 最终写库：创建 PlotLine 对象 ==========
             logger.info(f"🔹 [写库] 开始创建剧情线对象")
 
-            # 获取当前最大排序序号
-            max_order_result = await db.execute(
-                select(PlotLine.order_index).where(PlotLine.project_id == project_id)
-                .order_by(PlotLine.order_index.desc()).limit(1)
-            )
-            base_order_index = max_order_result.scalar() or 0
-
-            created_lines = []
-
-            for line_data in generated_lines_data:
-                line_index = line_data["index"]
-
-                # 尝试从 AI 结果获取 beats
-                if line_index in index_to_beats:
-                    beats = index_to_beats[line_index]
-                    logger.info(f"  - 剧情线 {line_index} 使用 AI 生成的节点（{len(beats)} 个）")
-                else:
-                    logger.warning(f"  - 剧情线 {line_index} 未生成节点，跳过")
-                    continue
-
-                # 权重归一化（确保总和接近 1.0）
-                total_weight = sum(beat.get("weight", 0) for beat in beats)
-                if total_weight > 0 and (total_weight < 0.95 or total_weight > 1.05):
-                    logger.info(f"  - 剧情线 {line_index} 权重归一化: {total_weight:.2f} -> 1.0")
-                    for beat in beats:
-                        beat["weight"] = beat["weight"] / total_weight
-
-                # 构建 timeline_data：beats + （锚定成功时）mode / anchor 区间
-                timeline_data: Dict[str, Any] = {"beats": beats}
-                if (
-                    line_data.get("mode")
-                    and line_data.get("anchor_start_beat") is not None
-                    and all(b.get("anchor_beat") is not None for b in beats)
-                ):
-                    timeline_data.update(
-                        mode=line_data["mode"],
-                        anchor_start_beat=line_data["anchor_start_beat"],
-                        anchor_end_beat=line_data["anchor_end_beat"],
-                    )
-                timeline_data_json = json.dumps(timeline_data, ensure_ascii=False)
-
-                # 提取预计章节数（严格模式：必须由 AI 提供合法的正整数）
-                estimated_chapters = line_data.get("estimated_chapters")
-                if not isinstance(estimated_chapters, int) or estimated_chapters < 1:
-                    logger.error(
-                        "❌ 剧情线 %s 的 estimated_chapters 非法或缺失: %r",
-                        line_index,
-                        line_data.get("estimated_chapters"),
-                    )
-                    raise ValueError(
-                        "AI 返回格式不完整: 缺少合法的 estimated_chapters 字段(必须是>=1的整数), "
-                        "请重试或调整提示词，让 AI 明确给出本剧情线的预计章节数。"
-                    )
-
-                logger.info(f"  - 剧情线 {line_index} 预计章节数: {estimated_chapters} 章")
-
-                # 创建 PlotLine 对象
-                line = PlotLine(
-                    project_id=project_id,
-                    story_outline_id=outline_id,
-                    title=line_data["title"],
-                    description=line_data["description"],
-                    line_type=normalize_plot_line_type(line_data["line_type"], default=line_type),
-                    order_index=base_order_index + line_index,
-                    timeline_data=timeline_data_json,
-                    estimated_chapters=estimated_chapters
+            async with stage_scope("persist", "写入剧情线") as st:
+                # 获取当前最大排序序号
+                max_order_result = await db.execute(
+                    select(PlotLine.order_index).where(PlotLine.project_id == project_id)
+                    .order_by(PlotLine.order_index.desc()).limit(1)
                 )
+                base_order_index = max_order_result.scalar() or 0
 
-                db.add(line)
-                await db.commit()  # 立即提交以获取 ID
-                await db.refresh(line)  # 刷新以获取生成的 ID
+                created_lines = []
 
-                created_lines.append(line)
-                logger.info(f"  - 剧情线 {line_index} 已创建: {line.title}")
+                for line_data in generated_lines_data:
+                    line_index = line_data["index"]
+
+                    # 尝试从 AI 结果获取 beats
+                    if line_index in index_to_beats:
+                        beats = index_to_beats[line_index]
+                        logger.info(f"  - 剧情线 {line_index} 使用 AI 生成的节点（{len(beats)} 个）")
+                    else:
+                        logger.warning(f"  - 剧情线 {line_index} 未生成节点，跳过")
+                        continue
+
+                    # 权重归一化（确保总和接近 1.0）
+                    total_weight = sum(beat.get("weight", 0) for beat in beats)
+                    if total_weight > 0 and (total_weight < 0.95 or total_weight > 1.05):
+                        logger.info(f"  - 剧情线 {line_index} 权重归一化: {total_weight:.2f} -> 1.0")
+                        for beat in beats:
+                            beat["weight"] = beat["weight"] / total_weight
+
+                    # 构建 timeline_data：beats + （锚定成功时）mode / anchor 区间
+                    timeline_data: Dict[str, Any] = {"beats": beats}
+                    if (
+                        line_data.get("mode")
+                        and line_data.get("anchor_start_beat") is not None
+                        and all(b.get("anchor_beat") is not None for b in beats)
+                    ):
+                        timeline_data.update(
+                            mode=line_data["mode"],
+                            anchor_start_beat=line_data["anchor_start_beat"],
+                            anchor_end_beat=line_data["anchor_end_beat"],
+                        )
+                    timeline_data_json = json.dumps(timeline_data, ensure_ascii=False)
+
+                    # 提取预计章节数（严格模式：必须由 AI 提供合法的正整数）
+                    estimated_chapters = line_data.get("estimated_chapters")
+                    if not isinstance(estimated_chapters, int) or estimated_chapters < 1:
+                        logger.error(
+                            "❌ 剧情线 %s 的 estimated_chapters 非法或缺失: %r",
+                            line_index,
+                            line_data.get("estimated_chapters"),
+                        )
+                        raise ValueError(
+                            "AI 返回格式不完整: 缺少合法的 estimated_chapters 字段(必须是>=1的整数), "
+                            "请重试或调整提示词，让 AI 明确给出本剧情线的预计章节数。"
+                        )
+
+                    logger.info(f"  - 剧情线 {line_index} 预计章节数: {estimated_chapters} 章")
+
+                    # 创建 PlotLine 对象
+                    line = PlotLine(
+                        project_id=project_id,
+                        story_outline_id=outline_id,
+                        title=line_data["title"],
+                        description=line_data["description"],
+                        line_type=normalize_plot_line_type(line_data["line_type"], default=line_type),
+                        order_index=base_order_index + line_index,
+                        timeline_data=timeline_data_json,
+                        estimated_chapters=estimated_chapters
+                    )
+
+                    db.add(line)
+                    await db.commit()  # 立即提交以获取 ID
+                    await db.refresh(line)  # 刷新以获取生成的 ID
+
+                    created_lines.append(line)
+                    logger.info(f"  - 剧情线 {line_index} 已创建: {line.title}")
+                st.note(lines=len(created_lines))
 
             total_time = time.time() - total_start_time
             logger.info(f"✅ [剧情线生成] 完成，共生成 {len(created_lines)} 条剧情线")
