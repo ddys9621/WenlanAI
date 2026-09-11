@@ -166,6 +166,12 @@ export const AI_JOB_KIND_LABELS: Record<string, string> = {
   chapter_analyze: '章节分析',
   scene_generate: '场景生成',
   chapter_imitate: '一键仿写',
+  wizard_world_building: '向导·世界构建',
+  wizard_characters: '向导·角色',
+  wizard_outline: '向导·故事大纲',
+  wizard_plot_lines: '向导·剧情线',
+  inspiration_options: '灵感候选',
+  inspiration_quick: '灵感补全',
 };
 
 export const kindLabel = (kind: string) => AI_JOB_KIND_LABELS[kind] ?? kind;

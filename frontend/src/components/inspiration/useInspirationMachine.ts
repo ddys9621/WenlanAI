@@ -2,7 +2,14 @@
 
 import { useReducer, useCallback } from 'react';
 import { toast } from 'sonner';
-import { inspirationApi } from '../../services/api';
+import {
+  inspirationApi,
+  type InspirationOptionsRequest,
+  type InspirationOptionsResult,
+  type InspirationQuickRequest,
+  type InspirationQuickResult,
+} from '../../services/api';
+import { runAIJob } from '../../store/aiJobsStore';
 import { wizardReducer } from './reducer';
 import { createInitialState } from './types';
 import type { GenerationApiContext, OptionGenerationStep, RefinementContext, Step, WizardData } from './types';
@@ -74,6 +81,36 @@ const buildRefinementContext = (
 const hasRefinementContext = (context: RefinementContext) =>
   context.requirements.length > 0 || context.previousOptions.length > 0;
 
+const STEP_LABELS: Record<OptionGenerationStep, string> = { title: '书名', description: '简介', theme: '主题', genre: '类型' };
+
+/**
+ * 候选生成走通用后台任务（不弹窗：对话气泡里已有骨架屏；托盘可见、刷新不丢）。
+ * 任务硬失败折成软错误 {error}，让下面的状态机分支保持原样。
+ */
+async function requestOptions(data: InspirationOptionsRequest): Promise<InspirationOptionsResult> {
+  try {
+    const job = await runAIJob({
+      kind: 'inspiration_options',
+      title: `灵感：生成${STEP_LABELS[data.step]}候选`,
+      openModal: false,
+      connect: (options) => inspirationApi.generateOptionsStream(data, options),
+    });
+    return (job.result as InspirationOptionsResult | null) ?? { options: [], error: '生成失败' };
+  } catch (err) {
+    return { options: [], error: err instanceof Error ? err.message : '生成失败' };
+  }
+}
+
+async function requestQuickGenerate(data: InspirationQuickRequest): Promise<InspirationQuickResult> {
+  const job = await runAIJob({
+    kind: 'inspiration_quick',
+    title: '灵感：智能补全书籍信息',
+    openModal: false,
+    connect: (options) => inspirationApi.quickGenerateStream(data, options),
+  });
+  return (job.result as InspirationQuickResult | null) ?? { title: '', description: '', theme: '', genre: [], error: '补全失败' };
+}
+
 export function useInspirationMachine() {
   const [state, dispatch] = useReducer(wizardReducer, undefined, createInitialState);
 
@@ -106,7 +143,7 @@ export function useInspirationMachine() {
           : {}),
       };
 
-      const response = await inspirationApi.generateOptions(requestData);
+      const response = await requestOptions(requestData);
 
       if (response.error || !response.options || response.options.length < 3) {
         const stepLabel = { title: '书名', description: '简介', theme: '主题', genre: '类型' }[apiStep];
@@ -316,7 +353,7 @@ export function useInspirationMachine() {
     }
     dispatch({ type: 'API_LOADING', payload: 'loading_title' });
     try {
-      const result = await inspirationApi.quickGenerate({
+      const result = await requestQuickGenerate({
         title: data.title,
         description: data.description,
         theme: data.theme,

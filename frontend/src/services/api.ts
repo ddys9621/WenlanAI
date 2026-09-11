@@ -519,44 +519,56 @@ export const writingStyleApi = {
   // 为项目初始化默认风格（如果没有任何风格）
 };
 
-export const inspirationApi = {
-  // 生成选项建议
-  generateOptions: (data: {
-    step: 'title' | 'description' | 'theme' | 'genre';
-    context: {
-      title?: string;
-      description?: string;
-      theme?: string;
-      original_idea?: string;
-    };
-    hint?: string;
-    refinement_context?: {
-      requirements?: string[];
-      previous_options?: string[];
-    };
-  }) =>
-    api.post<unknown, {
-      prompt?: string;
-      options: string[];
-      error?: string;
-    }>('/inspiration/generate-options', data),
-  
-  // 智能补全缺失信息
-  quickGenerate: (data: {
+/** 灵感模式候选生成的请求体 */
+export interface InspirationOptionsRequest {
+  step: 'title' | 'description' | 'theme' | 'genre';
+  context: {
     title?: string;
     description?: string;
     theme?: string;
-    genre?: string | string[];
-    narrative_perspective?: string;
-  }) =>
-    api.post<unknown, {
-      title: string;
-      description: string;
-      theme: string;
-      genre: string[];
-      narrative_perspective?: string;
-      error?: string;
-    }>('/inspiration/quick-generate', data),
+    original_idea?: string;
+  };
+  hint?: string;
+  refinement_context?: {
+    requirements?: string[];
+    previous_options?: string[];
+  };
+}
+
+/** 灵感模式候选生成的结果（任务 result 事件的 data；error 为软错误） */
+export interface InspirationOptionsResult {
+  prompt?: string;
+  options: string[];
+  error?: string;
+}
+
+/** 灵感模式智能补全的请求体 */
+export interface InspirationQuickRequest {
+  title?: string;
+  description?: string;
+  theme?: string;
+  genre?: string | string[];
+  narrative_perspective?: string;
+}
+
+/** 灵感模式智能补全的结果（任务 result 事件的 data；error 为软错误） */
+export interface InspirationQuickResult {
+  title: string;
+  description: string;
+  theme: string;
+  genre: string[];
+  narrative_perspective?: string;
+  error?: string;
+}
+
+export const inspirationApi = {
+  /** 生成选项建议：后台任务 + SSE（result 即原 JSON）POST /api/inspiration/generate-options-stream */
+  generateOptionsStream: (data: InspirationOptionsRequest, options?: SSEClientOptions<InspirationOptionsResult>) =>
+    ssePost<InspirationOptionsResult>('/api/inspiration/generate-options-stream', data, options),
+
+  /** 智能补全缺失信息：后台任务 + SSE（result 即原 JSON）POST /api/inspiration/quick-generate-stream */
+  quickGenerateStream: (data: InspirationQuickRequest, options?: SSEClientOptions<InspirationQuickResult>) =>
+    ssePost<InspirationQuickResult>('/api/inspiration/quick-generate-stream', data, options),
 };
 
 export default api;
