@@ -138,7 +138,11 @@ def bind_trace(trace: GenerationTrace) -> Token:
 
 
 def reset_trace(token: Token) -> None:
-    _current.reset(token)
+    try:
+        _current.reset(token)
+    except ValueError:
+        # 在别的 Context 里收尾（如任务被 GC 时抛进来的 GeneratorExit）：token 不可用，直接清空绑定
+        _current.set(None)
 
 
 # ---------------- 便捷函数：未绑定时 no-op ----------------

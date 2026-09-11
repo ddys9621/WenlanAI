@@ -14,7 +14,7 @@ import json
 import logging
 import time
 from dataclasses import asdict, dataclass
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -47,6 +47,7 @@ from app.services.bridge_slot_planner import (
     parse_plot_line,
 )
 from app.services.bridge_templates import BridgeTemplate, resolve_template
+from app.services.generation_trace import stage_scope
 from app.services.reference_pack import (
     AssemblyContext,
     PromptAssembler,
@@ -928,8 +929,13 @@ class BridgePlanningService:
         db: AsyncSession,
         project_id: str,
         model_name: Optional[str] = None,
+        on_bridge_done: Optional[Callable[[PlotBridge, list[ChapterOutline]], Awaitable[None]]] = None,
     ) -> dict[str, Any]:
-        """按 bridge_number 顺序展开全部 ready 桥段；首个失败即停止（后续桥段依赖前序 completed）。"""
+        """按 bridge_number 顺序展开全部 ready 桥段；首个失败即停止（后续桥段依赖前序 completed）。
+
+        on_bridge_done(bridge, created_chapters)：每个桥段成功后回调（后台任务用它实时推送翻卡事件）。
+        每个桥段一个 stage（绑定了过程追踪时出现在前端时间线）。
+        """
         bridges = await self.list_bridges(db, project_id)
         ready = sorted((b for b in bridges if b.status == "ready"), key=lambda b: b.bridge_number)
         if not ready:
@@ -939,10 +945,14 @@ class BridgePlanningService:
         failed: list[dict[str, Any]] = []
         created_count = 0
         # 先取出标识：失败后 rollback 会让 ORM 对象过期，再访问属性会触发同步 IO
-        targets = [(b.id, b.bridge_number) for b in ready]
-        for bridge_id, bridge_number in targets:
+        targets = [(b.id, b.bridge_number, b.title or "") for b in ready]
+        for bridge_id, bridge_number, title in targets:
+            c_start, c_end = chapter_range(bridge_number)
+            label = f"展开桥段 {bridge_number}《{title}》→ 第 {c_start}-{c_end} 章"
             try:
-                created = await self.expand_bridge_to_chapters(db, bridge_id=bridge_id, model_name=model_name)
+                async with stage_scope(f"bridge-{bridge_number}", label) as st:
+                    created = await self.expand_bridge_to_chapters(db, bridge_id=bridge_id, model_name=model_name)
+                    st.note(chapters=len(created))
             except Exception as exc:  # noqa: BLE001 - 记录后终止批量
                 await db.rollback()
                 logger.error(
@@ -952,6 +962,8 @@ class BridgePlanningService:
                 break
             succeeded.append(bridge_id)
             created_count += len(created)
+            if on_bridge_done is not None:
+                await on_bridge_done(await self.get_bridge(db, bridge_id), created)
 
         return {
             "total": len(ready),

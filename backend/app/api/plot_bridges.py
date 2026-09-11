@@ -9,8 +9,8 @@
 - GET    /api/bridges/{bridge_id}                         详情
 - PATCH  /api/bridges/{bridge_id}                         更新（修改 4 章卡片内容）
 - DELETE /api/bridges/{bridge_id}                         删除
-- POST   /api/bridges/{bridge_id}/expand                  展开为第 4(n-1)+1…4n 章
-- POST   /api/projects/{project_id}/bridges/expand-all    按序批量展开 ready 桥段
+- POST   /api/bridges/{bridge_id}/expand-stream           SSE：后台展开为第 4(n-1)+1…4n 章
+- POST   /api/projects/{project_id}/bridges/expand-all-stream  SSE：后台按序批量展开 ready 桥段
 
 前置不满足 → 400；状态冲突 → 409。
 """
@@ -30,6 +30,7 @@ from app.database import get_db
 from app.models.project import Project
 from app.services.ai_jobs import job_session_factory
 from app.services.ai_service import AIService
+from app.services.bridge_expand_jobs import start_bridge_expand
 from app.services.bridge_fill_jobs import start_bridge_fill
 from app.services.bridge_planning_service import BridgePlanningService, bridge_to_dict
 from app.services.bridge_slot_planner import (
@@ -305,58 +306,61 @@ async def delete_bridge_endpoint(
     return {"success": ok}
 
 
-@router.post("/bridges/{bridge_id}/expand")
-async def expand_bridge_endpoint(
+@router.post("/bridges/{bridge_id}/expand-stream")
+async def expand_bridge_stream_endpoint(
     bridge_id: str,
     payload: ExpandBridgeRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
     service: BridgePlanningService = Depends(get_bridge_service),
 ):
-    """把一个 ready 桥段展开为第 4(n-1)+1…4n 章（自动赋 bridge_id + bridge_position，回写节点覆盖账本）。"""
+    """SSE：后台把一个 ready 桥段展开为第 4(n-1)+1…4n 章（stage / bridges / result / done）。
+
+    前置条件不满足（非 ready / 前序未 completed）会成为任务 error 事件；重连与停止走 /api/ai-jobs/*；
+    同项目已有展开任务在跑 → 409。payload.model 为 None 时由 service 回退到用户默认模型。
+    """
     bridge = await service.get_bridge(db, bridge_id)
     if not bridge:
         raise HTTPException(status_code=404, detail="桥段不存在")
 
     user_id = getattr(request.state, "user_id", None)
     await verify_project_access(bridge.project_id, user_id, db)
-
-    # payload.model 为 None 时，由 service 内部回退到 user_ai_service.default_model
     try:
-        chapters = await service.expand_bridge_to_chapters(db, bridge_id=bridge_id, model_name=payload.model)
-    except (BridgePlanningPreconditionError, BridgePlanningConflictError) as exc:
-        _raise_http(exc)
-    except Exception as exc:
-        logger.error("[plot_bridges] 展开失败: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"桥段展开失败: {exc}")
-
-    return {
-        "success": True,
-        "bridge_id": bridge_id,
-        "chapter_count": len(chapters),
-        "chapter_ids": [c.id for c in chapters],
-    }
+        job = await start_bridge_expand(
+            project_id=bridge.project_id,
+            user_id=user_id,
+            ai_service=service.ai_service,
+            session_factory=job_session_factory(user_id),
+            model=payload.model,
+            bridge_id=bridge_id,
+        )
+    except BridgePlanningConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return job_sse_response(job)
 
 
-@router.post("/projects/{project_id}/bridges/expand-all")
-async def expand_all_bridges_endpoint(
+@router.post("/projects/{project_id}/bridges/expand-all-stream")
+async def expand_all_bridges_stream_endpoint(
     project_id: str,
     payload: ExpandAllRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
     service: BridgePlanningService = Depends(get_bridge_service),
 ):
-    """批量展开项目下所有 status='ready' 的桥段（按 bridge_number 顺序）。
+    """SSE：后台按 bridge_number 顺序展开全部 ready 桥段（每桥段一个 stage + bridges 事件）。
 
-    首个失败即停止：后续桥段依赖前序 completed。返回成功/失败明细。
+    首个失败即停止（后续桥段依赖前序 completed）；result 事件带成功 / 失败明细。
     """
     user_id = getattr(request.state, "user_id", None)
     await verify_project_access(project_id, user_id, db)
-
     try:
-        result = await service.expand_all_ready_bridges(db, project_id=project_id, model_name=payload.model)
-    except Exception as exc:
-        logger.error("[plot_bridges] 批量展开失败: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"批量展开失败: {exc}")
-
-    return {"success": True, **result}
+        job = await start_bridge_expand(
+            project_id=project_id,
+            user_id=user_id,
+            ai_service=service.ai_service,
+            session_factory=job_session_factory(user_id),
+            model=payload.model,
+        )
+    except BridgePlanningConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return job_sse_response(job)
