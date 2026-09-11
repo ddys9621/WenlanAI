@@ -16,7 +16,8 @@ import { toast } from 'sonner';
 
 import { cn } from '@/lib/utils';
 import { imitationApi, referencePackApi } from '@/services/api';
-import { SSEPostClient } from '@/utils/sseClient';
+import { AIJobError, runAIJob, useAIJob, useAIJobsStore } from '@/store/aiJobsStore';
+import { AIJobProcess } from '@/components/ai-job/AIJobProcess';
 import type {
   ImitateChapterRequest,
   ImitationPackUsage,
@@ -87,7 +88,11 @@ export function ImitationDialog({
     strength: ReferenceStrength;
   } | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const sseClientRef = useRef<SSEPostClient | null>(null);
+  // 生成走通用后台任务：关弹窗不中断（托盘可见）；这里记任务 id 以便停止与展示过程面板
+  const [jobId, setJobId] = useState<string | null>(null);
+  const job = useAIJob(jobId);
+  const cancelJob = useAIJobsStore((s) => s.cancel);
+  const [showProcess, setShowProcess] = useState(false);
   const draftRef = useRef<HTMLTextAreaElement | null>(null);
 
   // 加载挂载列表 + 初始化默认值
@@ -132,16 +137,15 @@ export function ImitationDialog({
     };
   }, [isOpen, projectId]);
 
-  // 关闭时清理流式连接
+  // 关闭时重置本地视图（任务本身归 store：仍在跑的仿写在托盘里可见，可从那里停止）
   useEffect(() => {
     if (!isOpen) {
-      sseClientRef.current?.abort();
-      sseClientRef.current = null;
       setGenerating(false);
       setProgress(0);
       setDraft('');
       setMeta(null);
       setErrorMsg(null);
+      setJobId(null);
     }
   }, [isOpen]);
 
@@ -191,49 +195,50 @@ export function ImitationDialog({
     setMeta(null);
     setErrorMsg(null);
 
-    const client = new SSEPostClient(imitationApi.streamUrl(projectId), payload, {
-      onProgress: (message, p) => {
-        setProgress(p);
-        if (message) setProgressMsg(message);
-      },
-      // 流内 meta 事件：后端已按"实际产出"收敛 used_dimensions，这里直接消费，
-      // 不再依赖 onBlur 的 preview 请求（其结果可能过期）
-      onMeta: (m) => {
-        setMeta({
-          used_packs: (m.used_packs as ImitationPackUsage[]) ?? [],
-          used_dimensions: (m.used_dimensions as string[]) ?? [],
-          strength: (m.strength as ReferenceStrength) ?? 'medium',
-        });
-      },
-      onChunk: (chunk) => {
-        setDraft((prev) => {
-          const next = prev + chunk;
-          requestAnimationFrame(() => {
-            if (draftRef.current) draftRef.current.scrollTop = draftRef.current.scrollHeight;
-          });
-          return next;
-        });
-      },
-      onError: (err) => {
-        setErrorMsg(err);
-        toast.error(`仿写失败：${err}`);
-      },
-      onComplete: () => {
-        setGenerating(false);
-      },
-    });
-    sseClientRef.current = client;
-
     try {
-      await client.connect();
+      await runAIJob({
+        kind: 'chapter_imitate',
+        title: `一键仿写「${targetChapterTitle}」`,
+        projectId,
+        openModal: false,
+        meta: { target_chapter_id: targetChapterId },
+        onStarted: setJobId,
+        connect: (options) => imitationApi.imitateChapterStream(projectId, payload, options),
+        onEvent: (m) => {
+          if (m.type === 'progress') {
+            if (typeof m.progress === 'number') setProgress(m.progress);
+            if (typeof m.message === 'string' && m.message) setProgressMsg(m.message);
+          } else if (m.type === 'meta') {
+            // 流内 meta 事件：后端已按"实际产出"收敛 used_dimensions，这里直接消费，
+            // 不再依赖 onBlur 的 preview 请求（其结果可能过期）
+            setMeta({
+              used_packs: (m.used_packs as ImitationPackUsage[]) ?? [],
+              used_dimensions: (m.used_dimensions as string[]) ?? [],
+              strength: (m.strength as ReferenceStrength) ?? 'medium',
+            });
+          } else if (m.type === 'content' && typeof m.content === 'string') {
+            const chunk = m.content;
+            setDraft((prev) => {
+              const next = prev + chunk;
+              requestAnimationFrame(() => {
+                if (draftRef.current) draftRef.current.scrollTop = draftRef.current.scrollHeight;
+              });
+              return next;
+            });
+          }
+        },
+      });
+      setProgress(100);
     } catch (err) {
-      const e = err as { name?: string; message?: string };
-      if (e?.name !== 'AbortError') {
-        if (!errorMsg) setErrorMsg(e?.message || '生成中断');
+      if (err instanceof AIJobError && err.job.status === 'cancelled') {
+        toast.info('已停止生成');
+      } else {
+        const message = (err as Error)?.message || '生成中断';
+        setErrorMsg(message);
+        toast.error(`仿写失败：${message}`);
       }
     } finally {
       setGenerating(false);
-      sseClientRef.current = null;
     }
   };
 
@@ -266,10 +271,7 @@ export function ImitationDialog({
   };
 
   const handleCancel = () => {
-    sseClientRef.current?.abort();
-    sseClientRef.current = null;
-    setGenerating(false);
-    toast.info('已取消生成');
+    if (jobId) void cancelJob(jobId);
   };
 
   const handleApply = () => {
@@ -468,6 +470,18 @@ export function ImitationDialog({
               {generating && (
                 <div className="hh-progress mb-2">
                   <div className="hh-progress-bar" style={{ width: `${Math.min(progress, 100)}%` }} />
+                </div>
+              )}
+              {job && (
+                <div className="mb-2">
+                  <button type="button" onClick={() => setShowProcess((v) => !v)} className="hh-btn-ghost hh-btn-sm">
+                    {showProcess ? '收起过程' : '查看过程（参考包 / 模型进度）'}
+                  </button>
+                  {showProcess && (
+                    <div className="mt-2">
+                      <AIJobProcess job={job} />
+                    </div>
+                  )}
                 </div>
               )}
               <textarea

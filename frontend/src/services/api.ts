@@ -1382,7 +1382,14 @@ export const imitationApi = {
       payload,
     ),
 
-  /** 流式生成端点 URL（前端用 SSEPostClient 直连，便于 abort 控制） */
-  streamUrl: (projectId: string) =>
-    `/api/projects/${projectId}/imitate-chapter-stream`,
+  /** 一键仿写：后台任务 + SSE（meta / content / progress；重连 / 停止走 aiJobsApi）POST /api/projects/{id}/imitate-chapter-stream */
+  imitateChapterStream: (projectId: string, payload: ImitateChapterRequest, options?: SSEClientOptions<ImitationJobResult>) =>
+    ssePost<ImitationJobResult>(`/api/projects/${projectId}/imitate-chapter-stream`, payload, options),
 };
+
+/** 仿写任务的 result 事件 data */
+export interface ImitationJobResult {
+  chars: number;
+  used_dimensions: string[];
+  strength: string;
+}

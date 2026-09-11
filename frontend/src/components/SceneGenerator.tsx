@@ -1,9 +1,11 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { X, Loader2, Play, CheckCircle2, FileText } from 'lucide-react'
+import { X, Loader2, Play, CheckCircle2, FileText, Square } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 import { sceneGenerationApi } from '@/services/api'
+import { AIJobError, runAIJob, useAIJob, useAIJobsStore } from '@/store/aiJobsStore'
+import { AIJobProcess } from '@/components/ai-job/AIJobProcess'
 import {
   ReferencePackSelector,
   DEFAULT_SELECTOR_VALUE,
@@ -36,7 +38,11 @@ export function SceneGenerator({ chapterOutlineId, chapterTitle, projectId, onCl
   const [generatedContent, setGeneratedContent] = useState<Record<string, string>>({})
   // R8：拆书参考包选择器状态（弹框内共用，每个卡片生成时均使用当前值）
   const [refPack, setRefPack] = useState<ReferencePackSelectorValue>(DEFAULT_SELECTOR_VALUE)
-  const abortRef = useRef<AbortController | null>(null)
+  // 场景生成走通用后台任务：这里只记当前任务 id，草稿由 content 事件累积；关弹窗不中断（托盘可见）
+  const [jobId, setJobId] = useState<string | null>(null)
+  const job = useAIJob(jobId)
+  const cancelJob = useAIJobsStore((s) => s.cancel)
+  const [showProcess, setShowProcess] = useState(false)
 
   const loadPlotCards = useCallback(async () => {
     setLoading(true)
@@ -52,51 +58,54 @@ export function SceneGenerator({ chapterOutlineId, chapterTitle, projectId, onCl
 
   useEffect(() => { loadPlotCards() }, [loadPlotCards])
 
-  useEffect(() => {
-    return () => { abortRef.current?.abort() }
-  }, [])
-
   const handleGenerateScene = async (card: PlotCardItem) => {
     setGeneratingId(card.id)
-    abortRef.current?.abort()
-    const controller = new AbortController()
-    abortRef.current = controller
-
-    let content = ''
+    setGeneratedContent(prev => ({ ...prev, [card.id]: '' }))
 
     try {
-      await sceneGenerationApi.generateSceneStream(
-        {
-          chapter_outline_id: chapterOutlineId,
-          plot_card_id: card.id,
-          previous_generated_content: generatedContent[card.id] || undefined,
-          // R8：仅 enabled 时透传拆书参考包参数
-          ...(refPack.enabled ? {
-            pack_ids: refPack.packIds.length > 0 ? refPack.packIds : undefined,
-            dimensions: refPack.dimensions.length > 0 ? refPack.dimensions : undefined,
-            strength: refPack.strength,
-          } : {}),
-        },
-        {
-          signal: controller.signal,
-          onChunk: (chunk) => {
-            content += chunk
-            setGeneratedContent(prev => ({ ...prev, [card.id]: content }))
+      await runAIJob({
+        kind: 'scene_generate',
+        title: `生成场景「${card.title}」`,
+        projectId,
+        openModal: false,
+        meta: { chapter_outline_id: chapterOutlineId, plot_card_id: card.id },
+        onStarted: setJobId,
+        connect: (options) => sceneGenerationApi.generateSceneStream(
+          {
+            chapter_outline_id: chapterOutlineId,
+            plot_card_id: card.id,
+            previous_generated_content: generatedContent[card.id] || undefined,
+            // R8：仅 enabled 时透传拆书参考包参数
+            ...(refPack.enabled ? {
+              pack_ids: refPack.packIds.length > 0 ? refPack.packIds : undefined,
+              dimensions: refPack.dimensions.length > 0 ? refPack.dimensions : undefined,
+              strength: refPack.strength,
+            } : {}),
+          },
+          options,
+        ),
+        onEvent: (m) => {
+          if (m.type === 'content' && typeof m.content === 'string') {
+            const chunk = m.content
+            setGeneratedContent(prev => ({ ...prev, [card.id]: (prev[card.id] || '') + chunk }))
           }
-        }
-      )
-
-      if (!controller.signal.aborted) {
-        toast.success(`Scene generated: ${card.title}`)
-        await loadPlotCards()
-      }
+        },
+      })
+      toast.success(`场景已生成：${card.title}`)
+      await loadPlotCards()
     } catch (err) {
-      if ((err as Error).name !== 'AbortError') {
-        toast.error((err as Error).message || 'Scene generation failed')
+      if (err instanceof AIJobError && err.job.status === 'cancelled') {
+        toast.info('已停止生成场景')
+      } else {
+        toast.error((err as Error).message || '场景生成失败')
       }
     } finally {
       setGeneratingId(null)
     }
+  }
+
+  const handleStop = () => {
+    if (jobId) void cancelJob(jobId)
   }
 
   const statusIcon = (card: PlotCardItem) => {
@@ -131,6 +140,32 @@ export function SceneGenerator({ chapterOutlineId, chapterTitle, projectId, onCl
               hint="本弹框内生成的所有场景共用该参考配置"
               disabledTitle="使用拆书参考包作为对标"
             />
+          )}
+
+          {/* 当前任务：进度 + 过程面板（参考包 / 模型思考计数）+ 停止 */}
+          {job && (
+            <div className="hh-subpanel space-y-2 p-3">
+              <div className="flex items-center justify-between gap-3 text-xs">
+                <span className="min-w-0 truncate text-content-secondary">
+                  {job.status === 'running' ? (job.progress?.message || '正在生成场景…') : job.status === 'done' ? '生成完成' : job.error || '已结束'}
+                </span>
+                <div className="flex shrink-0 items-center gap-2">
+                  <button onClick={() => setShowProcess(v => !v)} className="hh-btn-ghost hh-btn-sm">
+                    {showProcess ? '收起过程' : '查看过程'}
+                  </button>
+                  {job.status === 'running' && (
+                    <button onClick={handleStop} className="hh-btn-ghost hh-btn-sm text-red-500 hover:bg-red-50">
+                      <Square className="h-3.5 w-3.5" />
+                      停止
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div className="hh-progress">
+                <div className={cn('hh-progress-bar', job.status === 'done' && 'bg-emerald-500', job.status === 'error' && 'bg-red-500')} style={{ width: `${job.progress?.pct ?? (job.status === 'running' ? 5 : 100)}%` }} />
+              </div>
+              {showProcess && <AIJobProcess job={job} />}
+            </div>
           )}
 
           {loading ? (
