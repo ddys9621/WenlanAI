@@ -28,6 +28,7 @@ import { useStore } from '@/store/index'
 import { projectApi } from '@/services/api'
 import { useCharacterSync, useOutlineSync, useChapterSync } from '@/store/hooks'
 import { PageLoading } from '@/components/ui/PageLoading'
+import { AIJobTray } from '@/components/ai-job/AIJobTray'
 
 const NAV_ITEMS = [
   { label: '世界设定', icon: Globe, path: 'world-setting' },
@@ -278,21 +279,24 @@ export default function ProjectDetail() {
             </nav>
           </div>
 
-          <div className="hidden shrink-0 items-center gap-5 md:flex">
-            <dl className="flex items-center gap-4 text-xs">
-              {[
-                ['大纲', stats.outlines],
-                ['角色', stats.characters],
-                ['章节', stats.chapters],
-                ['字数', formatCount(stats.words)],
-              ].map(([label, value]) => (
-                <div key={label} className="flex items-baseline gap-1.5">
-                  <dt className="text-content-tertiary">{label}</dt>
-                  <dd className="text-sm font-semibold text-content tabular-nums">{value}</dd>
-                </div>
-              ))}
-            </dl>
-            <span className={cn('px-2 py-1 text-[11px] font-medium', projectStatus.className)}>{projectStatus.label}</span>
+          <div className="flex shrink-0 items-center gap-3">
+            <AIJobTray />
+            <div className="hidden shrink-0 items-center gap-5 md:flex">
+              <dl className="flex items-center gap-4 text-xs">
+                {[
+                  ['大纲', stats.outlines],
+                  ['角色', stats.characters],
+                  ['章节', stats.chapters],
+                  ['字数', formatCount(stats.words)],
+                ].map(([label, value]) => (
+                  <div key={label} className="flex items-baseline gap-1.5">
+                    <dt className="text-content-tertiary">{label}</dt>
+                    <dd className="text-sm font-semibold text-content tabular-nums">{value}</dd>
+                  </div>
+                ))}
+              </dl>
+              <span className={cn('px-2 py-1 text-[11px] font-medium', projectStatus.className)}>{projectStatus.label}</span>
+            </div>
           </div>
         </header>
 

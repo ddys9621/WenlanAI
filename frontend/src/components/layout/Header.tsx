@@ -15,6 +15,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { authApi } from '@/services/api'
+import { AIJobTray } from '@/components/ai-job/AIJobTray'
 import type { User } from '@/types'
 
 interface HeaderProps {
@@ -93,6 +94,8 @@ export function Header({ onMenuClick }: HeaderProps) {
         </nav>
       </div>
 
+      <div className="flex shrink-0 items-center gap-2">
+      <AIJobTray />
       <div className="relative" ref={menuRef}>
         <button
           onClick={() => setMenuOpen((prev) => !prev)}
@@ -147,6 +150,7 @@ export function Header({ onMenuClick }: HeaderProps) {
             </button>
           </div>
         )}
+      </div>
       </div>
 
       {passwordModalOpen && (
