@@ -688,8 +688,8 @@ export const chapterApi = {
   generateChapterStream: (chapterId: string, data: ChapterGenerateRequest, options?: SSEClientOptions<ChapterWriteResult>) =>
     ssePost<ChapterWriteResult>(`/api/chapters/${chapterId}/generate-stream`, data, options),
 
-  /** 按修改意见重写正文：后台任务 + SSE；result = { task_id, version_number, auto_applied, diff_stats, analysis_job_id } */
-  regenerateChapterStream: (chapterId: string, data: Record<string, unknown>, options?: SSEClientOptions<ChapterRegenerateResult>) =>
+  /** 按去 AI 味提示词重写并覆盖正文：后台任务 + SSE；result = { word_count } */
+  regenerateChapterStream: (chapterId: string, data: ChapterRegenerateRequest, options?: SSEClientOptions<ChapterRegenerateResult>) =>
     ssePost<ChapterRegenerateResult>(`/api/chapters/${chapterId}/regenerate-stream`, data, options),
 
   // 批量生成章节

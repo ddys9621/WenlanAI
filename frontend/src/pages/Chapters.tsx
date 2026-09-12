@@ -14,6 +14,7 @@ import {
   isActionableDeaiFinding,
   isPositiveDeaiFinding,
   type ChapterWriteResult,
+  type ChapterRegenerateRequest,
   type ChapterRegenerateResult,
   type DeaiFinding,
   type DeaiFindingIn,
@@ -715,7 +716,7 @@ export default function Chapters() {
         onStarted: setStreamJobId,
         connect: (options: SSEClientOptions<unknown>) =>
           isRegenerate
-            ? chapterApi.regenerateChapterStream(chapter.id, requestBody, options as SSEClientOptions<ChapterRegenerateResult>)
+            ? chapterApi.regenerateChapterStream(chapter.id, requestBody as unknown as ChapterRegenerateRequest, options as SSEClientOptions<ChapterRegenerateResult>)
             : chapterApi.generateChapterStream(chapter.id, requestBody as unknown as ChapterGenerateRequest, options as SSEClientOptions<ChapterWriteResult>),
         onEvent: (m) => {
           if (mode === 'batch' && m.type === 'progress' && typeof m.progress === 'number') {
