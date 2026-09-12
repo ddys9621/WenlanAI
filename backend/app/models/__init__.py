@@ -36,7 +36,6 @@ from app.models.timeline_event import TimelineEvent
 from app.models.character_known_info import CharacterKnownInfo
 from app.models.chapter_continuity_signal import ChapterContinuitySignal
 from app.models.chapter_consistency_issue import ChapterConsistencyIssue
-from app.models.chapter_deai_review import ChapterDeaiReview
 from app.models.project_ai_preference import ProjectAIPreference
 from app.models.deai_prompt import DeaiPrompt
 
@@ -83,7 +82,6 @@ __all__ = [
     "CharacterKnownInfo",
     "ChapterContinuitySignal",
     "ChapterConsistencyIssue",
-    "ChapterDeaiReview",
     "ProjectAIPreference",
     "DeaiPrompt",
 ]

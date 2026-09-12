@@ -740,8 +740,6 @@ class PromptService:
 
 5. """ + CHAPTER_STYLE_RULES + """
 
-{deai_block}
-
 6. **字数要求（严格控制）**：
    - **目标字数**：{target_word_count}字
    - **允许范围**：{min_word_count}至{max_word_count}字之间
@@ -827,8 +825,6 @@ class PromptService:
    - 与关键剧情保持一致
 
 5. """ + CHAPTER_STYLE_RULES + """
-
-{deai_block}
 
 6. **字数要求（严格控制）**：
    - **目标字数**：{target_word_count}字
@@ -1344,8 +1340,7 @@ class PromptService:
                                       target_word_count: int = 3000,
                                       memory_context: dict = None,
                                       linked_cards_context: str = "",
-                                      mcp_references: str = "",
-                                      deai_block: str = "") -> str:
+                                      mcp_references: str = "") -> str:
         """
         获取章节完整创作提示词
         
@@ -1354,7 +1349,6 @@ class PromptService:
             target_word_count: 目标字数，默认3000字
             memory_context: 记忆上下文（可选）
             mcp_references: MCP工具搜索的参考资料（可选）
-            deai_block: 去 AI 味规则块（deai_rules.build_write_block），插在文风要求之后、字数要求之前
         """
         # 从配置读取字数控制参数
         from app.config import settings
@@ -1438,8 +1432,7 @@ class PromptService:
             target_word_count=target_word_count,
             min_word_count=min_word_count,
             max_word_count=max_word_count,
-            linked_cards_section=linked_cards_section,
-            deai_block=deai_block or ""
+            linked_cards_section=linked_cards_section
         )
         
         # 插入记忆上下文和MCP参考资料
@@ -1472,8 +1465,7 @@ class PromptService:
                                                    target_word_count: int = 3000,
                                                    memory_context: dict = None,
                                                    linked_cards_context: str = "",
-                                                   mcp_references: str = "",
-                                                   deai_block: str = "") -> str:
+                                                   mcp_references: str = "") -> str:
         """
         获取章节完整创作提示词（带前置章节上下文和记忆增强）
         
@@ -1482,7 +1474,6 @@ class PromptService:
             target_word_count: 目标字数，默认3000字
             memory_context: 记忆上下文（可选）
             mcp_references: MCP工具搜索的参考资料（可选）
-            deai_block: 去 AI 味规则块（deai_rules.build_write_block），插在文风要求之后、字数要求之前
         """
         # 从配置读取字数控制参数
         from app.config import settings
@@ -1567,8 +1558,7 @@ class PromptService:
             min_word_count=min_word_count,
             max_word_count=max_word_count,
             memory_context=memory_text,
-            linked_cards_section=linked_cards_section,
-            deai_block=deai_block or ""
+            linked_cards_section=linked_cards_section
         )
         
         # 如果有风格要求，应用到提示词中

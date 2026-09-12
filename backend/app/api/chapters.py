@@ -4,7 +4,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 import json
 import asyncio
-import uuid
 from datetime import datetime
 from asyncio import Lock
 
@@ -18,7 +17,6 @@ from app.models.generation_history import GenerationHistory
 from app.models.writing_style import WritingStyle
 from app.models.analysis_task import AnalysisTask
 from app.models.memory import PlotAnalysis, StoryMemory
-from app.models.chapter_deai_review import ChapterDeaiReview
 from app.models.deai_prompt import DeaiPrompt
 from app.models.plot_card import PlotCard
 from app.models.plot_card_chapter_outline_link import PlotCardChapterOutlineLink
@@ -29,16 +27,12 @@ from app.schemas.chapter import (
     ChapterListResponse,
     ChapterGenerateRequest,
 )
-from app.schemas.deai_review import DeaiReviewFeedbackRequest
 from app.schemas.regeneration import ChapterRegenerateRequest
 from app.api.ai_jobs import job_sse_response
 from app.services.ai_jobs import AIJobConflictError, ai_jobs, job_session_factory
 from app.services.ai_service import AIService
 from app.services.chapter_analysis_jobs import create_analysis_task, start_chapter_analysis
-from app.services.deai_history import feature_acceptance, load_project_prior, load_recent_review_results, record_feedback
-from app.services.deai_review_service import content_hash, pick_review_model, run_deai_review
 from app.services.deai_rewrite import build_rewrite_prompt
-from app.services.deai_rules import build_write_block
 from app.services.generation_trace import begin_stage, stage_scope, trace_progress, trace_reference
 from app.services.prompt_service import prompt_service
 from app.services.plot_analyzer import PlotAnalyzer
@@ -1392,136 +1386,6 @@ async def chapter_generation_precheck(
     }
 
 
-# ============ 去 AI 味诊断（sepia review：只诊断不改稿） ============
-
-DEAI_REVIEW_KIND = "chapter_deai_review"
-
-
-def _serialize_deai_review(row: ChapterDeaiReview) -> dict:
-    return {
-        "id": row.id,
-        "chapter_id": row.chapter_id,
-        "model_name": row.model_name,
-        "model_family": row.model_family,
-        "findings_count": row.findings_count,
-        "result": row.result,
-        "created_at": row.created_at.isoformat() if row.created_at else None,
-    }
-
-
-@router.post("/{chapter_id}/deai-review-stream", summary="去 AI 味诊断（后台任务 + SSE）")
-async def deai_review_chapter_stream(
-    chapter_id: str,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    user_ai_service: AIService = Depends(get_user_ai_service),
-):
-    """按 prompts/deai/review/*.md 分组多轮诊断正文的 AI 痕迹（架构 → 篇章 → 措辞），带原文引证落表。
-
-    只诊断不改稿；结果供「重新生成」弹窗勾选带入 deai 模式改稿。同章同时只跑一个诊断。
-    """
-    user_id = getattr(request.state, "user_id", None)
-    if not user_id:
-        raise HTTPException(status_code=401, detail="未登录")
-    chapter = (await db.execute(select(Chapter).where(Chapter.id == chapter_id))).scalar_one_or_none()
-    if not chapter:
-        raise HTTPException(status_code=404, detail="章节不存在")
-    if not (chapter.content or "").strip():
-        raise HTTPException(status_code=400, detail="章节内容为空，无法诊断")
-    await verify_project_access(chapter.project_id, user_id, db)
-    project = (await db.execute(select(Project).where(Project.id == chapter.project_id))).scalar_one_or_none()
-    genre = (project.genre if project else "") or ""
-    # 画像的是写这章的模型（用户可能换了模型来审）；老数据没记录才用当前模型
-    model_name = pick_review_model(getattr(chapter, "generated_by_model", None), getattr(user_ai_service, "default_model", None))
-
-    async def runner(job):
-        """后台任务体：service 内每轮一个 stage → 汇总 → 落 chapter_deai_reviews。"""
-        result = await run_deai_review(
-            content=chapter.content, title=chapter.title or "", genre=genre,
-            model_name=model_name, ai_service=user_ai_service, on_progress=job.progress,
-        )
-        st_persist = begin_stage("persist", "保存诊断结果")
-        review_id = str(uuid.uuid4())
-        findings_count = len(result["plan"])
-        async with job_session_factory(user_id)() as db_session:
-            db_session.add(ChapterDeaiReview(
-                id=review_id, project_id=chapter.project_id, chapter_id=chapter_id, user_id=user_id,
-                model_name=model_name, model_family=result["model_family"],
-                content_hash=content_hash(chapter.content), findings_count=findings_count, result=result,
-            ))
-            await db_session.commit()
-        st_persist.done(findings=findings_count)
-        return {"review_id": review_id, "findings_count": findings_count, "stale": False, "summary": result["summary"]}
-
-    try:
-        job = await ai_jobs.start(
-            kind=DEAI_REVIEW_KIND,
-            title=f"去AI味诊断第 {chapter.chapter_number} 章《{chapter.title}》",
-            user_id=user_id,
-            project_id=chapter.project_id,
-            scope=f"{DEAI_REVIEW_KIND}:{chapter_id}",
-            runner=runner,
-            cancel_message="已停止诊断；本次结果未保存",
-            meta={"chapter_id": chapter_id},
-        )
-    except AIJobConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
-    return job_sse_response(job)
-
-
-@router.get("/{chapter_id}/deai-review", summary="获取最新的去 AI 味诊断结果")
-async def get_chapter_deai_review(
-    chapter_id: str,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-):
-    """返回该章最新一次诊断；正文自诊断后有改动则 stale=True（提示重新诊断）。"""
-    chapter = (await db.execute(select(Chapter).where(Chapter.id == chapter_id))).scalar_one_or_none()
-    if not chapter:
-        raise HTTPException(status_code=404, detail="章节不存在")
-    await verify_project_access(chapter.project_id, getattr(request.state, "user_id", None), db)
-    row = (await db.execute(
-        select(ChapterDeaiReview)
-        .where(ChapterDeaiReview.chapter_id == chapter_id)
-        .order_by(ChapterDeaiReview.created_at.desc())
-        .limit(1)
-    )).scalar_one_or_none()
-    if row is None:
-        return {"has_review": False, "review": None, "stale": False, "acceptance": {}}
-    # 本项目历史上各特征的采纳率（用户勾/不勾的累计），前端用来标"这条你以前常不采纳"
-    acceptance = feature_acceptance(await load_recent_review_results(db, chapter.project_id, max_chapters=30))
-    return {
-        "has_review": True,
-        "review": _serialize_deai_review(row),
-        "stale": row.content_hash != content_hash(chapter.content or ""),
-        "acceptance": acceptance,
-    }
-
-
-@router.post("/{chapter_id}/deai-review/{review_id}/feedback", summary="记录去 AI 味诊断条目的勾选情况")
-async def post_chapter_deai_review_feedback(
-    chapter_id: str,
-    review_id: str,
-    payload: DeaiReviewFeedbackRequest,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-):
-    """修订弹窗发起润色 / 重写时调用：哪些条目展示了、哪些被勾着带入。追加进 result.feedback，
-    供 deai_history 统计特征采纳率（过滤噪音特征、剔出项目级先验）。"""
-    row = (await db.execute(
-        select(ChapterDeaiReview).where(ChapterDeaiReview.id == review_id, ChapterDeaiReview.chapter_id == chapter_id)
-    )).scalar_one_or_none()
-    if row is None:
-        raise HTTPException(status_code=404, detail="诊断报告不存在")
-    await verify_project_access(row.project_id, getattr(request.state, "user_id", None), db)
-    row.result = record_feedback(
-        row.result or {}, mode=payload.mode, selected=payload.selected, candidates=payload.candidates,
-        at=datetime.now().isoformat(timespec="seconds"),
-    )
-    await db.commit()
-    return {"ok": True, "feedback_entries": len(row.result.get("feedback") or [])}
-
-
 @router.post("/{chapter_id}/generate-stream", summary="AI创作章节内容（流式）")
 async def generate_chapter_content_stream(
     chapter_id: str,
@@ -1969,17 +1833,6 @@ async def generate_chapter_content_stream(
                 if st_bridge is not None:
                     st_bridge.skip("注入失败，已跳过")
 
-            # 去 AI 味规则块（sepia 三层法 + 按章轮换的主推条目 + 模型家族先验 + 本项目最近几章诊断的高频信号），两个模板都注入
-            try:
-                project_prior = await load_project_prior(db_session, project.id)
-            except Exception as _pp:  # noqa: BLE001 - 先验缺失不影响生成
-                logger.warning(f"[deai] 项目级先验加载失败（已跳过）: {_pp}")
-                project_prior = ""
-            deai_block = build_write_block(
-                getattr(user_ai_service, "default_model", None),
-                chapter_number=current_chapter.chapter_number, project_prior=project_prior,
-            )
-
             # 根据是否有前置内容选择不同的提示词，并应用写作风格、记忆增强、剧情卡片和MCP参考资料
             if previous_content:
                 prompt = prompt_service.get_chapter_generation_with_context_prompt(
@@ -2002,7 +1855,6 @@ async def generate_chapter_content_stream(
                     memory_context=memory_context,
                     linked_cards_context=linked_cards_context,
                     mcp_references=mcp_reference_materials,
-                    deai_block=deai_block,
                 )
             else:
                 prompt = prompt_service.get_chapter_generation_prompt(
@@ -2024,7 +1876,6 @@ async def generate_chapter_content_stream(
                     memory_context=memory_context,
                     linked_cards_context=linked_cards_context,
                     mcp_references=mcp_reference_materials,
-                    deai_block=deai_block,
                 )
 
             prompt = prompt_service.apply_project_generation_prompt(
@@ -2070,7 +1921,6 @@ async def generate_chapter_content_stream(
             new_word_count = count_words(full_content)
             current_chapter.word_count = new_word_count
             current_chapter.status = "completed"
-            current_chapter.generated_by_model = getattr(user_ai_service, "default_model", None)
             
             # 更新项目字数
             project.current_words = project.current_words - old_word_count + new_word_count
