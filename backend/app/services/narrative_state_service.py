@@ -60,9 +60,7 @@ class NarrativeStateService:
         characters = await self._load_character_map(db, project_id)
         plot_lines = await self._load_plot_line_map(db, project_id)
 
-        await self._rollback_relationship_events(db, chapter.id)
-        await self._clear_chapter_records(db, chapter.id)
-        await self._clear_promise_resolutions(db, chapter.id)
+        await self.clear_chapter_state(db, chapter.id)
 
         causal_count = await self._store_causal_links(db, project_id, chapter, analysis, characters, plot_lines)
         promise_count = await self._store_promises(db, project_id, chapter, analysis, characters, plot_lines)
@@ -85,6 +83,15 @@ class NarrativeStateService:
             "timeline_events": timeline_count,
             "known_infos": knowledge_count,
         }
+
+    async def clear_chapter_state(self, db: AsyncSession, chapter_id: str) -> None:
+        """清掉某章分析结算出的全部叙事状态：关系变化回滚、因果 / 时间轴 / 已知信息 / 关系事件、本章埋设的承诺、本章的回收标记。
+
+        重新结算前（settle_chapter_state）与「重写覆盖正文」（api/chapters._purge_chapter_analysis_and_memory）都走这里。
+        """
+        await self._rollback_relationship_events(db, chapter_id)
+        await self._clear_chapter_records(db, chapter_id)
+        await self._clear_promise_resolutions(db, chapter_id)
 
     async def build_generation_context(
         self,

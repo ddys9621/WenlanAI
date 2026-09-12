@@ -42,8 +42,7 @@ class ChapterConsistencyService:
         for signal in signals:
             signal["character_name"] = self._canonical_name(signal.get("character_name"), canonical_names) or None
 
-        await db.execute(delete(ChapterContinuitySignal).where(ChapterContinuitySignal.chapter_id == chapter.id))
-        await db.execute(delete(ChapterConsistencyIssue).where(ChapterConsistencyIssue.chapter_id == chapter.id))
+        await self.clear_chapter_records(db, chapter.id)
 
         signal_count = 0
         for signal in signals:
@@ -99,6 +98,11 @@ class ChapterConsistencyService:
             "consistency_issues": len(issues),
             "critical_issues": sum(1 for item in issues if item["severity"] == "critical"),
         }
+
+    async def clear_chapter_records(self, db: AsyncSession, chapter_id: str) -> None:
+        """删掉某章的连续性信号与一致性问题（重新结算前 / 重写覆盖正文后）。"""
+        await db.execute(delete(ChapterContinuitySignal).where(ChapterContinuitySignal.chapter_id == chapter_id))
+        await db.execute(delete(ChapterConsistencyIssue).where(ChapterConsistencyIssue.chapter_id == chapter_id))
 
     async def build_chapter_visualization_payload(
         self,

@@ -775,9 +775,10 @@ async def _unanalyzed_previous_chapters(db: AsyncSession, chapter: Chapter) -> l
 
 
 async def _purge_chapter_analysis_and_memory(db: AsyncSession, chapter_id: str) -> int:
-    """删除该章的 PlotAnalysis + AnalysisTask + StoryMemory（DB 行）。
+    """删除该章全部分析产物：PlotAnalysis + AnalysisTask + StoryMemory（DB 行）+ 叙事状态（伏笔 / 承诺、因果、时间轴、
+    关系事件、已知信息）+ 一致性信号与问题。
 
-    用于「正文被整章覆盖」后清理过期的分析/记忆（不标过期，直接删）。
+    用于「正文被整章覆盖」后清理过期分析（不标过期，直接删，回到「未分析」，由用户手动重新分析）。
     仅删关系库行，不提交、不清向量；返回删除的记忆条数供调用方做向量清理。
     """
     for _pa in (await db.execute(
@@ -793,6 +794,8 @@ async def _purge_chapter_analysis_and_memory(db: AsyncSession, chapter_id: str) 
     )).scalars().all()
     for _m in mem_rows:
         await db.delete(_m)
+    await narrative_state_service.clear_chapter_state(db, chapter_id)
+    await chapter_consistency_service.clear_chapter_records(db, chapter_id)
     return len(mem_rows)
 
 
