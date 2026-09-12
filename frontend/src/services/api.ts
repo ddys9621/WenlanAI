@@ -8,6 +8,7 @@ import { toast } from 'sonner';
 import { ssePost } from '../utils/sseClient';
 import type { SSEClientOptions } from '../utils/sseClient';
 import { PROJECT_HEADER, getActiveProjectId } from '../utils/activeProject';
+import type { MemoryAnnotation } from '../utils/annotationSegments';
 import type { UpdateCheckResult, UpdateJobStatus } from '../types/system_update';
 import type {
   User,
@@ -104,6 +105,38 @@ export interface ChapterGenerationPrecheck {
   count: number;
   chapters: Array<{ id: string; chapter_number: number; title: string }>;
   message: string;
+}
+
+/** 项目级去 AI 味提示词（GET/POST/PUT/DELETE /projects/{id}/deai-prompts） */
+export interface DeaiPrompt {
+  id: string;
+  project_id: string;
+  name: string;
+  content: string;
+  order_index: number;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface DeaiPromptInput {
+  name: string;
+  content: string;
+}
+
+/** 去 AI 味重写请求：只带提示词 id（按勾选顺序），后端拼提示词 + 原文 */
+export interface ChapterRegenerateRequest {
+  prompt_ids: string[];
+}
+
+/** GET /chapters/{id}/annotations：正文里可定位的记忆标注 */
+export interface ChapterAnnotationsResponse {
+  chapter_id: string;
+  chapter_number: number;
+  title: string;
+  word_count: number;
+  annotations: MemoryAnnotation[];
+  has_analysis: boolean;
+  summary: { total_annotations: number; hooks: number; foreshadows: number; plot_points: number; character_events: number };
 }
 
 /** 去 AI 味诊断的单条信号（带原文引证）；layer 由后端按 review/*.md 的「层」标注 */
@@ -573,6 +606,10 @@ export const chapterApi = {
   
   checkCanGenerate: (chapterId: string) =>
     api.get<unknown, import('../types').ChapterCanGenerateResponse>(`/chapters/${chapterId}/can-generate`),
+
+  /** 正文里可定位的记忆标注（钩子 / 伏笔 / 情节点 / 角色事件），未分析时 annotations 为空、has_analysis=false */
+  getAnnotations: (chapterId: string) =>
+    api.get<unknown, ChapterAnnotationsResponse>(`/chapters/${chapterId}/annotations`),
   
   // 根据章纲获取或创建章节
   syncFromOutlines: (projectId: string) =>
@@ -656,6 +693,14 @@ export const chapterApi = {
     ssePost<ChapterRegenerateResult>(`/api/chapters/${chapterId}/regenerate-stream`, data, options),
 
   // 批量生成章节
+};
+
+export const deaiPromptApi = {
+  list: (projectId: string) => api.get<unknown, DeaiPrompt[]>(`/projects/${projectId}/deai-prompts`),
+  create: (projectId: string, data: DeaiPromptInput) => api.post<unknown, DeaiPrompt>(`/projects/${projectId}/deai-prompts`, data),
+  update: (projectId: string, id: string, data: Partial<DeaiPromptInput>) =>
+    api.put<unknown, DeaiPrompt>(`/projects/${projectId}/deai-prompts/${id}`, data),
+  remove: (projectId: string, id: string) => api.delete(`/projects/${projectId}/deai-prompts/${id}`),
 };
 
 export const writingStyleApi = {
