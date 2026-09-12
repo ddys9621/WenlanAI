@@ -14,8 +14,6 @@ const Outline = lazy(() => import('@/pages/Outline'))
 const Characters = lazy(() => import('@/pages/Characters'))
 const Relationships = lazy(() => import('@/pages/Relationships'))
 const Organizations = lazy(() => import('@/pages/Organizations'))
-const Chapters = lazy(() => import('@/pages/Chapters'))
-const ChapterReader = lazy(() => import('@/pages/ChapterReader'))
 const ChapterAnalysis = lazy(() => import('@/pages/ChapterAnalysis'))
 const WritingStyles = lazy(() => import('@/pages/WritingStyles'))
 const Memories = lazy(() => import('@/pages/Memories'))
@@ -57,7 +55,8 @@ export default function App() {
             <Route path="characters" element={<Characters />} />
             <Route path="relationships" element={<Relationships />} />
             <Route path="organizations" element={<Organizations />} />
-            <Route path="chapters" element={<Chapters />} />
+            {/* 旧「章节管理」/chapters 已并入剧情分析，老链接重定向 */}
+            <Route path="chapters" element={<Navigate to="../chapter-analysis" replace />} />
             <Route path="chapter-analysis" element={<ChapterAnalysis />} />
             <Route path="writing-styles" element={<WritingStyles />} />
             <Route path="memories" element={<Memories />} />
@@ -66,7 +65,6 @@ export default function App() {
           </Route>
 
           {/* 独立页面 */}
-          <Route path="/chapters/:chapterId/reader" element={<ProtectedRoute><ChapterReader /></ProtectedRoute>} />
           <Route path="/create/inspiration" element={<ProtectedRoute><Navigate to="/projects?panel=inspiration" replace /></ProtectedRoute>} />
         </Routes>
       </Suspense>

@@ -146,133 +146,9 @@ export interface ChapterAnnotationsResponse {
   summary: { total_annotations: number; hooks: number; foreshadows: number; plot_points: number; character_events: number };
 }
 
-/** 去 AI 味诊断的单条信号（带原文引证）；layer 由后端按 review/*.md 的「层」标注 */
-export interface DeaiFinding {
-  feature: string;
-  evidence: string;
-  note: string;
-  fix: string;
-  severity: 'high' | 'medium' | 'low';
-  layer: '架构' | '篇章' | '措辞' | string;
-  group: string;
-  /** issue=缺陷；positive=已具备的人类正向标记（review/04）。旧报告没有该字段，按 fix==='保留' 兜底 */
-  kind?: 'issue' | 'positive';
-  /** 引证在原文中核实到的偏移；verified=false 表示模型编造 / 走样过头，后端已不计入待改 */
-  start?: number | null;
-  end?: number | null;
-  verified?: boolean;
-  /** patch=可补丁式最小改动（篇章 / 措辞）；rewrite=只能整章重写或回章纲（架构）。旧报告没有该字段，按 layer 推 */
-  route?: 'patch' | 'rewrite';
-}
-
-/** 信号走哪条修订路径（与后端 deai_review_service.route_for_layer 一致） */
-export const deaiFindingRoute = (f: Pick<DeaiFinding, 'route' | 'layer'>): 'patch' | 'rewrite' =>
-  f.route ?? (f.layer === '架构' ? 'rewrite' : 'patch');
-
-/** 旧报告（无 kind 字段）用 fix==='保留' 识别人类正向标记 */
-export const isPositiveDeaiFinding = (f: Pick<DeaiFinding, 'kind' | 'fix'>) =>
-  f.kind === 'positive' || (f.kind === undefined && f.fix.trim() === '保留');
-
-/** 能带入补丁式改稿的信号：报的是缺陷，且引证在原文里定位到了 */
-export const isActionableDeaiFinding = (f: Pick<DeaiFinding, 'kind' | 'fix' | 'verified'>) =>
-  !isPositiveDeaiFinding(f) && f.verified !== false;
-
-export interface DeaiReviewPass {
-  key: string;
-  title: string;
-  layer: string;
-  kind?: 'issue' | 'positive';
-  findings: Array<Omit<DeaiFinding, 'layer' | 'group'>>;
-  na: string[];
-  advisories: string[];
-  error?: string;
-}
-
-/** deai_review_service.run_deai_review 的完整结果 */
-export interface DeaiReviewResult {
-  model_name: string;
-  model_family: string | null;
-  passes: DeaiReviewPass[];
-  findings: DeaiFinding[];
-  plan: string[];
-  advisories: string[];
-  summary: string;
-  /** deai_metrics.compute_metrics 的措辞层本地统计（旧报告没有） */
-  metrics?: Record<string, number>;
-}
-
-/** 重生成 deai 模式上送的一条诊断信号（后端 DeaiFindingIn） */
-export interface DeaiFindingIn {
-  feature: string;
-  evidence: string;
-  fix: string;
-  layer: string;
-  severity: string;
-  start?: number | null;
-  end?: number | null;
-}
-
-/** 去 AI 味补丁套用统计（regenerate result.deai_patch / SSE 事件 deai_patch） */
-export interface DeaiPatchStats {
-  edits_proposed: number;
-  applied: Array<{ find: string; replace: string; why: string; start: number; end: number }>;
-  skipped: Array<{ find: string; replace: string; why: string; reason: string }>;
-  chars_before: number;
-  chars_after: number;
-  metrics_before: Record<string, number>;
-  metrics_after: Record<string, number>;
-  metrics_delta: Record<string, number>;
-}
-
-export interface DeaiReview {
-  id: string;
-  chapter_id: string;
-  model_name: string | null;
-  model_family: string | null;
-  findings_count: number;
-  result: DeaiReviewResult;
-  created_at: string | null;
-}
-
-/** 某特征在本项目历史上被展示 / 被勾着带入的次数（deai_history.feature_acceptance） */
-export interface DeaiFeatureAcceptance {
-  selected: number;
-  offered: number;
-}
-
-/** GET /chapters/{id}/deai-review；stale = 诊断后正文有改动 */
-export interface DeaiReviewResponse {
-  has_review: boolean;
-  review: DeaiReview | null;
-  stale: boolean;
-  acceptance?: Record<string, DeaiFeatureAcceptance>;
-}
-
-/** POST /chapters/{id}/deai-review/{review_id}/feedback */
-export interface DeaiReviewFeedbackRequest {
-  mode: 'patch' | 'rewrite';
-  candidates: number[];
-  selected: number[];
-}
-
-/** 去 AI 味诊断任务的 result 事件 data */
-export interface DeaiReviewJobResult {
-  review_id: string;
-  findings_count: number;
-  stale: boolean;
-  summary: string;
-}
-
-/** 正文重生成任务的 result 事件 data */
+/** 去 AI 味重写任务的 result 事件 data */
 export interface ChapterRegenerateResult {
-  task_id: string;
   word_count: number;
-  version_number: number;
-  auto_applied: boolean;
-  diff_stats: Record<string, unknown>;
-  /** 仅去 AI 味补丁模式有值 */
-  deai_patch?: DeaiPatchStats | null;
-  analysis_job_id: string | null;
 }
 
 const api = axios.create({
@@ -627,49 +503,6 @@ export const chapterApi = {
       `/chapters/project/${projectId}/sync-from-outlines`
     ),
   
-  // 章节重新生成相关
-  getRegenerationTasks: (chapterId: string, limit?: number) =>
-    api.get<unknown, {
-      chapter_id: string;
-      total: number;
-      tasks: Array<{
-        task_id: string;
-        status: string;
-        version_number: number | null;
-        version_note: string | null;
-        original_word_count: number | null;
-        regenerated_word_count: number | null;
-        created_at: string | null;
-        completed_at: string | null;
-      }>;
-    }>(`/chapters/${chapterId}/regeneration/tasks`, { params: { limit } }),
-
-  // 重新生成任务详情（含新旧稿全文）
-  applyRegenerationTask: (chapterId: string, taskId: string, source: 'regenerated' | 'original') =>
-    api.post<unknown, { message: string; applied_source: string; word_count: number }>(
-      `/chapters/${chapterId}/regeneration/tasks/${taskId}/apply`,
-      { source }
-    ),
-
-  // 章节导航
-  getNavigation: (chapterId: string) =>
-    api.get<unknown, {
-      current: Chapter;
-      previous: Chapter | null;
-      next: Chapter | null;
-    }>(`/chapters/${chapterId}/navigation`),
-
-  // 生成章节内容（流式）
-  getAnalysisStatus: (chapterId: string) =>
-    api.get<unknown, {
-      has_task: boolean;
-      task_id?: string | null;
-      status: string;
-      progress?: number;
-      error_message?: string | null;
-      auto_recovered?: boolean;
-    }>(`/chapters/${chapterId}/analysis/status`),
-
   // 获取章节分析结果（未分析 → 404，属正常态，不弹全局 toast）
   getAnalysis: (chapterId: string) =>
     api.get<unknown, ChapterAnalysisResponse>(`/chapters/${chapterId}/analysis`, { silent: true }),
@@ -681,18 +514,6 @@ export const chapterApi = {
   /** 生成前预检查：前面是否有未分析（无记忆状态）的章节，用于提醒用户是否继续 */
   generationPrecheck: (chapterId: string) =>
     api.get<unknown, ChapterGenerationPrecheck>(`/chapters/${chapterId}/generation-precheck`),
-
-  /** 去 AI 味诊断：后台任务 + SSE（每轮 rubric 一个 stage）POST /api/chapters/{id}/deai-review-stream */
-  deaiReviewStream: (chapterId: string, options?: SSEClientOptions<DeaiReviewJobResult>) =>
-    ssePost<DeaiReviewJobResult>(`/api/chapters/${chapterId}/deai-review-stream`, {}, options),
-
-  /** 最新一次去 AI 味诊断结果（正文改过则 stale=true） */
-  getDeaiReview: (chapterId: string) =>
-    api.get<unknown, DeaiReviewResponse>(`/chapters/${chapterId}/deai-review`),
-
-  /** 记录修订弹窗里对诊断条目的勾选（免费标注 → 特征采纳率 / 项目级先验过滤），失败可忽略 */
-  postDeaiReviewFeedback: (chapterId: string, reviewId: string, data: DeaiReviewFeedbackRequest) =>
-    api.post<unknown, { ok: boolean; feedback_entries: number }>(`/chapters/${chapterId}/deai-review/${reviewId}/feedback`, data),
 
   /** AI 创作正文：后台任务 + SSE；result = { word_count, analysis_task_id, analysis_job_id } */
   generateChapterStream: (chapterId: string, data: ChapterGenerateRequest, options?: SSEClientOptions<ChapterWriteResult>) =>
