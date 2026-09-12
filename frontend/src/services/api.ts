@@ -1,5 +1,12 @@
 import axios from 'axios';
 
+declare module 'axios' {
+  export interface AxiosRequestConfig {
+    /** 为 true 时响应错误不弹全局 toast，由调用方自行处理（如「暂无分析结果」404 属正常态） */
+    silent?: boolean;
+  }
+}
+
 interface MCPPluginSimpleCreate {
   config_json: string;
   enabled: boolean;
@@ -342,7 +349,10 @@ api.interceptors.response.use(
     } else {
       errorMessage = error.message || '请求失败';
     }
-    
+
+    if (error.config?.silent) {
+      return Promise.reject(error);
+    }
     toast.error(errorMessage);
     console.error('API Error:', errorMessage, error);
     
@@ -660,9 +670,9 @@ export const chapterApi = {
       auto_recovered?: boolean;
     }>(`/chapters/${chapterId}/analysis/status`),
 
-  // 获取章节分析结果
+  // 获取章节分析结果（未分析 → 404，属正常态，不弹全局 toast）
   getAnalysis: (chapterId: string) =>
-    api.get<unknown, ChapterAnalysisResponse>(`/chapters/${chapterId}/analysis`),
+    api.get<unknown, ChapterAnalysisResponse>(`/chapters/${chapterId}/analysis`, { silent: true }),
 
   /** 手动分析章节：后台任务 + SSE（重连 / 停止走 aiJobsApi）POST /api/chapters/{id}/analyze-stream */
   analyzeChapterStream: (chapterId: string, options?: SSEClientOptions<{ task_id: string; chapter_id: string; status: string }>) =>
