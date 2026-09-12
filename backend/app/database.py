@@ -29,6 +29,7 @@ from app.models.chapter_consistency_issue import ChapterConsistencyIssue  # noqa
 from app.models.chapter_continuity_signal import ChapterContinuitySignal  # noqa: F401
 from app.models.chapter_outline import ChapterOutline  # noqa: F401
 from app.models.character import Character  # noqa: F401
+from app.models.deai_prompt import DeaiPrompt  # noqa: F401
 from app.models.character_known_info import CharacterKnownInfo  # noqa: F401
 from app.models.generation_history import GenerationHistory  # noqa: F401
 from app.models.memory import PlotAnalysis, StoryMemory  # noqa: F401

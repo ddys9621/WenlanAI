@@ -285,6 +285,10 @@ app.include_router(imitation.router, prefix="/api")
 from app.api import project_ai_preference as _project_ai_preference
 app.include_router(_project_ai_preference.router, prefix="/api")
 
+# 项目级去 AI 味提示词（只在重写正文时注入）
+from app.api import deai_prompts as _deai_prompts
+app.include_router(_deai_prompts.router, prefix="/api")
+
 # 静态文件目录（兼容打包后的环境）
 if getattr(sys, 'frozen', False):
     # 打包后的 exe：static 在 _internal 目录下
