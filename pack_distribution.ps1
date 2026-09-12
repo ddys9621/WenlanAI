@@ -12,7 +12,7 @@ $ProjectRoot = Split-Path -Parent $PSCommandPath
 $FrontendDir = Join-Path $ProjectRoot 'frontend'
 $BackendDir = Join-Path $ProjectRoot 'backend'
 $ReleaseRoot = Join-Path $ProjectRoot 'release'
-$PackageName = "MuMuAINovel-runtime-v$Version"
+$PackageName = "WenlanAI-runtime-v$Version"
 $OutputDir = Join-Path $ReleaseRoot $PackageName
 $ZipPath = Join-Path $ReleaseRoot "$PackageName.zip"
 
@@ -81,7 +81,7 @@ Assert-PathExists $BackendDir 'backend directory'
 Assert-PathExists (Join-Path $BackendDir 'app') 'backend/app directory'
 
 Write-Host '========================================' -ForegroundColor Cyan
-Write-Host ' MuMuAINovel distribution packer' -ForegroundColor Cyan
+Write-Host ' WenlanAI distribution packer' -ForegroundColor Cyan
 Write-Host " Version: $Version" -ForegroundColor Cyan
 Write-Host " Output:  $OutputDir" -ForegroundColor Cyan
 Write-Host '========================================' -ForegroundColor Cyan
@@ -329,7 +329,7 @@ finally {
 '@
 
 $DistReadme = @'
-MuMuAINovel distribution package
+WenlanAI distribution package
 ================================
 
 First use:

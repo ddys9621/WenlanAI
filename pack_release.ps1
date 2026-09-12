@@ -1,15 +1,15 @@
-# MuMuAINovel Release Packaging Script
+# WenlanAI Release Packaging Script
 # Usage: .\pack_release.ps1
 
 $ErrorActionPreference = "Stop"
 
 # Version (modify as needed)
 $VERSION = "1.0.0"
-$RELEASE_NAME = "MuMuAINovel-v$VERSION"
+$RELEASE_NAME = "WenlanAI-v$VERSION"
 $RELEASE_DIR = "release\$RELEASE_NAME"
 
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  MuMuAINovel Release Packager" -ForegroundColor Cyan
+Write-Host "  WenlanAI Release Packager" -ForegroundColor Cyan
 Write-Host "  Version: $VERSION" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 

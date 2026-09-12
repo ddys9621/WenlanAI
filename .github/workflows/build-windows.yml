@@ -73,7 +73,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: MuMuAINovel-Setup-v${{ steps.ver.outputs.version }}
+          name: WenlanAI-Setup-v${{ steps.ver.outputs.version }}
           path: backend/installer_output/*.exe
           retention-days: 7
           compression-level: 0

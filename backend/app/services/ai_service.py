@@ -419,6 +419,10 @@ class AIService:
     reasoning_enabled: bool = False
     reasoning_effort: str = "medium"
     thinking_budget_tokens: Optional[int] = None
+    # 采样多样性默认值（裸实例兜底，见下方 reasoning 同理注释）
+    default_top_p: Optional[float] = None
+    default_frequency_penalty: float = 0.0
+    default_presence_penalty: float = 0.0
 
     def __init__(
         self,
@@ -431,6 +435,9 @@ class AIService:
         reasoning_enabled: Optional[bool] = None,
         reasoning_effort: Optional[str] = None,
         thinking_budget_tokens: Optional[int] = None,
+        default_top_p: Optional[float] = None,
+        default_frequency_penalty: Optional[float] = None,
+        default_presence_penalty: Optional[float] = None,
     ):
         """
         初始化AI客户端（优化并发性能）
@@ -472,6 +479,21 @@ class AIService:
         self.thinking_budget_tokens = (
             thinking_budget_tokens if thinking_budget_tokens is not None
             else app_settings.default_thinking_budget_tokens
+        )
+
+        # 采样多样性（全局生效，降低"AI 味"）：top_p / frequency_penalty / presence_penalty
+        # OpenAI 兼容协议三者全支持；Anthropic 仅支持 top_p（penalty 会跳过）
+        self.default_top_p = (
+            default_top_p if default_top_p is not None
+            else app_settings.default_top_p
+        )
+        self.default_frequency_penalty = (
+            default_frequency_penalty if default_frequency_penalty is not None
+            else app_settings.default_frequency_penalty
+        )
+        self.default_presence_penalty = (
+            default_presence_penalty if default_presence_penalty is not None
+            else app_settings.default_presence_penalty
         )
 
         # 标记资源是否已关闭
@@ -566,7 +588,31 @@ class AIService:
             # 只有当用户明确选择Anthropic作为提供商时才警告
             if self.api_provider == "anthropic":
                 logger.warning("⚠️ Anthropic API key未配置，但被设置为当前AI提供商")
-    
+
+    def _apply_openai_sampling(self, payload: Dict[str, Any]) -> None:
+        """把采样多样性参数写入 OpenAI 兼容请求体（降低"AI 味"/困惑度）。
+
+        仅在偏离中性值时注入，避免个别兼容网关对未知/默认参数敏感：
+        - top_p<1 才传（=1 等于不做核采样）
+        - frequency_penalty / presence_penalty 非 0 才传（0 = 关闭）
+        取值范围由 schema 层校验（top_p 0~1，penalty -2~2）。
+        """
+        top_p = self.default_top_p
+        if top_p is not None and top_p < 1.0:
+            payload["top_p"] = top_p
+            logger.info(f"  - top_p: {top_p}")
+        if self.default_frequency_penalty:
+            payload["frequency_penalty"] = self.default_frequency_penalty
+            logger.info(f"  - frequency_penalty: {self.default_frequency_penalty}")
+        if self.default_presence_penalty:
+            payload["presence_penalty"] = self.default_presence_penalty
+            logger.info(f"  - presence_penalty: {self.default_presence_penalty}")
+
+    def _anthropic_top_p(self) -> Optional[float]:
+        """Anthropic 只支持 top_p（不支持 frequency/presence_penalty）；<1 才返回。"""
+        top_p = self.default_top_p
+        return top_p if (top_p is not None and top_p < 1.0) else None
+
     async def generate_text(
         self,
         prompt: str,
@@ -848,6 +894,7 @@ class AIService:
                 "temperature": temperature,
                 "max_tokens": max_tokens
             }
+            self._apply_openai_sampling(payload)
 
             # 思考/推理强度：启用时透传 reasoning_effort（仅推理模型 GPT-5 / o 系列生效）
             if self.reasoning_enabled:
@@ -985,6 +1032,10 @@ class AIService:
                         f"⚠️ 已启用思考但 max_tokens({max_tokens}) 无法容纳 budget_tokens(>=1024)，本次跳过思考"
                     )
                 kwargs["temperature"] = temperature
+                # top_p 仅在非思考模式下透传（思考模式要求默认采样）；penalty 不受 Anthropic 支持
+                _top_p = self._anthropic_top_p()
+                if _top_p is not None:
+                    kwargs["top_p"] = _top_p
 
             if system_prompt:
                 kwargs["system"] = system_prompt
@@ -1074,6 +1125,7 @@ class AIService:
             "max_tokens": max_tokens,
             "stream": True
         }
+        self._apply_openai_sampling(payload)
 
         # 思考/推理强度：启用时透传 reasoning_effort（仅推理模型 GPT-5 / o 系列生效）
         if self.reasoning_enabled:
@@ -1220,6 +1272,10 @@ class AIService:
                     f"⚠️ 已启用思考但 max_tokens({max_tokens}) 无法容纳 budget_tokens(>=1024)，本次跳过思考"
                 )
             stream_kwargs["temperature"] = temperature
+            # top_p 仅在非思考模式下透传（思考模式要求默认采样）；penalty 不受 Anthropic 支持
+            _top_p = self._anthropic_top_p()
+            if _top_p is not None:
+                stream_kwargs["top_p"] = _top_p
 
         # 官方语义：system 可省略；不要传空串占位
         if system_prompt:
@@ -1474,6 +1530,9 @@ def create_user_ai_service(
     reasoning_enabled: Optional[bool] = None,
     reasoning_effort: Optional[str] = None,
     thinking_budget_tokens: Optional[int] = None,
+    top_p: Optional[float] = None,
+    frequency_penalty: Optional[float] = None,
+    presence_penalty: Optional[float] = None,
 ) -> AIService:
     """
     根据用户设置创建AI服务实例
@@ -1488,6 +1547,9 @@ def create_user_ai_service(
         reasoning_enabled: 是否启用思考/推理（全局生效）
         reasoning_effort: 统一思考强度档位 / OpenAI reasoning_effort
         thinking_budget_tokens: Anthropic 思考预算（空=按档位自动换算）
+        top_p: 核采样 top_p（<1 生效；Anthropic 非思考模式也生效）
+        frequency_penalty: 频率惩罚（OpenAI 兼容；抑制重复用词）
+        presence_penalty: 存在惩罚（OpenAI 兼容；鼓励新词/话题）
         
     Returns:
         AIService实例
@@ -1502,4 +1564,7 @@ def create_user_ai_service(
         reasoning_enabled=reasoning_enabled,
         reasoning_effort=reasoning_effort,
         thinking_budget_tokens=thinking_budget_tokens,
+        default_top_p=top_p,
+        default_frequency_penalty=frequency_penalty,
+        default_presence_penalty=presence_penalty,
     )

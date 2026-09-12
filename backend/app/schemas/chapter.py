@@ -58,6 +58,7 @@ class ChapterGenerateRequest(BaseModel):
         le=10000  # 最大10000字
     )
     enable_mcp: bool = Field(True, description="是否启用MCP工具增强（搜索参考资料）")
+    auto_analyze: bool = Field(False, description="生成后是否自动排队分析（批量生成传True以累积记忆；单章默认False手动分析）")
     selected_plugins: Optional[List[str]] = Field(
         None,
         description="本次章节生成选择使用的MCP插件列表"

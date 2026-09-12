@@ -1,6 +1,6 @@
 """检查更新 / 应用更新 —— 三种运行形态：exe（Windows 安装版）/ docker / source（源码运行）。
 
-- 更新源：GitHub Releases（settings.update_repo），tag `v*`，安装包资产 `MuMuAINovel-Setup-v{ver}.exe`
+- 更新源：GitHub Releases（settings.update_repo），tag `v*`，安装包资产 `WenlanAI-Setup-v{ver}.exe`（更新器按 .exe 后缀挑资产，名称仅示意）
 - exe：下载安装包到临时目录 → 启动安装向导 → 应用自退出（安装结束页可勾选启动新版本）
 - source：git pull / pip / npm 交给独立进程 `app.services.update_runner` 跑（uvicorn --reload 或服务重启都不打断），
   进度写在 data/update_job.json，本模块只负责启动它和读状态
@@ -162,7 +162,7 @@ async def fetch_latest_release(
     repo: str, *, github_proxy: str = "", client: Optional[httpx.AsyncClient] = None, timeout: float = 10.0
 ) -> ReleaseInfo:
     url = f"{GITHUB_API}/repos/{repo}/releases/latest"
-    headers = {"Accept": "application/vnd.github+json", "User-Agent": "MuMuAINovel-Updater"}
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "WenlanAI-Updater"}
     own = client is None
     client = client or httpx.AsyncClient(timeout=timeout, follow_redirects=True)
     try:
@@ -438,7 +438,7 @@ class UpdateService:
                     step["output"] = output
 
     async def _run_exe_update(self, release: ReleaseInfo) -> None:
-        target_dir = Path(tempfile.gettempdir()) / "MuMuAINovel-Update"
+        target_dir = Path(tempfile.gettempdir()) / "WenlanAI-Update"
         try:
             target_dir.mkdir(parents=True, exist_ok=True)
             for old in target_dir.glob("*.exe"):
@@ -446,7 +446,7 @@ class UpdateService:
                     old.unlink()
                 except OSError:
                     pass
-            target = target_dir / (release.installer_name or f"MuMuAINovel-Setup-v{release.version}.exe")
+            target = target_dir / (release.installer_name or f"WenlanAI-Setup-v{release.version}.exe")
             await self._download(release.installer_url or "", target, release.installer_size)
             self._set_step("download", "success", f"已保存到 {target}")
             self._set_step("launch", "running")
@@ -471,7 +471,7 @@ class UpdateService:
         downloaded = 0
         timeout = httpx.Timeout(connect=15.0, read=60.0, write=60.0, pool=15.0)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            async with client.stream("GET", url, headers={"User-Agent": "MuMuAINovel-Updater"}) as resp:
+            async with client.stream("GET", url, headers={"User-Agent": "WenlanAI-Updater"}) as resp:
                 if resp.status_code >= 400:
                     raise UpdateSourceError(f"下载失败：HTTP {resp.status_code}")
                 total = expected_size or (int(resp.headers["content-length"]) if resp.headers.get("content-length") else None)

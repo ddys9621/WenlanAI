@@ -20,6 +20,7 @@ class Chapter(Base):
     status = Column(String(20), default="draft", comment="章节状态")
     version = Column(Integer, default=1, comment="版本号")
     parent_version_id = Column(String(36), ForeignKey("chapters.id", ondelete="SET NULL"), nullable=True, comment="父版本ID")
+    generated_by_model = Column(String(100), nullable=True, comment="最后一次写入正文的模型名（去 AI 味诊断按它取先验；手写 / 未知为空）")
     created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间")
     

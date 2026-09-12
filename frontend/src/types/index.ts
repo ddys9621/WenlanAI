@@ -108,6 +108,9 @@ export interface Settings {
   llm_model: string;
   temperature: number;
   max_tokens: number;
+  top_p: number;
+  frequency_penalty: number;
+  presence_penalty: number;
   reasoning_enabled: boolean;
   reasoning_effort: ReasoningEffort;
   thinking_budget_tokens?: number | null;
@@ -123,10 +126,46 @@ export interface SettingsUpdate {
   llm_model?: string;
   temperature?: number;
   max_tokens?: number;
+  top_p?: number;
+  frequency_penalty?: number;
+  presence_penalty?: number;
   reasoning_enabled?: boolean;
   reasoning_effort?: ReasoningEffort;
   thinking_budget_tokens?: number | null;
   preferences?: string;
+}
+
+/** 模型列表条目（/settings/models 与 /settings/saved-models 同格式） */
+export interface AIModelOption {
+  value: string;
+  label: string;
+  description: string;
+}
+
+// 项目级 AI 偏好：在全局设置之上按项目覆盖模型与参数（null = 跟随全局）；接口三要素永远取全局
+export interface ProjectAIOverrides {
+  llm_model: string | null;
+  temperature: number | null;
+  max_tokens: number | null;
+  top_p: number | null;
+  frequency_penalty: number | null;
+  presence_penalty: number | null;
+  reasoning_enabled: boolean | null;
+  reasoning_effort: ReasoningEffort | null;
+  thinking_budget_tokens: number | null;
+}
+
+/** 合并后的实际生效配置（接口信息不含密钥） */
+export interface EffectiveAIConfig extends ProjectAIOverrides {
+  api_provider: string | null;
+  api_base_url: string | null;
+}
+
+export interface ProjectAIPreference {
+  project_id: string;
+  overrides: ProjectAIOverrides;
+  effective: EffectiveAIConfig;
+  global_defaults: EffectiveAIConfig;
 }
 
 // 项目类型定义
@@ -315,6 +354,7 @@ export interface ChapterGenerateRequest {
   style_id?: number;
   target_word_count?: number;
   enable_mcp?: boolean;
+  auto_analyze?: boolean;
   selected_plugins?: string[];
   // R8 拆书参考包显式参数（任一为空则走默认）
   pack_ids?: string[];

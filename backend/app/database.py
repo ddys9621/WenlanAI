@@ -38,6 +38,7 @@ from app.models.plot_card import PlotCard  # noqa: F401
 from app.models.plot_line import PlotLine  # noqa: F401
 from app.models.project import Project  # noqa: F401
 from app.models.project_default_style import ProjectDefaultStyle  # noqa: F401
+from app.models.project_ai_preference import ProjectAIPreference  # noqa: F401
 from app.models.project_reference_pack import ProjectReferencePack  # noqa: F401
 from app.models.reference_pack import ReferencePack  # noqa: F401
 from app.models.regeneration_task import RegenerationTask  # noqa: F401
@@ -285,7 +286,8 @@ async def _init_global_writing_styles(user_id: str):
     """为指定用户初始化全局预设写作风格
     
     全局预设风格的 project_id 为 NULL，所有用户共享
-    只在第一次创建数据库时插入一次
+    第一次创建数据库时插入；之后每次初始化按 preset_id 把名称 / 描述 / 提示词同步成代码里的最新版
+    （全局预设用户不能编辑，见 writing_styles.update_writing_style，所以覆盖不会丢用户改动）
     
     Args:
         user_id: 用户ID
@@ -301,20 +303,40 @@ async def _init_global_writing_styles(user_id: str):
         )
         
         async with AsyncSessionLocal() as session:
+            # 获取所有预设风格配置
+            presets = WritingStyleManager.get_all_presets()
+
             # 检查是否已存在全局预设风格
             result = await session.execute(
                 select(WritingStyle).where(WritingStyle.project_id.is_(None))
             )
-            existing = result.scalars().first()
+            existing_rows = list(result.scalars().all())
             
-            if existing:
-                logger.info(f"用户 {user_id} 的全局预设风格已存在，跳过初始化")
+            if existing_rows:
+                by_preset_id = {row.preset_id: row for row in existing_rows if row.preset_id}
+                changed = 0
+                for index, (preset_id, preset_data) in enumerate(presets.items(), start=1):
+                    row = by_preset_id.get(preset_id)
+                    if row is None:
+                        session.add(WritingStyle(
+                            project_id=None, name=preset_data["name"], style_type="preset", preset_id=preset_id,
+                            description=preset_data["description"], prompt_content=preset_data["prompt_content"],
+                            order_index=len(existing_rows) + index,
+                        ))
+                        changed += 1
+                        continue
+                    new_values = (preset_data["name"], preset_data["description"], preset_data["prompt_content"])
+                    if (row.name, row.description, row.prompt_content) != new_values:
+                        row.name, row.description, row.prompt_content = new_values
+                        changed += 1
+                if changed:
+                    await session.commit()
+                    logger.info(f"用户 {user_id} 的全局预设风格已同步 {changed} 项到最新版")
+                else:
+                    logger.info(f"用户 {user_id} 的全局预设风格已存在且为最新，跳过初始化")
                 return
             
             logger.info(f"开始为用户 {user_id} 插入全局预设写作风格...")
-            
-            # 获取所有预设风格配置
-            presets = WritingStyleManager.get_all_presets()
             
             for index, (preset_id, preset_data) in enumerate(presets.items(), start=1):
                 style = WritingStyle(

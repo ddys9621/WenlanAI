@@ -1,3 +1,5 @@
+import { withProjectHeader } from './activeProject';
+
 export interface SSEMessage {
   type:
     | 'progress' | 'chunk' | 'result' | 'error' | 'done' | 'start' | 'content' | 'meta'
@@ -92,9 +94,8 @@ export class SSEPostClient<TResult = unknown, TRequest = unknown> {
 
       const response = await fetch(this.url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        // 项目内带 X-Project-Id：后端按项目 AI 偏好覆盖模型 / 参数
+        headers: withProjectHeader({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(this.data),
         signal: this.abortController.signal,
       });

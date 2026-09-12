@@ -177,6 +177,7 @@ export const AI_JOB_KIND_LABELS: Record<string, string> = {
   chapter_generate: '正文生成',
   chapter_regenerate: '正文重生成',
   chapter_analyze: '章节分析',
+  chapter_deai_review: '去AI味诊断',
   scene_generate: '场景生成',
   chapter_imitate: '一键仿写',
   wizard_world_building: '向导·世界构建',

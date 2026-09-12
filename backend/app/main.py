@@ -281,6 +281,10 @@ app.include_router(reference_pack.project_router, prefix="/api")
 # V3 仿写 R5：项目内章节编辑器的一键仿写（preview / SSE 流式）
 app.include_router(imitation.router, prefix="/api")
 
+# 项目级 AI 偏好：复用设置页接口，按项目覆盖模型 / 参数（生效点：get_user_ai_service 读 X-Project-Id）
+from app.api import project_ai_preference as _project_ai_preference
+app.include_router(_project_ai_preference.router, prefix="/api")
+
 # 静态文件目录（兼容打包后的环境）
 if getattr(sys, 'frozen', False):
     # 打包后的 exe：static 在 _internal 目录下

@@ -14,6 +14,9 @@ class SettingsBase(BaseModel):
     llm_model: Optional[str] = Field(default="gpt-4", description="模型名称")
     temperature: Optional[float] = Field(default=0.7, ge=0.0, le=2.0, description="温度参数")
     max_tokens: Optional[int] = Field(default=2000, ge=1, description="最大token数")
+    top_p: Optional[float] = Field(default=0.95, ge=0.0, le=1.0, description="核采样 top_p，<1 收敛候选词分布")
+    frequency_penalty: Optional[float] = Field(default=0.3, ge=-2.0, le=2.0, description="频率惩罚，越高越抑制重复用词（降低 AI 味）")
+    presence_penalty: Optional[float] = Field(default=0.3, ge=-2.0, le=2.0, description="存在惩罚，越高越鼓励引入新词/话题")
     reasoning_enabled: Optional[bool] = Field(default=False, description="是否启用思考/推理模式（全局生效）")
     reasoning_effort: Optional[str] = Field(
         default="medium",

@@ -1,12 +1,25 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Plus, Pencil, Trash2, Zap, X, Loader2, RefreshCw, Layers, Search, Film, Eye, ChevronUp, Download, LayoutGrid, Sparkles, BookOpen } from 'lucide-react';
+import { Plus, Pencil, Trash2, Zap, X, Loader2, RefreshCw, Layers, Search, Film, Eye, ChevronUp, Download, LayoutGrid, Sparkles, BookOpen, Fingerprint } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { useStore } from '@/store';
 import { useChapterSync } from '@/store/hooks';
 import { AIJobError, runAIJob, useAIJob, useAIJobsStore, useRunningAIJobs, waitForAIJob } from '@/store/aiJobsStore';
-import { chapterApi, writingStyleApi, chapterOutlineLinkApi, type ChapterWriteResult, type ChapterRegenerateResult } from '@/services/api';
+import {
+  chapterApi,
+  writingStyleApi,
+  chapterOutlineLinkApi,
+  deaiFindingRoute,
+  isActionableDeaiFinding,
+  isPositiveDeaiFinding,
+  type ChapterWriteResult,
+  type ChapterRegenerateResult,
+  type DeaiFinding,
+  type DeaiFindingIn,
+  type DeaiPatchStats,
+  type DeaiReviewResponse,
+} from '@/services/api';
 import type { SSEClientOptions } from '@/utils/sseClient';
 import { normalizeAnalysisData, type NormalizedAnalysisData } from '@/utils/chapterAnalysis';
 import type { Chapter, ChapterCanGenerateResponse, ChapterGenerateRequest, PlotCardWithLinks, WritingStyle } from '@/types';
@@ -25,6 +38,33 @@ const STATUS_MAP: Record<string, { label: string; cls: string }> = {
   draft: { label: '草稿', cls: 'bg-gray-100 text-gray-500' },
   writing: { label: '生成中', cls: 'bg-blue-50 text-blue-600' },
   completed: { label: '已完成', cls: 'bg-emerald-50 text-emerald-600' },
+};
+
+/** 去 AI 味措辞层本地统计里给用户看的几项（键名同后端 deai_metrics.METRIC_LABELS） */
+const DEAI_METRIC_VIEW: Array<{ key: string; label: string; hint: string }> = [
+  { key: 'sentence_len_std', label: '句长标准差', hint: '人类偏高' },
+  { key: 'conjunctions_per_k', label: '连词/千字', hint: 'AI 偏高' },
+  { key: 'particles_per_k', label: '语气词/千字', hint: '人类偏高' },
+  { key: 'machine_phrase_clusters', label: '机器词成群', hint: '同段 ≥2 个' },
+  { key: 'flat_runs', label: '句长扁平段', hint: '连续 3 句等长' },
+  { key: 'contrast_frames', label: '不是…而是…', hint: '' },
+];
+
+const formatDeaiMetrics = (metrics: Record<string, number>) =>
+  DEAI_METRIC_VIEW
+    .filter(({ key }) => typeof metrics[key] === 'number')
+    .map(({ key, label }) => `${label} ${metrics[key]}`)
+    .join(' · ');
+
+/** 补丁式改稿完成后的一句话总结：套用 / 跳过 / 字数 / 指标变化 */
+const formatDeaiPatchSummary = (patch: DeaiPatchStats) => {
+  const deltas = DEAI_METRIC_VIEW
+    .filter(({ key }) => (patch.metrics_delta[key] ?? 0) !== 0)
+    .map(({ key, label }) => `${label} ${patch.metrics_before[key]}→${patch.metrics_after[key]}`)
+    .slice(0, 3);
+  const chars = patch.chars_after - patch.chars_before;
+  return `去 AI 味改稿：套用 ${patch.applied.length} 处，跳过 ${patch.skipped.length} 处，字数 ${chars > 0 ? '+' : ''}${chars}`
+    + (deltas.length ? `；${deltas.join('，')}` : '；措辞指标无变化');
 };
 
 interface FormData {
@@ -92,6 +132,7 @@ export default function Chapters() {
   const attachJob = useAIJobsStore((s) => s.attach);
   const runningWriteJobs = useRunningAIJobs(currentProject?.id, WRITE_JOB_KINDS);
   const runningAnalyses = useRunningAIJobs(currentProject?.id, ['chapter_analyze']);
+  const runningDeaiReviews = useRunningAIJobs(currentProject?.id, ['chapter_deai_review']);
   const [streamDone, setStreamDone] = useState(false);
   const [relatedCards, setRelatedCards] = useState<PlotCardWithLinks[]>([]);
   const [loadingCards, setLoadingCards] = useState(false);
@@ -139,6 +180,8 @@ export default function Chapters() {
   // AI 生成配置弹窗
   const [showGenModal, setShowGenModal] = useState(false);
   const [genTarget, setGenTarget] = useState<{ chapter: Chapter; isRegenerate: boolean } | null>(null);
+  /** 弹窗里正在修订的章节（诊断任务结束回调里用，避免闭包拿到旧 genTarget） */
+  const genTargetRef = useRef<{ chapter: Chapter; isRegenerate: boolean } | null>(null);
   const [genConfig, setGenConfig] = useState({
     style_id: undefined as number | undefined,
     target_word_count: 3000,
@@ -158,6 +201,12 @@ export default function Chapters() {
   const [preserveStructure, setPreserveStructure] = useState(false);
   const [preserveTraits, setPreserveTraits] = useState(true);
   const [autoApply, setAutoApply] = useState(true);
+  // 修订弹窗页签：整章重写（分析建议 / 一致性 / 架构层诊断信号 / 自定义要求）｜去 AI 味润色（内嵌诊断 + 补丁式改稿）
+  const [reviseTab, setReviseTab] = useState<'rewrite' | 'polish'>('rewrite');
+  // 去 AI 味诊断（sepia）：最新报告 + 勾选的 finding 下标（润色页用 patch 路由的，重写页用 rewrite 路由的）
+  const [regenDeai, setRegenDeai] = useState<DeaiReviewResponse | null>(null);
+  const [regenDeaiLoading, setRegenDeaiLoading] = useState(false);
+  const [selectedDeaiIdx, setSelectedDeaiIdx] = useState<Set<number>>(new Set());
   // 版本历史（重新生成任务）
   const [versionTasks, setVersionTasks] = useState<RegenVersionItem[]>([]);
   const [versionLoading, setVersionLoading] = useState(false);
@@ -198,6 +247,7 @@ export default function Chapters() {
   const closeGenerateModal = useCallback(() => {
     setShowGenModal(false);
     setGenTarget(null);
+    genTargetRef.current = null;
     setGenCheck(null);
     setRelatedCards([]);
     setLoadingCards(false);
@@ -218,7 +268,29 @@ export default function Chapters() {
     } : {}),
   }), [genConfig, genRefPack]);
 
-  const openGenerateModal = useCallback(async (chapter: Chapter, isRegenerate: boolean) => {
+  /** 诊断 findings 里可带入修订的条目：排除人类正向标记（只展示）和引证未在原文核实到的（补丁定位不了）；
+   *  route 可选过滤：patch → 润色页可勾；rewrite → 重写页作"重写方向" */
+  const actionableDeaiFindings = (findings: DeaiFinding[], route?: 'patch' | 'rewrite') =>
+    findings
+      .map((f, i) => ({ f, i }))
+      .filter(({ f }) => isActionableDeaiFinding(f) && (!route || deaiFindingRoute(f) === route));
+
+  /** 拉最新诊断进弹窗；未过期则默认勾上全部可带入条目（两个路由都勾，各页签按 route 取自己那份） */
+  const loadDeaiIntoModal = useCallback(async (chapterId: string) => {
+    setRegenDeaiLoading(true);
+    try {
+      const res = await chapterApi.getDeaiReview(chapterId);
+      if (genTargetRef.current?.chapter.id !== chapterId) return;
+      setRegenDeai(res);
+      setSelectedDeaiIdx(new Set(res.review && !res.stale ? actionableDeaiFindings(res.review.result.findings).map(({ i }) => i) : []));
+    } catch {
+      if (genTargetRef.current?.chapter.id === chapterId) setRegenDeai(null);
+    } finally {
+      setRegenDeaiLoading(false);
+    }
+  }, []);
+
+  const openGenerateModal = useCallback(async (chapter: Chapter, isRegenerate: boolean, opts?: { tab?: 'rewrite' | 'polish' }) => {
     setGenCheck(null);
     setRelatedCards([]);
     setLoadingCards(Boolean(chapter.chapter_outline_id));
@@ -233,11 +305,13 @@ export default function Chapters() {
 
       setGenCheck(check);
       setGenTarget({ chapter, isRegenerate });
+      genTargetRef.current = { chapter, isRegenerate };
       setShowGenModal(true);
       loadStyles();
 
-      // 修订闭环：重生成时加载分析建议 / 一致性问题 / 版本历史
+      // 修订闭环：重生成时加载分析建议 / 一致性问题 / 去 AI 味诊断 / 版本历史
       if (isRegenerate) {
+        setReviseTab(opts?.tab ?? 'rewrite');
         setRegenAnalysis(null);
         setSelectedSuggestionIdx(new Set());
         setSelectedIssueIdx(new Set());
@@ -250,6 +324,9 @@ export default function Chapters() {
           .then(data => setRegenAnalysis(normalizeAnalysisData(data as unknown as Record<string, unknown>)))
           .catch(() => setRegenAnalysis(null))
           .finally(() => setRegenAnalysisLoading(false));
+        setRegenDeai(null);
+        setSelectedDeaiIdx(new Set());
+        void loadDeaiIntoModal(chapter.id);
         setVersionLoading(true);
         chapterApi.getRegenerationTasks(chapter.id, 10)
           .then(res => setVersionTasks(res.tasks || []))
@@ -262,7 +339,7 @@ export default function Chapters() {
       setLoadingCards(false);
       toast.error('生成条件检查失败');
     }
-  }, [loadRelatedCardsForChapter, loadStyles]);
+  }, [loadRelatedCardsForChapter, loadStyles, loadDeaiIntoModal]);
 
   // 内容预览
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -390,37 +467,64 @@ export default function Chapters() {
       })
       .filter(Boolean);
 
-    const mergedCustom = [customInstructions.trim(), ...issueLines].filter(Boolean).join('\n');
-    const hasSuggestions = selectedIdx.length > 0;
+    // 去 AI 味诊断条目按页签分流：润色页 → patch 路由的结构化上送（后端按引证偏移做补丁定位 / 对话保护）；
+    // 重写页 → rewrite 路由（架构层）的作为文字"重写方向"并入 custom_instructions
+    const polish = reviseTab === 'polish';
+    const deaiFindings = regenDeai?.review?.result.findings ?? [];
+    const selectedDeai = Array.from(selectedDeaiIdx)
+      .sort((a, b) => a - b)
+      .map(i => deaiFindings[i])
+      .filter((f): f is DeaiFinding => Boolean(f) && deaiFindingRoute(f) === (polish ? 'patch' : 'rewrite'));
+    const deaiStructured: DeaiFindingIn[] = selectedDeai.map(f => ({
+      feature: f.feature,
+      evidence: f.evidence,
+      fix: f.fix,
+      layer: f.layer,
+      severity: f.severity,
+      start: f.start ?? null,
+      end: f.end ?? null,
+    }));
+    const deaiLines = polish
+      ? []
+      : selectedDeai.map(f => `【去AI味·${f.layer}】${f.feature}：${f.fix || '按判据修正'}（原文：“${f.evidence}”）`);
+
+    const mergedCustom = [customInstructions.trim(), ...issueLines, ...deaiLines].filter(Boolean).join('\n');
+    const hasSuggestions = !polish && selectedIdx.length > 0;
     const hasCustom = mergedCustom.length > 0;
     const modificationSource = hasSuggestions && hasCustom
       ? 'mixed'
       : hasSuggestions
         ? 'analysis_suggestions'
         : 'custom';
+    // 润色：保结构、字数不超过原文（夹到接口允许区间）
+    const originalWords = genTarget?.chapter.word_count ?? genConfig.target_word_count;
+    const deaiWordCount = Math.min(10000, Math.max(500, originalWords));
 
     return {
       modification_source: modificationSource,
       selected_suggestion_indices: hasSuggestions ? selectedIdx : undefined,
       custom_instructions: hasCustom ? mergedCustom : undefined,
       preserve_elements: {
-        preserve_structure: preserveStructure,
+        preserve_structure: polish || preserveStructure,
         preserve_dialogues: [],
         preserve_plot_points: [],
         preserve_character_traits: preserveTraits,
       },
-      style_id: genConfig.style_id,
-      target_word_count: genConfig.target_word_count,
+      style_id: polish ? undefined : genConfig.style_id,
+      target_word_count: polish ? deaiWordCount : genConfig.target_word_count,
       save_as_version: true,
       auto_apply: autoApply,
-      // R8：重生成也支持拆书参考包（仅 enabled 时传）
-      ...(genRefPack.enabled ? {
+      deai_mode: polish,
+      deai_findings: polish ? deaiStructured : undefined,
+      version_note: polish ? '去 AI 味润色' : undefined,
+      // R8：整章重写支持拆书参考包（仅 enabled 时传）；润色不带
+      ...(!polish && genRefPack.enabled ? {
         pack_ids: genRefPack.packIds.length > 0 ? genRefPack.packIds : undefined,
         dimensions: genRefPack.dimensions.length > 0 ? genRefPack.dimensions : undefined,
         strength: genRefPack.strength,
       } : {}),
     };
-  }, [regenAnalysis, selectedSuggestionIdx, selectedIssueIdx, customInstructions, preserveStructure, preserveTraits, autoApply, genConfig, genRefPack]);
+  }, [regenAnalysis, selectedSuggestionIdx, selectedIssueIdx, customInstructions, preserveStructure, preserveTraits, autoApply, genConfig, genRefPack, regenDeai, selectedDeaiIdx, reviseTab, genTarget]);
 
   /** 应用/回滚某个历史版本到正文 */
   const handleApplyVersion = async (taskId: string, source: 'regenerated' | 'original') => {
@@ -445,35 +549,78 @@ export default function Chapters() {
     }
   };
 
+  /** 生成前检查：前面有「有正文但未分析（无记忆状态）」的章节则提醒用户是否继续。返回 true=继续。 */
+  const confirmUnanalyzedPrevious = async (chapter: Chapter): Promise<boolean> => {
+    try {
+      const res = await chapterApi.generationPrecheck(chapter.id);
+      if (res.count > 0) {
+        return window.confirm(res.message);
+      }
+    } catch {
+      // 预检查失败不阻断生成
+    }
+    return true;
+  };
+
   const confirmGenerate = async () => {
     if (!genTarget) return;
     const { chapter, isRegenerate } = genTarget;
-    // 意图防护：重生成但未提供任何修改意见时，明确告知这是"无方向整章重写"
+    // 首次生成前：前置章节若有未分析（缺记忆状态）的，提醒用户是否继续
+    if (!isRegenerate && !(await confirmUnanalyzedPrevious(chapter))) return;
+    const polish = isRegenerate && reviseTab === 'polish';
+    const findings = regenDeai?.review?.result.findings ?? [];
+    const routeSelected = (route: 'patch' | 'rewrite') =>
+      Array.from(selectedDeaiIdx).filter((i) => findings[i] && deaiFindingRoute(findings[i]) === route);
+    // 意图防护：没给任何修订方向时明确告知后果（重写 = 无方向整章重写；润色 = 模型自行找问题，实测效果更差）
+    const noDirection = polish
+      ? routeSelected('patch').length === 0
+      : isRegenerate &&
+        selectedSuggestionIdx.size === 0 &&
+        selectedIssueIdx.size === 0 &&
+        routeSelected('rewrite').length === 0 &&
+        !customInstructions.trim();
     if (
-      isRegenerate &&
-      selectedSuggestionIdx.size === 0 &&
-      selectedIssueIdx.size === 0 &&
-      !customInstructions.trim() &&
-      !confirm('未勾选建议、未填写修改要求：AI 将只按章纲整体重写本章（不带针对性修订方向）。确定继续？')
+      noDirection &&
+      !confirm(
+        polish
+          ? '未勾选诊断条目：AI 将按去 AI 味协议自行找问题并做最小修改（sepia 实测：没有缺陷清单的改写效果更差）。建议先运行诊断并勾选条目。确定继续？'
+          : '未勾选建议、未填写修改要求：AI 将只按章纲整体重写本章（不带针对性修订方向）。确定继续？',
+      )
     ) {
       return;
+    }
+    // 勾选记录 = 免费的假阳性标注（哪些展示了、哪些被带入），失败不影响流程
+    const reviewForFeedback = regenDeai?.review;
+    if (isRegenerate && reviewForFeedback && !regenDeai?.stale) {
+      const mode = polish ? 'patch' : 'rewrite';
+      const candidates = actionableDeaiFindings(findings, mode).map(({ i }) => i);
+      if (candidates.length > 0) {
+        chapterApi
+          .postDeaiReviewFeedback(chapter.id, reviewForFeedback.id, { mode, candidates, selected: routeSelected(mode) })
+          .catch(() => { /* 标注丢一次无所谓 */ });
+      }
     }
     const requestBody = (isRegenerate
       ? buildRegenerateRequest()
       : buildChapterGenerateRequest()) as Record<string, unknown>;
     const keepAsDraftOnly = isRegenerate && !autoApply;
+    const wasDeaiPatch = polish;
     setShowGenModal(false);
     setGenCheck(null);
     setStreamDone(false);
     try {
-      await startStream({
+      const result = await startStream({
         chapter,
         isRegenerate,
         requestBody,
         mode: 'single',
       });
+      const patch = wasDeaiPatch ? (result as ChapterRegenerateResult | null)?.deai_patch : null;
+      if (patch) {
+        toast.success(formatDeaiPatchSummary(patch), { duration: 8000 });
+      }
       if (keepAsDraftOnly) {
-        toast.info('新稿已保存为历史版本（未覆盖正文）。可在「重新生成」弹窗的历史版本中应用。');
+        toast.info('新稿已保存为历史版本（未覆盖正文）。可在「修订」弹窗的历史版本中应用。');
       }
     } catch (error) {
       if ((error as DOMException)?.name === 'AbortError') {
@@ -701,6 +848,9 @@ export default function Chapters() {
       return;
     }
 
+    // 批量生成前：以首个待生成章节为基准检查前置未分析章节，提醒用户是否继续
+    if (!(await confirmUnanalyzedPrevious(chaptersToGenerate[0]))) return;
+
     batchCancelRef.current = false;
     setShowBatchModal(false);
     setBatchStatus({
@@ -742,6 +892,7 @@ export default function Chapters() {
           requestBody: {
             target_word_count: 3000,
             enable_mcp: true,
+            auto_analyze: true,
           },
           mode: 'batch',
         });
@@ -851,8 +1002,35 @@ export default function Chapters() {
     }
   };
 
+  // ========== 5b. 去 AI 味诊断（sepia review：7 轮并行、带原文引证）：从修订弹窗「润色」页显式触发，完成后回填到弹窗 ==========
+  const runDeaiReview = async (chapter: Chapter) => {
+    if (!currentProject) return;
+    try {
+      await useAIJobsStore.getState().start({
+        kind: 'chapter_deai_review',
+        title: `去AI味诊断第 ${chapter.chapter_number} 章《${chapter.title}》`,
+        projectId: currentProject.id,
+        meta: { chapter_id: chapter.id },
+        connect: (options) => chapterApi.deaiReviewStream(chapter.id, options),
+        onSettled: (job) => {
+          if (job.status !== 'done') return;
+          if (genTargetRef.current?.chapter.id === chapter.id) {
+            void loadDeaiIntoModal(chapter.id);
+          } else {
+            toast.success(`「${chapter.title}」去 AI 味诊断完成，打开「修订 → 去 AI 味润色」查看`);
+          }
+        },
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '诊断启动失败');
+    }
+  };
+
   const runningAnalysisChapterIds = new Set(
     runningAnalyses.map((j) => (typeof j.meta.chapter_id === 'string' ? j.meta.chapter_id : '')),
+  );
+  const runningDeaiChapterIds = new Set(
+    runningDeaiReviews.map((j) => (typeof j.meta.chapter_id === 'string' ? j.meta.chapter_id : '')),
   );
   const batchRunning = batchStatus?.status === 'running';
   const isGenerating = (id: string) => streamState?.chapterId === id && !streamDone;
@@ -862,6 +1040,224 @@ export default function Chapters() {
   const totalWords = chapters.reduce((s, c) => s + c.word_count, 0);
   const completedCount = chapters.filter((c) => c.status === 'completed').length;
   const streamBusy = !!streamState && !streamDone;
+  const isPolish = Boolean(genTarget?.isRegenerate) && reviseTab === 'polish';
+
+  // ---------- 修订弹窗两个页签共用的小块 ----------
+
+  const toggleDeaiIdx = (i: number) =>
+    setSelectedDeaiIdx((prev) => {
+      const next = new Set(prev);
+      if (next.has(i)) next.delete(i);
+      else next.add(i);
+      return next;
+    });
+
+  /** 一条可勾选的诊断信号（重写页的"重写方向" / 润色页的"可润色信号"共用） */
+  const renderDeaiFindingCheckbox = (f: DeaiFinding, i: number) => {
+    const acc = regenDeai?.acceptance?.[f.feature];
+    const lowAcceptance = acc && acc.offered >= 3 && acc.selected / acc.offered < 0.34;
+    return (
+      <label key={i} className="flex cursor-pointer items-start gap-2 text-xs text-content-secondary hover:text-content">
+        <input type="checkbox" className="mt-0.5" checked={selectedDeaiIdx.has(i)} onChange={() => toggleDeaiIdx(i)} />
+        <span className="leading-5">
+          <span className="mr-1 bg-surface-hover px-1 py-px text-[10px] font-medium text-content-secondary">{f.layer}</span>
+          <span className={cn('mr-1 px-1 py-px text-[10px] font-medium', f.severity === 'high' ? 'bg-red-50 text-red-600' : f.severity === 'medium' ? 'bg-amber-50 text-amber-600' : 'bg-surface-hover text-content-secondary')}>
+            {f.severity}
+          </span>
+          <span className="font-medium text-content">{f.feature}</span>
+          {f.fix ? `：${f.fix}` : ''}
+          {lowAcceptance && (
+            <span className="ml-1 px-1 py-px text-[10px] text-content-tertiary" title={`本项目历史上这类信号你只采纳了 ${acc.selected}/${acc.offered} 次，可能是误报`}>
+              常被跳过 {acc.selected}/{acc.offered}
+            </span>
+          )}
+          {f.evidence && <span className="block text-[11px] text-content-tertiary">原文：“{f.evidence}”</span>}
+        </span>
+      </label>
+    );
+  };
+
+  const renderAutoApplyToggle = () => (
+    <label className="flex cursor-pointer items-center gap-1.5 text-xs text-content-secondary">
+      <input type="checkbox" checked={autoApply} onChange={(e) => setAutoApply(e.target.checked)} />
+      完成后覆盖正文（关闭则仅存为版本草稿）
+    </label>
+  );
+
+  /** 版本历史：应用新稿 / 回滚原稿（重写与润色都留档在同一条历史里） */
+  const renderVersionHistory = () => (
+    <div className="space-y-1.5">
+      <p className="text-xs font-medium text-content">历史版本</p>
+      {versionLoading ? (
+        <div className="flex items-center gap-2 py-1 text-xs text-content-secondary">
+          <Loader2 className="h-3 w-3 animate-spin" />
+          加载版本…
+        </div>
+      ) : versionTasks.length === 0 ? (
+        <p className="text-xs text-content-tertiary">暂无历史版本（每次重写 / 润色都会自动留档）</p>
+      ) : (
+        versionTasks.map((task) => (
+          <div key={task.task_id} className="flex items-center justify-between gap-2 border border-surface-border bg-white/80 px-3 py-2 text-xs">
+            <div className="min-w-0">
+              <span className="font-medium text-content">v{task.version_number ?? 1}</span>
+              <span className="ml-2 text-content-tertiary tabular-nums">
+                {task.status === 'completed'
+                  ? `${task.original_word_count ?? '?'} → ${task.regenerated_word_count ?? '?'} 字`
+                  : task.status}
+              </span>
+              {task.version_note && <span className="ml-2 truncate text-content-secondary">{task.version_note}</span>}
+              {task.created_at && (
+                <span className="ml-2 text-content-tertiary">{new Date(task.created_at).toLocaleString('zh-CN', { hour12: false })}</span>
+              )}
+            </div>
+            {task.status === 'completed' && (
+              <div className="flex shrink-0 gap-1.5">
+                <button
+                  onClick={() => handleApplyVersion(task.task_id, 'regenerated')}
+                  disabled={applyingVersionKey !== null}
+                  className="hh-chip px-2 py-1 text-[11px] text-brand"
+                >
+                  {applyingVersionKey === `${task.task_id}:regenerated` ? '应用中…' : '应用新稿'}
+                </button>
+                <button
+                  onClick={() => handleApplyVersion(task.task_id, 'original')}
+                  disabled={applyingVersionKey !== null}
+                  className="hh-chip px-2 py-1 text-[11px]"
+                >
+                  {applyingVersionKey === `${task.task_id}:original` ? '回滚中…' : '回滚原稿'}
+                </button>
+              </div>
+            )}
+          </div>
+        ))
+      )}
+    </div>
+  );
+
+  /** 润色页：诊断状态 / 触发 → 可润色信号（篇章 / 措辞）勾选 → 架构层去向提示 → 人味标记 / 提示 / 本地统计 */
+  const renderDeaiPolishPanel = (chapter: Chapter) => {
+    const reviewing = runningDeaiChapterIds.has(chapter.id);
+    const runningJob = runningDeaiReviews.find((j) => j.meta.chapter_id === chapter.id);
+    const review = regenDeai?.review ?? null;
+    const findings = review?.result.findings ?? [];
+    const patchItems = actionableDeaiFindings(findings, 'patch');
+    const rewriteItems = actionableDeaiFindings(findings, 'rewrite');
+    const positives = findings.filter(isPositiveDeaiFinding);
+    const unverified = findings.filter((f) => !isPositiveDeaiFinding(f) && f.verified === false).length;
+    const diagnoseButton = (label: string, cls: string) => (
+      <button onClick={() => void runDeaiReview(chapter)} disabled={reviewing} className={cls}>
+        {reviewing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Fingerprint className="h-3.5 w-3.5" />}
+        {label}
+      </button>
+    );
+    return (
+      <>
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-content">去 AI 味诊断</p>
+            <p className="mt-1 text-xs text-content-tertiary">
+              {review
+                ? `${review.model_name ? `画像模型 ${review.model_name}` : ''}${review.created_at ? ` · ${new Date(review.created_at).toLocaleString('zh-CN', { hour12: false })}` : ''} · 语料参考值不是阈值；单个命中不算，成群才算`
+                : '7 轮并行模型调用（架构 → 篇章 → 措辞），每轮带原文引证；只诊断不改稿。'}
+            </p>
+          </div>
+          {review && !reviewing && diagnoseButton(regenDeai?.stale ? '重新诊断' : '再诊断一次', 'hh-chip flex items-center gap-1 px-2 py-1 text-[11px]')}
+        </div>
+
+        {reviewing ? (
+          <div className="flex items-center gap-2 border border-surface-border bg-white/80 px-3 py-2 text-xs text-content-secondary">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            <span>{runningJob?.progress?.message || '诊断进行中…'}</span>
+            {typeof runningJob?.progress?.pct === 'number' && <span className="ml-auto tabular-nums text-content-tertiary">{runningJob.progress.pct}%</span>}
+          </div>
+        ) : regenDeaiLoading ? (
+          <div className="flex items-center gap-2 py-1 text-xs text-content-secondary">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            加载诊断结果…
+          </div>
+        ) : !review ? (
+          <div className="border border-dashed border-surface-border bg-white/60 px-3 py-4 text-center">
+            <p className="text-xs text-content-secondary">本章还没有诊断。</p>
+            <div className="mt-2 flex justify-center">{diagnoseButton('运行诊断（7 轮模型调用）', 'hh-btn-secondary text-xs')}</div>
+          </div>
+        ) : (
+          <>
+            {regenDeai?.stale && (
+              <p className="bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-600">正文自诊断后有改动：以下引证可能对不上位置，建议重新诊断后再润色。</p>
+            )}
+            <p className="text-xs text-content-secondary">{review.result.summary}</p>
+            {review.result.metrics && (
+              <p className="text-[11px] text-content-tertiary" title="措辞层本地统计（程序按词表 / 句长算的，不经模型）；只是方向，不是阈值">
+                本地统计：{formatDeaiMetrics(review.result.metrics)}
+              </p>
+            )}
+
+            <div className="space-y-1.5 border-t border-brand/15 pt-3">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs font-medium text-content">可润色信号（篇章 / 措辞，勾选带入补丁改稿）</p>
+                {patchItems.length > 0 && (
+                  <button
+                    onClick={() => {
+                      const all = patchItems.every(({ i }) => selectedDeaiIdx.has(i));
+                      setSelectedDeaiIdx((prev) => {
+                        const next = new Set(prev);
+                        patchItems.forEach(({ i }) => (all ? next.delete(i) : next.add(i)));
+                        return next;
+                      });
+                    }}
+                    className="text-[11px] text-brand hover:underline"
+                  >
+                    {patchItems.every(({ i }) => selectedDeaiIdx.has(i)) ? '全不选' : '全选'}
+                  </button>
+                )}
+              </div>
+              {patchItems.length === 0 ? (
+                <p className="text-xs text-content-tertiary">
+                  没有可补丁式修复的信号。
+                  {unverified > 0 && `（${unverified} 条引证未在原文找到，已不计）`}
+                </p>
+              ) : (
+                patchItems.map(({ f, i }) => renderDeaiFindingCheckbox(f, i))
+              )}
+              {unverified > 0 && patchItems.length > 0 && (
+                <p className="text-[11px] text-content-tertiary">另有 {unverified} 条引证未在原文找到（模型编造或改写过头），已不计。</p>
+              )}
+            </div>
+
+            {rewriteItems.length > 0 && (
+              <div className="border-t border-brand/15 pt-3 text-xs text-content-secondary">
+                架构层还有 {rewriteItems.length} 条（{Array.from(new Set(rewriteItems.map(({ f }) => f.feature))).slice(0, 3).join('、')}
+                {rewriteItems.length > 3 ? '…' : ''}）——换词修不掉，
+                <button onClick={() => setReviseTab('rewrite')} className="text-brand hover:underline">到「整章重写」里当方向处理</button>。
+              </div>
+            )}
+
+            {positives.length > 0 && (
+              <p className="border-t border-brand/15 pt-3 text-[11px] text-emerald-700">
+                已具备的人味标记（保留）：{Array.from(new Set(positives.map((f) => f.feature))).join('、')}
+              </p>
+            )}
+            {review.result.advisories.length > 0 && (
+              <div className="space-y-0.5 text-[11px] text-content-tertiary">
+                {review.result.advisories.map((a, idx) => (
+                  <p key={idx}>· {a}</p>
+                ))}
+              </div>
+            )}
+            {review.result.passes.some((p) => p.error) && (
+              <p className="text-[11px] text-amber-600">
+                以下轮次模型输出无法解析，已跳过：{review.result.passes.filter((p) => p.error).map((p) => p.title).join('、')}
+              </p>
+            )}
+          </>
+        )}
+
+        <p className="text-[11px] text-content-tertiary">
+          润色只改勾选条目对应的位置：模型给出 find/replace，后端在原文上机械套用，没命中的字一个不变；对话引语只在被勾选条目指向时才可改；字数不超过原文。
+        </p>
+      </>
+    );
+  };
 
   return (
     <div className="animate-fade-in space-y-6">
@@ -1085,6 +1481,7 @@ export default function Chapters() {
             const generating = isGenerating(c.id);
             const currentBatchChapter = batchRunning && batchStatus?.currentChapterId === c.id;
             const analyzing = analyzingIds.has(c.id) || runningAnalysisChapterIds.has(c.id);
+            const deaiReviewing = runningDeaiChapterIds.has(c.id);
             return (
               <div key={c.id} className={cn('px-5 py-3.5 transition-colors', currentBatchChapter ? 'bg-brand/[0.06]' : 'hover:bg-brand/[0.04]')}>
                 <div className="flex items-center gap-4">
@@ -1127,10 +1524,10 @@ export default function Chapters() {
                         onClick={() => handleRegenerate(c)}
                         disabled={generating || batchRunning || streamBusy}
                         className="hh-icon-btn-plain h-8 w-8 hover:text-brand"
-                        title="重新生成"
-                        aria-label="重新生成"
+                        title={deaiReviewing ? '修订（去 AI 味诊断进行中）' : '修订：整章重写 / 去 AI 味润色'}
+                        aria-label="修订"
                       >
-                        {generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                        {generating || deaiReviewing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
                       </button>
                     ) : (
                       <button
@@ -1349,10 +1746,14 @@ export default function Chapters() {
             <div className="hh-modal max-w-[680px]" role="dialog" aria-modal="true">
               <div className="hh-modal-head">
                 <div className="min-w-0">
-                  <p className="hh-eyebrow">{genTarget.isRegenerate ? '重新生成' : 'AI 生成'}</p>
+                  <p className="hh-eyebrow">{genTarget.isRegenerate ? '修订' : 'AI 生成'}</p>
                   <h2 className="mt-2 truncate text-xl font-semibold tracking-tight text-content">{genTarget.chapter.title}</h2>
                   <p className="mt-1 text-sm text-content-secondary">
-                    {genTarget.isRegenerate ? '基于分析建议与修改要求针对性改稿，每次重生成都会留档。' : '选择风格与目标字数，AI 会结合章纲、前文与设定生成正文。'}
+                    {!genTarget.isRegenerate
+                      ? '选择风格与目标字数，AI 会结合章纲、前文与设定生成正文。'
+                      : isPolish
+                        ? '先诊断 AI 痕迹，再按勾选条目做补丁式最小改动：没命中的字一个不变，每次都留档。'
+                        : '基于分析建议、诊断出的架构问题与修改要求整章重写，每次都留档。'}
                   </p>
                 </div>
                 <button onClick={closeGenerateModal} className="hh-icon-btn-plain -mr-2 -mt-1" aria-label="关闭">
@@ -1360,6 +1761,37 @@ export default function Chapters() {
                 </button>
               </div>
               <div className="hh-modal-body space-y-5">
+                {genTarget.isRegenerate && (
+                  <div className="flex gap-1 border-b border-surface-border" role="tablist">
+                    {([
+                      { key: 'rewrite', label: '整章重写', icon: RefreshCw, hint: '换写法、改情节走向、修架构层问题' },
+                      { key: 'polish', label: '去 AI 味润色', icon: Fingerprint, hint: '保情节保对话，只换掉机器腔' },
+                    ] as const).map(({ key, label, icon: Icon, hint }) => {
+                      const patchCount = key === 'polish' && regenDeai?.review && !regenDeai.stale
+                        ? actionableDeaiFindings(regenDeai.review.result.findings, 'patch').length
+                        : 0;
+                      return (
+                        <button
+                          key={key}
+                          role="tab"
+                          aria-selected={reviseTab === key}
+                          onClick={() => setReviseTab(key)}
+                          title={hint}
+                          className={cn(
+                            '-mb-px flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm transition-colors',
+                            reviseTab === key ? 'border-brand font-medium text-content' : 'border-transparent text-content-secondary hover:text-content',
+                          )}
+                        >
+                          <Icon className="h-4 w-4" />
+                          {label}
+                          {patchCount > 0 && <span className="bg-brand/10 px-1.5 py-px text-[10px] font-medium text-brand tabular-nums">{patchCount}</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {!isPolish && (
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div>
                     <label className="hh-label">写作风格</label>
@@ -1403,7 +1835,9 @@ export default function Chapters() {
                     </div>
                   </div>
                 </div>
+                )}
 
+                {!isPolish && (
                 <MCPSelector
                   value={{ enable: genConfig.enable_mcp, selected: genConfig.selected_plugins }}
                   onChange={(val) =>
@@ -1414,18 +1848,28 @@ export default function Chapters() {
                     }))
                   }
                 />
-                {currentProject?.id && (
+                )}
+                {!isPolish && currentProject?.id && (
                   <ReferencePackSelector
                     projectId={currentProject.id}
                     value={genRefPack}
                     onChange={setGenRefPack}
-                    hint={genTarget.isRegenerate ? '让本次重生成参考拆书的笔法/节奏/语料' : '让本章正文参考拆书的笔法/方法论/语料'}
+                    hint={genTarget.isRegenerate ? '让本次重写参考拆书的笔法/节奏/语料' : '让本章正文参考拆书的笔法/方法论/语料'}
                     disabledTitle="使用拆书参考包作为对标"
                   />
                 )}
 
-                {/* ===== 修订闭环（仅重生成）：分析建议 / 一致性问题 / 修改要求 / 保留元素 / 版本历史 ===== */}
-                {genTarget.isRegenerate && (
+                {/* ===== 去 AI 味润色页签：内嵌诊断（显式触发）+ 篇章/措辞信号勾选 → 补丁式改稿 ===== */}
+                {isPolish && (
+                  <div className="space-y-4 border border-brand/25 bg-brand/5 p-4">
+                    {renderDeaiPolishPanel(genTarget.chapter)}
+                    {renderAutoApplyToggle()}
+                    {renderVersionHistory()}
+                  </div>
+                )}
+
+                {/* ===== 整章重写页签：分析建议 / 一致性问题 / 架构层诊断信号 / 修改要求 / 保留元素 / 版本历史 ===== */}
+                {genTarget.isRegenerate && !isPolish && (
                   <div className="space-y-4 border border-brand/25 bg-brand/5 p-4">
                     <div>
                       <p className="text-sm font-medium text-content">修订意见</p>
@@ -1506,6 +1950,24 @@ export default function Chapters() {
                       </>
                     )}
 
+                    {/* 去 AI 味诊断里的架构层信号：最小改动修不了，只能在重写里当方向 */}
+                    {(() => {
+                      const items = regenDeai?.review ? actionableDeaiFindings(regenDeai.review.result.findings, 'rewrite') : [];
+                      if (items.length === 0) return null;
+                      return (
+                        <div className="space-y-1.5 border-t border-brand/15 pt-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-xs font-medium text-content">重写方向（来自去 AI 味诊断·架构层，勾选带入）</p>
+                            {regenDeai?.stale && (
+                              <span className="bg-amber-50 px-1.5 py-px text-[10px] font-medium text-amber-600">正文已改动，诊断可能过期</span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-content-tertiary">主题说破、因果太整齐、结尾三件套这类问题靠换词修不掉，需要重写时一并处理。</p>
+                          {items.map(({ f, i }) => renderDeaiFindingCheckbox(f, i))}
+                        </div>
+                      );
+                    })()}
+
                     <div>
                       <label className="hh-label text-xs">自定义修改要求（可选）</label>
                       <textarea
@@ -1526,62 +1988,14 @@ export default function Chapters() {
                         <input type="checkbox" checked={preserveTraits} onChange={(e) => setPreserveTraits(e.target.checked)} />
                         保持角色性格一致
                       </label>
-                      <label className="flex cursor-pointer items-center gap-1.5">
-                        <input type="checkbox" checked={autoApply} onChange={(e) => setAutoApply(e.target.checked)} />
-                        生成后覆盖正文（关闭则仅存为版本草稿）
-                      </label>
+                      {renderAutoApplyToggle()}
                     </div>
 
-                    {/* 版本历史：应用新稿 / 回滚原稿 */}
-                    <div className="space-y-1.5">
-                      <p className="text-xs font-medium text-content">历史版本</p>
-                      {versionLoading ? (
-                        <div className="flex items-center gap-2 py-1 text-xs text-content-secondary">
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                          加载版本…
-                        </div>
-                      ) : versionTasks.length === 0 ? (
-                        <p className="text-xs text-content-tertiary">暂无历史版本（每次重生成都会自动留档）</p>
-                      ) : (
-                        versionTasks.map((task) => (
-                          <div key={task.task_id} className="flex items-center justify-between gap-2 border border-surface-border bg-white/80 px-3 py-2 text-xs">
-                            <div className="min-w-0">
-                              <span className="font-medium text-content">v{task.version_number ?? 1}</span>
-                              <span className="ml-2 text-content-tertiary tabular-nums">
-                                {task.status === 'completed'
-                                  ? `${task.original_word_count ?? '?'} → ${task.regenerated_word_count ?? '?'} 字`
-                                  : task.status}
-                              </span>
-                              {task.version_note && <span className="ml-2 truncate text-content-secondary">{task.version_note}</span>}
-                              {task.created_at && (
-                                <span className="ml-2 text-content-tertiary">{new Date(task.created_at).toLocaleString('zh-CN', { hour12: false })}</span>
-                              )}
-                            </div>
-                            {task.status === 'completed' && (
-                              <div className="flex shrink-0 gap-1.5">
-                                <button
-                                  onClick={() => handleApplyVersion(task.task_id, 'regenerated')}
-                                  disabled={applyingVersionKey !== null}
-                                  className="hh-chip px-2 py-1 text-[11px] text-brand"
-                                >
-                                  {applyingVersionKey === `${task.task_id}:regenerated` ? '应用中…' : '应用新稿'}
-                                </button>
-                                <button
-                                  onClick={() => handleApplyVersion(task.task_id, 'original')}
-                                  disabled={applyingVersionKey !== null}
-                                  className="hh-chip px-2 py-1 text-[11px]"
-                                >
-                                  {applyingVersionKey === `${task.task_id}:original` ? '回滚中…' : '回滚原稿'}
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        ))
-                      )}
-                    </div>
+                    {renderVersionHistory()}
                   </div>
                 )}
 
+                {!isPolish && (
                 <div className="hh-subpanel space-y-3 p-4">
                   <div>
                     <p className="text-sm font-medium text-content">本次生成会参考的内容</p>
@@ -1631,14 +2045,20 @@ export default function Chapters() {
                     </div>
                   </div>
                 </div>
+                )}
               </div>
               <div className="hh-modal-foot">
                 <button onClick={closeGenerateModal} className="hh-btn-ghost">
                   取消
                 </button>
-                <button onClick={confirmGenerate} className="hh-btn-primary">
-                  <Zap className="h-4 w-4" />
-                  开始生成
+                <button
+                  onClick={confirmGenerate}
+                  disabled={isPolish && (!regenDeai?.review || runningDeaiChapterIds.has(genTarget.chapter.id))}
+                  title={isPolish && !regenDeai?.review ? '先运行诊断' : undefined}
+                  className="hh-btn-primary"
+                >
+                  {isPolish ? <Fingerprint className="h-4 w-4" /> : <Zap className="h-4 w-4" />}
+                  {isPolish ? '开始润色' : genTarget.isRegenerate ? '开始重写' : '开始生成'}
                 </button>
               </div>
             </div>

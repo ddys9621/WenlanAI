@@ -52,7 +52,7 @@ def create_default_config():
     
     config_path = get_config_path()
     with open(config_path, 'w', encoding='utf-8') as f:
-        f.write("# MuMuAINovel 配置文件\n")
+        f.write("# WenlanAI 配置文件\n")
         f.write("# 修改后需要重启应用才能生效\n\n")
         config.write(f)
     

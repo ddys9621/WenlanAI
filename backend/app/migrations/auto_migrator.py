@@ -469,6 +469,16 @@ async def ensure_chapter_outline_bridge_columns(engine: AsyncEngine):
     await _ensure_columns(engine, "chapter_outlines", CHAPTER_OUTLINE_BRIDGE_COLUMNS, "V4 P2-1")
 
 
+CHAPTER_GENERATION_META_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("generated_by_model", "VARCHAR(100)"),
+)
+
+
+async def ensure_chapter_generation_meta_columns(engine: AsyncEngine):
+    """去 AI 味：chapters.generated_by_model 记录最后写入正文的模型，诊断按它取模型先验（而不是当前设置的模型）。"""
+    await _ensure_columns(engine, "chapters", CHAPTER_GENERATION_META_COLUMNS, "去 AI 味：写这章的模型")
+
+
 PROJECT_ID_INDEX_TABLES: tuple[str, ...] = (
     "chapters", "chapter_outlines", "plot_lines", "plot_cards", "characters",
     "story_outlines", "generation_history", "writing_styles", "project_default_styles",
@@ -492,6 +502,30 @@ async def ensure_settings_reasoning_columns(engine: AsyncEngine):
         for col_name, col_def in reasoning_columns:
             if not await column_exists(conn, "settings", col_name):
                 logger.info("🔧 Adding settings.%s column (思考强度)", col_name)
+                await apply_sql(conn, [
+                    f"ALTER TABLE settings ADD COLUMN {col_name} {col_def}",
+                ])
+            else:
+                logger.info("✅ settings.%s already exists", col_name)
+
+
+async def ensure_settings_sampling_columns(engine: AsyncEngine):
+    """Ensure sampling diversity columns exist on settings table（降低 AI 味 / 困惑度检测）。
+
+    新增 3 列（旧库升级，均带默认值，零数据迁移风险）：
+    - top_p             REAL DEFAULT 0.95  核采样
+    - frequency_penalty REAL DEFAULT 0.3   频率惩罚（抑制重复用词）
+    - presence_penalty  REAL DEFAULT 0.3   存在惩罚（鼓励新词/话题）
+    """
+    sampling_columns = [
+        ("top_p", "REAL DEFAULT 0.95"),
+        ("frequency_penalty", "REAL DEFAULT 0.3"),
+        ("presence_penalty", "REAL DEFAULT 0.3"),
+    ]
+    async with engine.begin() as conn:
+        for col_name, col_def in sampling_columns:
+            if not await column_exists(conn, "settings", col_name):
+                logger.info("🔧 Adding settings.%s column (采样多样性)", col_name)
                 await apply_sql(conn, [
                     f"ALTER TABLE settings ADD COLUMN {col_name} {col_def}",
                 ])
@@ -529,7 +563,9 @@ async def run_auto_migrations(engine: AsyncEngine):
         await ensure_plot_bridge_secondary_beats_column(engine)  # 工程化桥段流水线：副线任务
         await ensure_plot_bridge_generation_meta_column(engine)  # 桥段填充溯源
         await ensure_character_aliases_column(engine)  # 角色曾用名（改名级联兜底）
+        await ensure_chapter_generation_meta_columns(engine)  # 去 AI 味：写这章的模型
         await ensure_settings_reasoning_columns(engine)  # 思考强度全局设置字段
+        await ensure_settings_sampling_columns(engine)  # 采样多样性字段（降低 AI 味）
         await ensure_project_id_indexes(engine)  # 热表 project_id 索引（旧库补建）
         logger.info("✅ Auto migrations finished")
     except Exception as exc:

@@ -65,7 +65,7 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
         <BrandLogo size="sm" />
         {!collapsed && (
           <div className="min-w-0">
-            <p className="truncate text-sm font-semibold tracking-tight text-content">HH小说创作</p>
+            <p className="truncate text-sm font-semibold tracking-tight text-content">文澜 AI</p>
             <p className="truncate text-[11px] text-content-tertiary">专业小说创作平台</p>
           </div>
         )}

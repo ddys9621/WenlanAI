@@ -240,7 +240,7 @@ def run_update(ctx: UpdateContext, run_command: CommandRunner = run_command) -> 
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="MuMuAINovel 源码更新进程")
+    parser = argparse.ArgumentParser(description="WenlanAI 源码更新进程")
     parser.add_argument("--repo-root", required=True)
     parser.add_argument("--branch", default="master")
     parser.add_argument("--status-file", required=True)

@@ -29,6 +29,8 @@ import { projectApi } from '@/services/api'
 import { useCharacterSync, useOutlineSync, useChapterSync } from '@/store/hooks'
 import { PageLoading } from '@/components/ui/PageLoading'
 import { AIJobTray } from '@/components/ai-job/AIJobTray'
+import { ProjectModelPicker } from '@/components/ai-model/ProjectModelPicker'
+import { setActiveProjectId } from '@/utils/activeProject'
 
 const NAV_ITEMS = [
   { label: '世界设定', icon: Globe, path: 'world-setting' },
@@ -87,6 +89,11 @@ export default function ProjectDetail() {
   useEffect(() => {
     if (!projectId) return
 
+    // 进入项目：之后本壳内所有请求带 X-Project-Id（AI 生成按本项目偏好选模型 / 参数）。
+    // React 子组件 effect 先于父组件跑，子页面挂载时的列表请求可能不带头——它们不是 AI 生成，无影响；
+    // AI 生成都是用户点击触发，届时头已就位。StrictMode 二次挂载会重跑本 effect，不能只在 render 里设。
+    setActiveProjectId(projectId)
+
     let cancelled = false
 
     const load = async () => {
@@ -115,6 +122,7 @@ export default function ProjectDetail() {
 
     return () => {
       cancelled = true
+      setActiveProjectId(null)
       clearProjectData()
       setCurrentProject(null)
     }
@@ -280,6 +288,7 @@ export default function ProjectDetail() {
           </div>
 
           <div className="flex shrink-0 items-center gap-3">
+            {projectId && <ProjectModelPicker projectId={projectId} />}
             <AIJobTray />
             <div className="hidden shrink-0 items-center gap-5 md:flex">
               <dl className="flex items-center gap-4 text-xs">

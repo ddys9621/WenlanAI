@@ -1,11 +1,11 @@
-# build_exe.ps1 - MuMuAINovel Auto Build Script
+# build_exe.ps1 - WenlanAI Auto Build Script
 # Usage: Run .\build_exe.ps1 in backend directory
 
 $ErrorActionPreference = "Stop"
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  MuMuAINovel Auto Build Script" -ForegroundColor Cyan
+Write-Host "  WenlanAI Auto Build Script" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -81,7 +81,7 @@ Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "[5/5] Build Complete!" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "  Output: dist\MuMuAINovel\" -ForegroundColor White
-Write-Host "  Executable: dist\MuMuAINovel\MuMuAINovel.exe" -ForegroundColor White
+Write-Host "  Output: dist\WenlanAI\" -ForegroundColor White
+Write-Host "  Executable: dist\WenlanAI\WenlanAI.exe" -ForegroundColor White
 Write-Host "  Duration: $($duration.Minutes)m $($duration.Seconds)s" -ForegroundColor White
 Write-Host ""

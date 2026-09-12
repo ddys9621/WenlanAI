@@ -9,6 +9,8 @@ from app.models import (
 )
 from app.models.plot_card_chapter_outline_link import PlotCardChapterOutlineLink
 from app.services.ai_service import AIService
+from app.services.deai_history import load_project_prior
+from app.services.deai_rules import build_write_block
 from app.services.memory_service import MemoryService
 from app.logger import get_logger
 
@@ -257,6 +259,17 @@ class SceneGenerationService:
 
         # ========== 构建提示词 ==========
 
+        # 去 AI 味规则块（与正文生成同一套：按章轮换的主推条目 + 模型家族先验 + 本项目最近几章诊断的高频信号）
+        try:
+            project_prior = await load_project_prior(db, project.id)
+        except Exception as _pp:  # noqa: BLE001 - 先验缺失不影响生成
+            logger.warning(f"[deai scene] 项目级先验加载失败（已跳过）: {_pp}")
+            project_prior = ""
+        deai_block = build_write_block(
+            getattr(self.ai_service, "default_model", None),
+            chapter_number=chapter_outline.chapter_number, project_prior=project_prior,
+        )
+
         if previous_content or generated_scenes_content:
             base_prompt = prompt_service.get_chapter_generation_with_context_prompt(
                 title=project.title,
@@ -278,6 +291,7 @@ class SceneGenerationService:
                 memory_context=memory_context,
                 linked_cards_context=linked_cards_context,
                 mcp_references=dissect_user_segment,
+                deai_block=deai_block,
             )
         else:
             base_prompt = prompt_service.get_chapter_generation_prompt(
@@ -299,6 +313,7 @@ class SceneGenerationService:
                 memory_context=memory_context,
                 linked_cards_context=linked_cards_context,
                 mcp_references=dissect_user_segment,
+                deai_block=deai_block,
             )
 
         # 追加当前场景的特定提示词
@@ -392,7 +407,7 @@ class SceneGenerationService:
 2. 字数控制在目标字数左右
 3. 与前面已生成的内容自然衔接
 4. 注意人物性格的一致性
-5. 场景描写要生动，对话要自然
+5. 文风按上面「叙事与文风要求」：段落短、对话多、叙述用主角的口气、环境两句带过、书面词换成嘴上的词
 6. 直接输出正文内容，不要任何解释或标注
 7. 不要重复前面已生成的内容
 

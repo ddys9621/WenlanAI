@@ -1,5 +1,5 @@
-; MuMuAINovel 安装包脚本（Inno Setup 6）
-; 构建：ISCC.exe installer.iss（需先跑 build_exe.ps1 产出 dist\MuMuAINovel）
+; WenlanAI（文澜 AI）安装包脚本（Inno Setup 6）
+; 构建：ISCC.exe installer.iss（需先跑 build_exe.ps1 产出 dist\WenlanAI）
 ; CI 覆盖版本号：ISCC.exe /DMyAppVersion=1.2.3 installer.iss（见 .github/workflows/build-windows.yml）
 ;
 ; 设计要点：
@@ -8,13 +8,13 @@
 ;   装到 Program Files 会因写权限直接不可用，切勿改回 admin 模式
 ; - 卸载时保留用户数据（data\ 与 config.ini），仅清理可再生的 embedding 缓存与日志
 
-#define MyAppName "MuMuAINovel"
+#define MyAppName "WenlanAI"
 #ifndef MyAppVersion
   #define MyAppVersion "1.0.0"
 #endif
 #define MyAppPublisher "MuMuAI"
-#define MyAppExeName "MuMuAINovel.exe"
-#define MyDistDir "dist\\MuMuAINovel"
+#define MyAppExeName "WenlanAI.exe"
+#define MyDistDir "dist\\WenlanAI"
 
 [Setup]
 AppId={{8F1C7A62-3B4E-4D9A-9C21-6E5D0A7B4F13}
@@ -26,7 +26,7 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 OutputDir=installer_output
-OutputBaseFilename=MuMuAINovel-Setup-v{#MyAppVersion}
+OutputBaseFilename=WenlanAI-Setup-v{#MyAppVersion}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern

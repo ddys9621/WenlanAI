@@ -64,7 +64,7 @@ def set_app_user_model_id():
         return
     try:
         import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('HH.NovelStudio.Launcher')
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Wenlan.NovelStudio.Launcher')
     except Exception:
         pass
 
@@ -338,7 +338,7 @@ PANEL_HTML = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>HH小说创作 - 启动控制台</title>
+<title>文澜 AI - 启动控制台</title>
 <style>
 :root {
   --brand:#007aff; --brand-600:#0070eb;
@@ -503,7 +503,7 @@ button { cursor:pointer; border:0; background:none; -webkit-tap-highlight-color:
   </span>
   <div class="brand">
     <span class="eyebrow">启动控制台</span>
-    <h1 class="title">HH小说创作</h1>
+    <h1 class="title">文澜 AI</h1>
   </div>
   <button class="btn btn-primary" onclick="openApp()">进入应用<svg class="i"><use href="#ic-arrow"/></svg></button>
 </header>
@@ -691,7 +691,7 @@ def main():
     # 创建控制面板窗口
     api = PanelAPI()
     panel = webview.create_window(
-        title='HH小说创作 - 启动控制台',
+        title='文澜 AI - 启动控制台',
         html=PANEL_HTML,
         width=900,
         height=550,

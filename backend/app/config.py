@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     )
     
     # 应用配置
-    app_name: str = "MuMuAINovel"
+    app_name: str = "WenlanAI"
     app_host: str = "0.0.0.0"
     app_port: int = 8000
     debug: bool = True
@@ -74,6 +74,12 @@ class Settings(BaseSettings):
     default_model: str = "gpt-4"
     default_temperature: float = 0.7
     default_max_tokens: int = 2000
+    # 采样多样性参数（降低"AI 味"/困惑度检测）：新用户首次同步到 Settings。
+    # top_p<1 做核采样收敛；frequency/presence_penalty 提高用词多样性、抑制重复套路句。
+    # 默认给一组温和的抗重复值；对 JSON 结构化生成（世界观/角色）几乎无影响，用户可在设置页调整。
+    default_top_p: float = 0.95
+    default_frequency_penalty: float = 0.3
+    default_presence_penalty: float = 0.3
     # 思考/推理强度默认值（新用户首次同步到 Settings；默认关闭以兼容非推理模型）
     default_reasoning_enabled: bool = False
     default_reasoning_effort: str = "medium"  # none|minimal|low|medium|high|xhigh|max
@@ -104,9 +110,9 @@ class Settings(BaseSettings):
     SESSION_EXPIRE_MINUTES: int = 120  # 会话过期时间（分钟），默认2小时
     SESSION_REFRESH_THRESHOLD_MINUTES: int = 30  # 会话刷新阈值（分钟），剩余时间少于此值时可刷新
 
-    # 检查更新（更新源 = GitHub Releases，tag v*，安装包资产 MuMuAINovel-Setup-v{ver}.exe）
+    # 检查更新（更新源 = GitHub Releases，tag v*，安装包资产 WenlanAI-Setup-v{ver}.exe；更新器按 .exe 后缀挑资产，名称仅示意）
     update_check_enabled: bool = True  # 内网/离线部署可关：关掉后不再联网检查
-    update_repo: str = "ddys9621/MuMuAINovel"  # owner/repo
+    update_repo: str = "ddys9621/WenlanAI"  # owner/repo（旧名 MuMuAINovel 已由 GitHub 永久重定向，老客户端仍可查更新）
     update_github_proxy: str = ""  # 安装包下载加速前缀（如 https://gh-proxy.com/），为空直连 github.com
     
     @property

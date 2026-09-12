@@ -11,6 +11,20 @@ class PreserveElementsConfig(BaseModel):
     preserve_character_traits: bool = Field(True, description="保持角色性格一致")
 
 
+class DeaiFindingIn(BaseModel):
+    """重生成 deai 模式带入的一条诊断信号（chapter_deai_reviews.result.findings 里勾选的条目）。
+
+    start/end 是诊断时核实到的原文偏移；正文没改过时直接可用，改过则后端按 evidence 重新定位。
+    """
+    feature: str = Field(..., description="判据特征名")
+    evidence: str = Field("", description="原文引证")
+    fix: str = Field("", description="怎么改")
+    layer: str = Field("", description="架构 / 篇章 / 措辞")
+    severity: str = Field("medium", description="high / medium / low")
+    start: Optional[int] = Field(None, description="引证在原文中的起始偏移")
+    end: Optional[int] = Field(None, description="引证在原文中的结束偏移")
+
+
 class ChapterRegenerateRequest(BaseModel):
     """章节重新生成请求"""
     
@@ -25,6 +39,12 @@ class ChapterRegenerateRequest(BaseModel):
     
     # 保留配置
     preserve_elements: Optional[PreserveElementsConfig] = Field(None, description="保留元素配置")
+
+    # 去 AI 味最小改动模式（sepia refactor）：模型只输出 find/replace 补丁清单，后端在原文上机械套用
+    # （deai_patch.apply_edits），没被命中的字一个不变；协议见 prompts/deai/refactor.md
+    deai_mode: bool = Field(False, description="去 AI 味最小改动模式：补丁式改稿而非整章重写")
+    deai_findings: List[DeaiFindingIn] = Field(default_factory=list, description="勾选带入的诊断信号（结构化）")
+    deai_protect_dialogue: bool = Field(True, description="对话引语不动，除非某条带入的诊断信号正指向它")
     
     # 生成参数
     style_id: Optional[int] = Field(None, description="写作风格ID")

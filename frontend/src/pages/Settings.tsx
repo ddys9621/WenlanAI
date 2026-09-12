@@ -1,7 +1,9 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { settingsApi } from '@/services/api'
 import type { Settings as SettingsType, SettingsUpdate, ReasoningEffort } from '@/types'
 import { UpdatePanel } from '@/components/settings/UpdatePanel'
+import { ALL_EFFORTS, EFFORT_LEVELS, autoBudget } from '@/components/settings/aiParams'
+import { Switch } from '@/components/ui/Switch'
 import { toast } from 'sonner'
 import {
   Eye,
@@ -44,61 +46,6 @@ const SECTIONS = [
   { id: 'about', label: '关于与更新', icon: Info },
 ] as const
 
-// 统一强度档位（简单模式）
-const EFFORT_LEVELS: { value: ReasoningEffort; label: string; hint: string }[] = [
-  { value: 'low', label: '低', hint: '更快 · 省 token' },
-  { value: 'medium', label: '中', hint: '质量与速度平衡' },
-  { value: 'high', label: '高', hint: '更深入 · 更慢' },
-]
-
-// OpenAI reasoning_effort 全部合法取值（高级模式）
-const ALL_EFFORTS: { value: ReasoningEffort; label: string }[] = [
-  { value: 'none', label: 'none · 几乎不推理' },
-  { value: 'minimal', label: 'minimal · 极简' },
-  { value: 'low', label: 'low · 低' },
-  { value: 'medium', label: 'medium · 中' },
-  { value: 'high', label: 'high · 高' },
-  { value: 'xhigh', label: 'xhigh · 超高' },
-  { value: 'max', label: 'max · 最大' },
-]
-
-// 与后端 _REASONING_EFFORT_TO_BUDGET 一致：档位 → Anthropic budget_tokens
-const EFFORT_TO_BUDGET: Record<ReasoningEffort, number> = {
-  none: 1024,
-  minimal: 1024,
-  low: 4096,
-  medium: 8192,
-  high: 16384,
-  xhigh: 24576,
-  max: 32000,
-}
-
-/** 预览 Anthropic 自动换算后的 budget（与后端 _resolve_thinking_budget 逻辑一致） */
-function autoBudget(effort: ReasoningEffort, maxTokens: number): number | null {
-  let b = EFFORT_TO_BUDGET[effort] ?? 8192
-  if (b < 1024) b = 1024
-  if (maxTokens && b >= maxTokens) b = maxTokens - 1
-  return b < 1024 ? null : b
-}
-
-/** 扁平风格开关（圆角为 0，与全站设计一致的方形滑块） */
-function Switch({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      onClick={() => onChange(!checked)}
-      className={`relative inline-flex h-6 w-11 shrink-0 items-center transition-colors ${checked ? 'bg-brand' : 'bg-surface-border'}`}
-    >
-      <span
-        className={`inline-block h-5 w-5 transform bg-white shadow-sm transition-transform ${checked ? 'translate-x-[22px]' : 'translate-x-0.5'}`}
-      />
-    </button>
-  )
-}
-
 export default function Settings() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -120,6 +67,9 @@ export default function Settings() {
     llm_model: '',
     temperature: 0.7,
     max_tokens: 4096,
+    top_p: 0.95,
+    frequency_penalty: 0.3,
+    presence_penalty: 0.3,
     reasoning_enabled: false,
     reasoning_effort: 'medium',
     thinking_budget_tokens: null,
@@ -139,6 +89,9 @@ export default function Settings() {
           llm_model: data.llm_model || '',
           temperature: data.temperature ?? 0.7,
           max_tokens: data.max_tokens ?? 4096,
+          top_p: data.top_p ?? 0.95,
+          frequency_penalty: data.frequency_penalty ?? 0.3,
+          presence_penalty: data.presence_penalty ?? 0.3,
           reasoning_enabled: data.reasoning_enabled ?? false,
           reasoning_effort: data.reasoning_effort ?? 'medium',
           thinking_budget_tokens: data.thinking_budget_tokens ?? null,
@@ -153,17 +106,22 @@ export default function Settings() {
     load()
   }, [])
 
-  // 滚动监听：高亮当前分区（root 为视口，section 随 main 滚动）
+  // 点击导航后的平滑滚动期间忽略观察器，避免高亮被中途经过的分区抢走
+  const highlightLockUntil = useRef(0)
+
+  // 滚动监听：高亮当前分区。root 为 main 滚动容器，判定区从吸顶栏（87px）下方开始，
+  // 与 scroll-mt-24 / top-24 配套；维护"当前相交集合"而非只看本批变化的条目
   useEffect(() => {
     if (loading) return
+    const visible = new Set<string>()
     const observer = new IntersectionObserver(
       (entries) => {
-        const visible = entries
-          .filter((e) => e.isIntersecting)
-          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)
-        if (visible[0]) setActiveSection(visible[0].target.id)
+        entries.forEach((e) => (e.isIntersecting ? visible.add(e.target.id) : visible.delete(e.target.id)))
+        if (Date.now() < highlightLockUntil.current) return
+        const first = SECTIONS.find((s) => visible.has(s.id))
+        if (first) setActiveSection(first.id)
       },
-      { rootMargin: '-100px 0px -65% 0px', threshold: 0 },
+      { root: document.querySelector('main'), rootMargin: '-88px 0px -65% 0px', threshold: 0 },
     )
     SECTIONS.forEach((s) => {
       const el = document.getElementById(s.id)
@@ -175,6 +133,7 @@ export default function Settings() {
   const scrollToSection = useCallback((id: string) => {
     const el = document.getElementById(id)
     if (el) {
+      highlightLockUntil.current = Date.now() + 1000
       el.scrollIntoView({ behavior: 'smooth', block: 'start' })
       setActiveSection(id)
     }
@@ -284,6 +243,9 @@ export default function Settings() {
         llm_model: settings.llm_model || '',
         temperature: settings.temperature ?? 0.7,
         max_tokens: settings.max_tokens ?? 4096,
+        top_p: settings.top_p ?? 0.95,
+        frequency_penalty: settings.frequency_penalty ?? 0.3,
+        presence_penalty: settings.presence_penalty ?? 0.3,
         reasoning_enabled: settings.reasoning_enabled ?? false,
         reasoning_effort: settings.reasoning_effort ?? 'medium',
         thinking_budget_tokens: settings.thinking_budget_tokens ?? null,
@@ -297,6 +259,9 @@ export default function Settings() {
         llm_model: '',
         temperature: 0.7,
         max_tokens: 4096,
+        top_p: 0.95,
+        frequency_penalty: 0.3,
+        presence_penalty: 0.3,
         reasoning_enabled: false,
         reasoning_effort: 'medium',
         thinking_budget_tokens: null,
@@ -330,7 +295,7 @@ export default function Settings() {
   return (
     <div className="animate-fade-in">
       {/* 吸顶操作栏：标题 + 保存/重置 */}
-      <div className="sticky top-0 z-20 -mx-4 mb-6 flex flex-wrap items-center justify-between gap-3 border-b border-surface-border bg-surface/85 px-4 py-4 backdrop-blur-sm md:-mx-8 md:px-8">
+      <div className="sticky top-0 z-20 mb-6 flex flex-wrap items-center justify-between gap-3 border-b border-surface-border bg-surface/85 py-4 backdrop-blur-sm">
         <div>
           <h1 className="text-xl font-bold text-content md:text-2xl">设置</h1>
           <p className="mt-0.5 text-sm text-content-secondary">配置 AI 接口、模型参数与思考强度（保存后全局生效）</p>
@@ -545,6 +510,82 @@ export default function Settings() {
                   value={form.max_tokens}
                   onChange={e => updateField('max_tokens', parseInt(e.target.value) || 4096)}
                 />
+              </div>
+
+              {/* 采样多样性（降低 AI 味） */}
+              <div className="border-t border-surface-border pt-4">
+                <h3 className="text-sm font-semibold text-content">采样多样性（降低「AI 味」）</h3>
+                <p className="mt-1 text-xs text-content-tertiary">
+                  提高用词与句式多样性、抑制重复套路句，可显著降低被 AI 检测器（如朱雀）判定的概率。
+                  全局生效——对世界观 / 角色等 JSON 结构化生成也会应用，建议惩罚值保持温和（0.3~0.6）。
+                  推荐正文创作：top_p≈0.9、frequency≈0.4、presence≈0.4。
+                </p>
+              </div>
+
+              {/* Top P */}
+              <div>
+                <label className={labelClass}>
+                  Top P（核采样）
+                  <span className="ml-2 text-content-tertiary font-normal">{form.top_p}</span>
+                </label>
+                <input
+                  type="range"
+                  min={0.1}
+                  max={1}
+                  step={0.05}
+                  className="w-full accent-brand"
+                  value={form.top_p}
+                  onChange={e => updateField('top_p', parseFloat(e.target.value))}
+                />
+                <div className="flex justify-between text-xs text-content-tertiary mt-0.5">
+                  <span>收敛 (0.1)</span>
+                  <span>不裁剪 (1)</span>
+                </div>
+                <p className="mt-1 text-xs text-content-tertiary">=1 时不做核采样。与 Temperature 一般只重点调其一。</p>
+              </div>
+
+              {/* Frequency Penalty */}
+              <div>
+                <label className={labelClass}>
+                  Frequency Penalty（频率惩罚）
+                  <span className="ml-2 text-content-tertiary font-normal">{form.frequency_penalty}</span>
+                </label>
+                <input
+                  type="range"
+                  min={-2}
+                  max={2}
+                  step={0.1}
+                  className="w-full accent-brand"
+                  value={form.frequency_penalty}
+                  onChange={e => updateField('frequency_penalty', parseFloat(e.target.value))}
+                />
+                <div className="flex justify-between text-xs text-content-tertiary mt-0.5">
+                  <span>允许重复 (-2)</span>
+                  <span>强抑制重复 (2)</span>
+                </div>
+                <p className="mt-1 text-xs text-content-tertiary">越高越少重复用词。仅 OpenAI 兼容接口生效，Anthropic 忽略。</p>
+              </div>
+
+              {/* Presence Penalty */}
+              <div>
+                <label className={labelClass}>
+                  Presence Penalty（存在惩罚）
+                  <span className="ml-2 text-content-tertiary font-normal">{form.presence_penalty}</span>
+                </label>
+                <input
+                  type="range"
+                  min={-2}
+                  max={2}
+                  step={0.1}
+                  className="w-full accent-brand"
+                  value={form.presence_penalty}
+                  onChange={e => updateField('presence_penalty', parseFloat(e.target.value))}
+                />
+                <div className="flex justify-between text-xs text-content-tertiary mt-0.5">
+                  <span>不鼓励新词 (-2)</span>
+                  <span>强鼓励新词 (2)</span>
+                </div>
+                <p className="mt-1 text-xs text-content-tertiary">越高越鼓励引入新词与话题。仅 OpenAI 兼容接口生效，Anthropic 忽略。</p>
               </div>
             </div>
           </section>

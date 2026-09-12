@@ -1,7 +1,7 @@
 """
 设置管理 API
 """
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import Dict, Any, Optional
@@ -16,6 +16,11 @@ from app.logger import get_logger
 from app.config import settings as app_settings
 from app.services.ai_service import AIService, create_user_ai_service
 from app.api.deps import require_login
+from app.services.project_ai_preference import (
+    PROJECT_HEADER,
+    load_project_ai_preference,
+    merge_ai_overrides,
+)
 
 logger = get_logger(__name__)
 
@@ -31,49 +36,55 @@ def read_env_defaults() -> Dict[str, Any]:
         "llm_model": app_settings.default_model,
         "temperature": app_settings.default_temperature,
         "max_tokens": app_settings.default_max_tokens,
+        "top_p": app_settings.default_top_p,
+        "frequency_penalty": app_settings.default_frequency_penalty,
+        "presence_penalty": app_settings.default_presence_penalty,
         "reasoning_enabled": app_settings.default_reasoning_enabled,
         "reasoning_effort": app_settings.default_reasoning_effort,
         "thinking_budget_tokens": app_settings.default_thinking_budget_tokens,
     }
 
 
-async def get_user_ai_service(
-    user: User = Depends(require_login),
-    db: AsyncSession = Depends(get_db)
-) -> AIService:
-    """
-    依赖：获取当前用户的AI服务实例
-    从数据库读取用户设置并创建对应的AI服务
-    """
-    result = await db.execute(
-        select(Settings).where(Settings.user_id == user.user_id)
-    )
+async def load_or_create_settings(db: AsyncSession, user_id: str) -> Settings:
+    """读用户设置；没有则从 .env 默认值建一条（并发插入撞唯一键时回滚后重查）。"""
+    result = await db.execute(select(Settings).where(Settings.user_id == user_id))
     settings = result.scalar_one_or_none()
-    
-    if not settings:
-        # 如果用户没有设置，从.env读取并保存
-        env_defaults = read_env_defaults()
-        settings = Settings(
-            user_id=user.user_id,
-            **env_defaults
-        )
+    if settings:
+        return settings
+    try:
+        settings = Settings(user_id=user_id, **read_env_defaults())
         db.add(settings)
         await db.commit()
         await db.refresh(settings)
-        logger.info(f"用户 {user.user_id} 首次使用AI服务，已从.env同步设置到数据库")
-    
-    # 使用用户设置创建AI服务实例（思考强度随之全局生效）
-    return create_user_ai_service(
-        api_provider=settings.api_provider,
-        api_key=settings.api_key,
-        api_base_url=settings.api_base_url or "",
-        model_name=settings.llm_model,
-        temperature=settings.temperature,
-        max_tokens=settings.max_tokens,
-        reasoning_enabled=settings.reasoning_enabled,
-        reasoning_effort=settings.reasoning_effort,
-        thinking_budget_tokens=settings.thinking_budget_tokens,
-    )
+        logger.info(f"用户 {user_id} 首次使用，已从.env同步设置到数据库")
+        return settings
+    except Exception:
+        # 并发情况下可能已被另一个请求插入，回滚后重新查询
+        await db.rollback()
+        result = await db.execute(select(Settings).where(Settings.user_id == user_id))
+        settings = result.scalar_one_or_none()
+        if not settings:
+            raise
+        logger.info(f"用户 {user_id} 的设置已由并发请求创建，直接使用")
+        return settings
+
+
+async def get_user_ai_service(
+    request: Request,
+    user: User = Depends(require_login),
+    db: AsyncSession = Depends(get_db),
+) -> AIService:
+    """依赖：当前用户的 AI 服务实例（所有 AI 生成端点与后台任务的唯一注入点）。
+
+    以用户全局 Settings 为底；请求头 `X-Project-Id` 指向**本人**项目且该项目保存过 AI 偏好时，
+    偏好里非空的字段（模型 / 采样 / 思考）覆盖全局值，接口三要素永远取全局。
+    头缺失、项目不存在或不属于本人 → 静默回落全局。
+    """
+    settings = await load_or_create_settings(db, user.user_id)
+    pref = await load_project_ai_preference(db, request.headers.get(PROJECT_HEADER), user.user_id)
+    if pref is not None:
+        logger.debug(f"用户 {user.user_id} 项目 {pref.project_id} 启用 AI 偏好覆盖: model={pref.llm_model!r}")
+    return create_user_ai_service(**merge_ai_overrides(settings, pref))
 
 
 @router.get("", response_model=SettingsResponse)
@@ -85,37 +96,7 @@ async def get_settings(
     获取当前用户的设置
     如果用户没有保存过设置，自动从.env创建并保存到数据库
     """
-    result = await db.execute(
-        select(Settings).where(Settings.user_id == user.user_id)
-    )
-    settings = result.scalar_one_or_none()
-    
-    if not settings:
-        # 如果用户没有保存过设置，从.env读取默认配置并保存到数据库
-        env_defaults = read_env_defaults()
-        logger.info(f"用户 {user.user_id} 首次获取设置，自动从.env同步到数据库")
-        
-        # 创建新设置并保存到数据库（处理并发竞争）
-        try:
-            settings = Settings(
-                user_id=user.user_id,
-                **env_defaults
-            )
-            db.add(settings)
-            await db.commit()
-            await db.refresh(settings)
-            logger.info(f"用户 {user.user_id} 的设置已从.env同步到数据库")
-        except Exception:
-            # 并发情况下可能已被另一个请求插入，回滚后重新查询
-            await db.rollback()
-            result = await db.execute(
-                select(Settings).where(Settings.user_id == user.user_id)
-            )
-            settings = result.scalar_one_or_none()
-            if not settings:
-                raise
-            logger.info(f"用户 {user.user_id} 的设置已由并发请求创建，直接使用")
-    
+    settings = await load_or_create_settings(db, user.user_id)
     logger.info(f"用户 {user.user_id} 获取已保存的设置")
     return settings
 
@@ -215,22 +196,18 @@ async def delete_settings(
     return {"message": "设置已删除", "user_id": user.user_id}
 
 
-@router.get("/models")
-async def get_available_models(
-    api_key: str,
-    api_base_url: str,
-    provider: str = "openai"
-):
-    """
-    从配置的 API 获取可用的模型列表
-    
+async def _fetch_provider_models(api_key: str, api_base_url: str, provider: str) -> Dict[str, Any]:
+    """按接口配置拉模型列表：OpenAI 兼容 GET {base}/models（Bearer）；Anthropic GET {base}/v1/models（x-api-key）。
+
+    /settings/models（设置页填表时用传入值）与 /settings/saved-models（项目内用已保存值）共用此实现。
+
     Args:
         api_key: API 密钥
         api_base_url: API 基础 URL
         provider: API 提供商 (openai, anthropic, azure, custom)
-    
+
     Returns:
-        模型列表
+        {"provider", "models": [{"value","label","description"}], "count"}
     """
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -337,6 +314,28 @@ async def get_available_models(
             status_code=500,
             detail=f"获取模型列表失败: {str(e)}"
         )
+
+
+@router.get("/models")
+async def get_available_models(
+    api_key: str,
+    api_base_url: str,
+    provider: str = "openai"
+):
+    """从**传入**的 API 配置获取模型列表（设置页填表未保存也能拉）。"""
+    return await _fetch_provider_models(api_key, api_base_url, provider)
+
+
+@router.get("/saved-models")
+async def get_saved_models(
+    user: User = Depends(require_login),
+    db: AsyncSession = Depends(get_db),
+):
+    """用**已保存**的设置获取模型列表（项目内模型选择器用；密钥不经前端、不进 URL）。"""
+    settings = await load_or_create_settings(db, user.user_id)
+    if not settings.api_key:
+        raise HTTPException(status_code=400, detail="尚未在「设置」中配置 API Key")
+    return await _fetch_provider_models(settings.api_key, settings.api_base_url or "", settings.api_provider or "openai")
 
 
 class ApiTestRequest(BaseModel):

@@ -27,6 +27,8 @@ datas = [
     (str(backend_dir / 'assets'), 'assets'),
     # MCP 商城内置目录（app/mcp/marketplace.py 按 __file__ 同目录读取，非 .py 文件需显式打包）
     (str(backend_dir / 'app' / 'mcp' / 'marketplace_catalog.json'), 'app/mcp'),
+    # 去 AI 味规则 markdown（app/services/deai_rules.py 按 __file__ 定位 app/prompts/deai 读取）
+    (str(backend_dir / 'app' / 'prompts' / 'deai'), 'app/prompts/deai'),
     # pywebview 的 lib 目录（包含 DLL 和 runtimes）
     (str(webview_path / 'lib'), 'webview/lib'),
 ]
@@ -109,7 +111,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='MuMuAINovel',
+    name='WenlanAI',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -130,6 +132,6 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='MuMuAINovel',
+    name='WenlanAI',
 )
 

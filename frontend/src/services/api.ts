@@ -7,6 +7,7 @@ interface MCPPluginSimpleCreate {
 import { toast } from 'sonner';
 import { ssePost } from '../utils/sseClient';
 import type { SSEClientOptions } from '../utils/sseClient';
+import { PROJECT_HEADER, getActiveProjectId } from '../utils/activeProject';
 import type { UpdateCheckResult, UpdateJobStatus } from '../types/system_update';
 import type {
   User,
@@ -36,6 +37,9 @@ import type {
   WizardPlotLinesResponse,
   Settings,
   SettingsUpdate,
+  AIModelOption,
+  ProjectAIOverrides,
+  ProjectAIPreference,
   WritingStyle,
   WritingStyleCreate,
   WritingStyleUpdate,
@@ -95,6 +99,130 @@ export interface ChapterWriteResult {
   analysis_job_id: string | null;
 }
 
+/** 生成前预检查：前面「有正文但未分析（无记忆状态）」的章节 */
+export interface ChapterGenerationPrecheck {
+  count: number;
+  chapters: Array<{ id: string; chapter_number: number; title: string }>;
+  message: string;
+}
+
+/** 去 AI 味诊断的单条信号（带原文引证）；layer 由后端按 review/*.md 的「层」标注 */
+export interface DeaiFinding {
+  feature: string;
+  evidence: string;
+  note: string;
+  fix: string;
+  severity: 'high' | 'medium' | 'low';
+  layer: '架构' | '篇章' | '措辞' | string;
+  group: string;
+  /** issue=缺陷；positive=已具备的人类正向标记（review/04）。旧报告没有该字段，按 fix==='保留' 兜底 */
+  kind?: 'issue' | 'positive';
+  /** 引证在原文中核实到的偏移；verified=false 表示模型编造 / 走样过头，后端已不计入待改 */
+  start?: number | null;
+  end?: number | null;
+  verified?: boolean;
+  /** patch=可补丁式最小改动（篇章 / 措辞）；rewrite=只能整章重写或回章纲（架构）。旧报告没有该字段，按 layer 推 */
+  route?: 'patch' | 'rewrite';
+}
+
+/** 信号走哪条修订路径（与后端 deai_review_service.route_for_layer 一致） */
+export const deaiFindingRoute = (f: Pick<DeaiFinding, 'route' | 'layer'>): 'patch' | 'rewrite' =>
+  f.route ?? (f.layer === '架构' ? 'rewrite' : 'patch');
+
+/** 旧报告（无 kind 字段）用 fix==='保留' 识别人类正向标记 */
+export const isPositiveDeaiFinding = (f: Pick<DeaiFinding, 'kind' | 'fix'>) =>
+  f.kind === 'positive' || (f.kind === undefined && f.fix.trim() === '保留');
+
+/** 能带入补丁式改稿的信号：报的是缺陷，且引证在原文里定位到了 */
+export const isActionableDeaiFinding = (f: Pick<DeaiFinding, 'kind' | 'fix' | 'verified'>) =>
+  !isPositiveDeaiFinding(f) && f.verified !== false;
+
+export interface DeaiReviewPass {
+  key: string;
+  title: string;
+  layer: string;
+  kind?: 'issue' | 'positive';
+  findings: Array<Omit<DeaiFinding, 'layer' | 'group'>>;
+  na: string[];
+  advisories: string[];
+  error?: string;
+}
+
+/** deai_review_service.run_deai_review 的完整结果 */
+export interface DeaiReviewResult {
+  model_name: string;
+  model_family: string | null;
+  passes: DeaiReviewPass[];
+  findings: DeaiFinding[];
+  plan: string[];
+  advisories: string[];
+  summary: string;
+  /** deai_metrics.compute_metrics 的措辞层本地统计（旧报告没有） */
+  metrics?: Record<string, number>;
+}
+
+/** 重生成 deai 模式上送的一条诊断信号（后端 DeaiFindingIn） */
+export interface DeaiFindingIn {
+  feature: string;
+  evidence: string;
+  fix: string;
+  layer: string;
+  severity: string;
+  start?: number | null;
+  end?: number | null;
+}
+
+/** 去 AI 味补丁套用统计（regenerate result.deai_patch / SSE 事件 deai_patch） */
+export interface DeaiPatchStats {
+  edits_proposed: number;
+  applied: Array<{ find: string; replace: string; why: string; start: number; end: number }>;
+  skipped: Array<{ find: string; replace: string; why: string; reason: string }>;
+  chars_before: number;
+  chars_after: number;
+  metrics_before: Record<string, number>;
+  metrics_after: Record<string, number>;
+  metrics_delta: Record<string, number>;
+}
+
+export interface DeaiReview {
+  id: string;
+  chapter_id: string;
+  model_name: string | null;
+  model_family: string | null;
+  findings_count: number;
+  result: DeaiReviewResult;
+  created_at: string | null;
+}
+
+/** 某特征在本项目历史上被展示 / 被勾着带入的次数（deai_history.feature_acceptance） */
+export interface DeaiFeatureAcceptance {
+  selected: number;
+  offered: number;
+}
+
+/** GET /chapters/{id}/deai-review；stale = 诊断后正文有改动 */
+export interface DeaiReviewResponse {
+  has_review: boolean;
+  review: DeaiReview | null;
+  stale: boolean;
+  acceptance?: Record<string, DeaiFeatureAcceptance>;
+}
+
+/** POST /chapters/{id}/deai-review/{review_id}/feedback */
+export interface DeaiReviewFeedbackRequest {
+  mode: 'patch' | 'rewrite';
+  candidates: number[];
+  selected: number[];
+}
+
+/** 去 AI 味诊断任务的 result 事件 data */
+export interface DeaiReviewJobResult {
+  review_id: string;
+  findings_count: number;
+  stale: boolean;
+  summary: string;
+}
+
 /** 正文重生成任务的 result 事件 data */
 export interface ChapterRegenerateResult {
   task_id: string;
@@ -102,6 +230,8 @@ export interface ChapterRegenerateResult {
   version_number: number;
   auto_applied: boolean;
   diff_stats: Record<string, unknown>;
+  /** 仅去 AI 味补丁模式有值 */
+  deai_patch?: DeaiPatchStats | null;
   analysis_job_id: string | null;
 }
 
@@ -116,6 +246,9 @@ const api = axios.create({
 
 api.interceptors.request.use(
   (config) => {
+    // 项目内的请求带当前项目 id：后端按项目 AI 偏好覆盖模型 / 参数（见 utils/activeProject.ts）
+    const projectId = getActiveProjectId();
+    if (projectId) config.headers.set(PROJECT_HEADER, projectId);
     return config;
   },
   (error) => {
@@ -227,7 +360,11 @@ export const settingsApi = {
     api.post<unknown, Settings>('/settings', data),
   
   getAvailableModels: (params: { api_key: string; api_base_url: string; provider: string }) =>
-    api.get<unknown, { provider: string; models: Array<{ value: string; label: string; description: string }>; count?: number }>('/settings/models', { params }),
+    api.get<unknown, { provider: string; models: AIModelOption[]; count?: number }>('/settings/models', { params }),
+
+  /** 用已保存的设置拉模型列表（项目内模型选择器；密钥不经前端） */
+  getSavedModels: () =>
+    api.get<unknown, { provider: string; models: AIModelOption[]; count?: number }>('/settings/saved-models'),
   
   testApiConnection: (params: { api_key: string; api_base_url: string; provider: string; llm_model: string; max_tokens?: number }) =>
     api.post<unknown, {
@@ -252,6 +389,20 @@ export const systemUpdateApi = {
   apply: () => api.post<unknown, UpdateJobStatus>('/system/update/apply'),
 
   status: () => api.get<unknown, UpdateJobStatus>('/system/update/status'),
+};
+
+/** 项目级 AI 偏好：复用设置页接口，按项目覆盖模型 / 参数（null = 跟随全局） */
+export const projectAIPreferenceApi = {
+  get: (projectId: string) =>
+    api.get<unknown, ProjectAIPreference>(`/projects/${projectId}/ai-preference`),
+
+  /** 整体替换：未覆盖的字段传 null */
+  save: (projectId: string, overrides: ProjectAIOverrides) =>
+    api.put<unknown, ProjectAIPreference>(`/projects/${projectId}/ai-preference`, overrides),
+
+  /** 全部恢复跟随全局 */
+  reset: (projectId: string) =>
+    api.delete<unknown, ProjectAIPreference>(`/projects/${projectId}/ai-preference`),
 };
 
 export const projectApi = {
@@ -479,6 +630,22 @@ export const chapterApi = {
   /** 手动分析章节：后台任务 + SSE（重连 / 停止走 aiJobsApi）POST /api/chapters/{id}/analyze-stream */
   analyzeChapterStream: (chapterId: string, options?: SSEClientOptions<{ task_id: string; chapter_id: string; status: string }>) =>
     ssePost<{ task_id: string; chapter_id: string; status: string }>(`/api/chapters/${chapterId}/analyze-stream`, {}, options),
+
+  /** 生成前预检查：前面是否有未分析（无记忆状态）的章节，用于提醒用户是否继续 */
+  generationPrecheck: (chapterId: string) =>
+    api.get<unknown, ChapterGenerationPrecheck>(`/chapters/${chapterId}/generation-precheck`),
+
+  /** 去 AI 味诊断：后台任务 + SSE（每轮 rubric 一个 stage）POST /api/chapters/{id}/deai-review-stream */
+  deaiReviewStream: (chapterId: string, options?: SSEClientOptions<DeaiReviewJobResult>) =>
+    ssePost<DeaiReviewJobResult>(`/api/chapters/${chapterId}/deai-review-stream`, {}, options),
+
+  /** 最新一次去 AI 味诊断结果（正文改过则 stale=true） */
+  getDeaiReview: (chapterId: string) =>
+    api.get<unknown, DeaiReviewResponse>(`/chapters/${chapterId}/deai-review`),
+
+  /** 记录修订弹窗里对诊断条目的勾选（免费标注 → 特征采纳率 / 项目级先验过滤），失败可忽略 */
+  postDeaiReviewFeedback: (chapterId: string, reviewId: string, data: DeaiReviewFeedbackRequest) =>
+    api.post<unknown, { ok: boolean; feedback_entries: number }>(`/chapters/${chapterId}/deai-review/${reviewId}/feedback`, data),
 
   /** AI 创作正文：后台任务 + SSE；result = { word_count, analysis_task_id, analysis_job_id } */
   generateChapterStream: (chapterId: string, data: ChapterGenerateRequest, options?: SSEClientOptions<ChapterWriteResult>) =>

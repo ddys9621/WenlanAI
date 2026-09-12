@@ -30,7 +30,7 @@ async def get_preset_styles():
     返回格式：数组形式的预设风格列表
     [
         {"id": "natural", "name": "自然流畅", "description": "...", "prompt_content": "..."},
-        {"id": "classical", "name": "古典优雅", ...}
+        {"id": "classical", "name": "古风韵味", ...}
     ]
     """
     presets = WritingStyleManager.get_all_presets()

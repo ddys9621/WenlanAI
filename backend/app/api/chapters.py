@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 import json
 import asyncio
+import uuid
 from datetime import datetime
 from asyncio import Lock
 
@@ -18,6 +19,7 @@ from app.models.writing_style import WritingStyle
 from app.models.analysis_task import AnalysisTask
 from app.models.memory import PlotAnalysis, StoryMemory
 from app.models.regeneration_task import RegenerationTask
+from app.models.chapter_deai_review import ChapterDeaiReview
 from app.models.plot_card import PlotCard
 from app.models.plot_card_chapter_outline_link import PlotCardChapterOutlineLink
 from app.schemas.chapter import (
@@ -27,6 +29,7 @@ from app.schemas.chapter import (
     ChapterListResponse,
     ChapterGenerateRequest,
 )
+from app.schemas.deai_review import DeaiReviewFeedbackRequest
 from app.schemas.regeneration import (
     ApplyRegenerationRequest,
     ChapterRegenerateRequest
@@ -35,6 +38,9 @@ from app.api.ai_jobs import job_sse_response
 from app.services.ai_jobs import AIJobConflictError, ai_jobs, job_session_factory
 from app.services.ai_service import AIService
 from app.services.chapter_analysis_jobs import create_analysis_task, start_chapter_analysis
+from app.services.deai_history import feature_acceptance, load_project_prior, load_recent_review_results, record_feedback
+from app.services.deai_review_service import content_hash, pick_review_model, run_deai_review
+from app.services.deai_rules import build_write_block
 from app.services.generation_trace import begin_stage, stage_scope, trace_progress, trace_reference
 from app.services.prompt_service import prompt_service
 from app.services.plot_analyzer import PlotAnalyzer
@@ -738,6 +744,70 @@ async def check_prerequisites(db: AsyncSession, chapter: Chapter) -> tuple[bool,
     return True, "", previous_chapters
 
 
+async def _unanalyzed_previous_chapters(db: AsyncSession, chapter: Chapter) -> list[Chapter]:
+    """返回当前章节之前「有正文但从未分析（无 PlotAnalysis 记忆状态）」的章节列表。
+
+    用于生成前提醒：这些章节缺少记忆状态，续写会缺乏它们的剧情/角色/伏笔上下文。
+    判定「已分析」= 存在 PlotAnalysis 记录（哪怕已过期），因为记忆状态在分析时写入。
+    """
+    if chapter.chapter_number <= 1:
+        return []
+
+    prev_result = await db.execute(
+        select(Chapter)
+        .where(Chapter.project_id == chapter.project_id)
+        .where(Chapter.chapter_number < chapter.chapter_number)
+        .where(Chapter.content.isnot(None))
+        .where(Chapter.content != "")
+        .order_by(Chapter.chapter_number)
+    )
+    previous_chapters = list(prev_result.scalars().all())
+    if not previous_chapters:
+        return []
+
+    analyzed_result = await db.execute(
+        select(PlotAnalysis.chapter_id).where(
+            PlotAnalysis.chapter_id.in_([c.id for c in previous_chapters])
+        )
+    )
+    analyzed_ids = set(analyzed_result.scalars().all())
+    return [c for c in previous_chapters if c.id not in analyzed_ids]
+
+
+async def _purge_chapter_analysis_and_memory(db: AsyncSession, chapter_id: str) -> int:
+    """删除该章的 PlotAnalysis + AnalysisTask + StoryMemory（DB 行）。
+
+    用于「正文被整章覆盖」后清理过期的分析/记忆（不标过期，直接删）。
+    仅删关系库行，不提交、不清向量；返回删除的记忆条数供调用方做向量清理。
+    """
+    for _pa in (await db.execute(
+        select(PlotAnalysis).where(PlotAnalysis.chapter_id == chapter_id)
+    )).scalars().all():
+        await db.delete(_pa)
+    for _at in (await db.execute(
+        select(AnalysisTask).where(AnalysisTask.chapter_id == chapter_id)
+    )).scalars().all():
+        await db.delete(_at)
+    mem_rows = (await db.execute(
+        select(StoryMemory).where(StoryMemory.chapter_id == chapter_id)
+    )).scalars().all()
+    for _m in mem_rows:
+        await db.delete(_m)
+    return len(mem_rows)
+
+
+async def _purge_chapter_vector_memory(user_id: str | None, project_id: str, chapter_id: str, mem_count: int) -> None:
+    """向量库记忆清理（best-effort；须在 DB 删除已提交后调用）。"""
+    if not mem_count or not user_id:
+        return
+    try:
+        await memory_service.delete_chapter_memories(
+            user_id=user_id, project_id=project_id, chapter_id=chapter_id
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"⚠️ 向量记忆清理失败（不影响正文覆盖）: {e}")
+
+
 async def build_smart_chapter_context(
     db: AsyncSession,
     project_id: str,
@@ -1351,6 +1421,169 @@ async def analyze_chapter_background(
             await db_session.close()
 
 
+@router.get("/{chapter_id}/generation-precheck", summary="生成前检查前置章节是否都已分析")
+async def chapter_generation_precheck(
+    chapter_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db)
+):
+    """生成前预检查：前面是否有「有正文但未分析（无记忆状态）」的章节。
+
+    前端在触发生成前调用；count>0 时提示用户「前面有 N 章没有记忆状态，是否继续生成」。
+    这是提醒性检查，不阻断生成（用户确认后仍可正常调用 generate-stream）。
+    """
+    result = await db.execute(select(Chapter).where(Chapter.id == chapter_id))
+    chapter = result.scalar_one_or_none()
+    if not chapter:
+        raise HTTPException(status_code=404, detail="章节不存在")
+
+    unanalyzed = await _unanalyzed_previous_chapters(db, chapter)
+    numbers = [c.chapter_number for c in unanalyzed]
+    message = (
+        f"前面有 {len(numbers)} 章尚未分析（缺少记忆状态）：第 {', '.join(map(str, numbers))} 章。"
+        "缺少记忆状态可能影响续写的剧情连贯性，是否继续生成？"
+        if numbers else ""
+    )
+    return {
+        "count": len(unanalyzed),
+        "chapters": [
+            {"id": c.id, "chapter_number": c.chapter_number, "title": c.title}
+            for c in unanalyzed
+        ],
+        "message": message,
+    }
+
+
+# ============ 去 AI 味诊断（sepia review：只诊断不改稿） ============
+
+DEAI_REVIEW_KIND = "chapter_deai_review"
+
+
+def _serialize_deai_review(row: ChapterDeaiReview) -> dict:
+    return {
+        "id": row.id,
+        "chapter_id": row.chapter_id,
+        "model_name": row.model_name,
+        "model_family": row.model_family,
+        "findings_count": row.findings_count,
+        "result": row.result,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+@router.post("/{chapter_id}/deai-review-stream", summary="去 AI 味诊断（后台任务 + SSE）")
+async def deai_review_chapter_stream(
+    chapter_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user_ai_service: AIService = Depends(get_user_ai_service),
+):
+    """按 prompts/deai/review/*.md 分组多轮诊断正文的 AI 痕迹（架构 → 篇章 → 措辞），带原文引证落表。
+
+    只诊断不改稿；结果供「重新生成」弹窗勾选带入 deai 模式改稿。同章同时只跑一个诊断。
+    """
+    user_id = getattr(request.state, "user_id", None)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="未登录")
+    chapter = (await db.execute(select(Chapter).where(Chapter.id == chapter_id))).scalar_one_or_none()
+    if not chapter:
+        raise HTTPException(status_code=404, detail="章节不存在")
+    if not (chapter.content or "").strip():
+        raise HTTPException(status_code=400, detail="章节内容为空，无法诊断")
+    await verify_project_access(chapter.project_id, user_id, db)
+    project = (await db.execute(select(Project).where(Project.id == chapter.project_id))).scalar_one_or_none()
+    genre = (project.genre if project else "") or ""
+    # 画像的是写这章的模型（用户可能换了模型来审）；老数据没记录才用当前模型
+    model_name = pick_review_model(getattr(chapter, "generated_by_model", None), getattr(user_ai_service, "default_model", None))
+
+    async def runner(job):
+        """后台任务体：service 内每轮一个 stage → 汇总 → 落 chapter_deai_reviews。"""
+        result = await run_deai_review(
+            content=chapter.content, title=chapter.title or "", genre=genre,
+            model_name=model_name, ai_service=user_ai_service, on_progress=job.progress,
+        )
+        st_persist = begin_stage("persist", "保存诊断结果")
+        review_id = str(uuid.uuid4())
+        findings_count = len(result["plan"])
+        async with job_session_factory(user_id)() as db_session:
+            db_session.add(ChapterDeaiReview(
+                id=review_id, project_id=chapter.project_id, chapter_id=chapter_id, user_id=user_id,
+                model_name=model_name, model_family=result["model_family"],
+                content_hash=content_hash(chapter.content), findings_count=findings_count, result=result,
+            ))
+            await db_session.commit()
+        st_persist.done(findings=findings_count)
+        return {"review_id": review_id, "findings_count": findings_count, "stale": False, "summary": result["summary"]}
+
+    try:
+        job = await ai_jobs.start(
+            kind=DEAI_REVIEW_KIND,
+            title=f"去AI味诊断第 {chapter.chapter_number} 章《{chapter.title}》",
+            user_id=user_id,
+            project_id=chapter.project_id,
+            scope=f"{DEAI_REVIEW_KIND}:{chapter_id}",
+            runner=runner,
+            cancel_message="已停止诊断；本次结果未保存",
+            meta={"chapter_id": chapter_id},
+        )
+    except AIJobConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return job_sse_response(job)
+
+
+@router.get("/{chapter_id}/deai-review", summary="获取最新的去 AI 味诊断结果")
+async def get_chapter_deai_review(
+    chapter_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """返回该章最新一次诊断；正文自诊断后有改动则 stale=True（提示重新诊断）。"""
+    chapter = (await db.execute(select(Chapter).where(Chapter.id == chapter_id))).scalar_one_or_none()
+    if not chapter:
+        raise HTTPException(status_code=404, detail="章节不存在")
+    await verify_project_access(chapter.project_id, getattr(request.state, "user_id", None), db)
+    row = (await db.execute(
+        select(ChapterDeaiReview)
+        .where(ChapterDeaiReview.chapter_id == chapter_id)
+        .order_by(ChapterDeaiReview.created_at.desc())
+        .limit(1)
+    )).scalar_one_or_none()
+    if row is None:
+        return {"has_review": False, "review": None, "stale": False, "acceptance": {}}
+    # 本项目历史上各特征的采纳率（用户勾/不勾的累计），前端用来标"这条你以前常不采纳"
+    acceptance = feature_acceptance(await load_recent_review_results(db, chapter.project_id, max_chapters=30))
+    return {
+        "has_review": True,
+        "review": _serialize_deai_review(row),
+        "stale": row.content_hash != content_hash(chapter.content or ""),
+        "acceptance": acceptance,
+    }
+
+
+@router.post("/{chapter_id}/deai-review/{review_id}/feedback", summary="记录去 AI 味诊断条目的勾选情况")
+async def post_chapter_deai_review_feedback(
+    chapter_id: str,
+    review_id: str,
+    payload: DeaiReviewFeedbackRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """修订弹窗发起润色 / 重写时调用：哪些条目展示了、哪些被勾着带入。追加进 result.feedback，
+    供 deai_history 统计特征采纳率（过滤噪音特征、剔出项目级先验）。"""
+    row = (await db.execute(
+        select(ChapterDeaiReview).where(ChapterDeaiReview.id == review_id, ChapterDeaiReview.chapter_id == chapter_id)
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="诊断报告不存在")
+    await verify_project_access(row.project_id, getattr(request.state, "user_id", None), db)
+    row.result = record_feedback(
+        row.result or {}, mode=payload.mode, selected=payload.selected, candidates=payload.candidates,
+        at=datetime.now().isoformat(timespec="seconds"),
+    )
+    await db.commit()
+    return {"ok": True, "feedback_entries": len(row.result.get("feedback") or [])}
+
+
 @router.post("/{chapter_id}/generate-stream", summary="AI创作章节内容（流式）")
 async def generate_chapter_content_stream(
     chapter_id: str,
@@ -1374,6 +1607,9 @@ async def generate_chapter_content_stream(
     target_word_count = generate_request.target_word_count or 3000
     enable_mcp = generate_request.enable_mcp if hasattr(generate_request, 'enable_mcp') else True
     selected_plugins = generate_request.selected_plugins if hasattr(generate_request, 'selected_plugins') else None
+    # auto_analyze：批量生成时前端传 True → 生成后自动排队分析（累积记忆 + 支撑一致性闸门）；
+    # 单章生成默认 False → 不自动分析，由用户手动触发（可先改正文再分析）
+    auto_analyze = getattr(generate_request, 'auto_analyze', False)
     # 预先验证章节存在性（使用临时会话）
     async for temp_db in get_db(request):
         result = await temp_db.execute(
@@ -1795,6 +2031,17 @@ async def generate_chapter_content_stream(
                 if st_bridge is not None:
                     st_bridge.skip("注入失败，已跳过")
 
+            # 去 AI 味规则块（sepia 三层法 + 按章轮换的主推条目 + 模型家族先验 + 本项目最近几章诊断的高频信号），两个模板都注入
+            try:
+                project_prior = await load_project_prior(db_session, project.id)
+            except Exception as _pp:  # noqa: BLE001 - 先验缺失不影响生成
+                logger.warning(f"[deai] 项目级先验加载失败（已跳过）: {_pp}")
+                project_prior = ""
+            deai_block = build_write_block(
+                getattr(user_ai_service, "default_model", None),
+                chapter_number=current_chapter.chapter_number, project_prior=project_prior,
+            )
+
             # 根据是否有前置内容选择不同的提示词，并应用写作风格、记忆增强、剧情卡片和MCP参考资料
             if previous_content:
                 prompt = prompt_service.get_chapter_generation_with_context_prompt(
@@ -1816,7 +2063,8 @@ async def generate_chapter_content_stream(
                     target_word_count=target_word_count,
                     memory_context=memory_context,
                     linked_cards_context=linked_cards_context,
-                    mcp_references=mcp_reference_materials
+                    mcp_references=mcp_reference_materials,
+                    deai_block=deai_block,
                 )
             else:
                 prompt = prompt_service.get_chapter_generation_prompt(
@@ -1837,7 +2085,8 @@ async def generate_chapter_content_stream(
                     target_word_count=target_word_count,
                     memory_context=memory_context,
                     linked_cards_context=linked_cards_context,
-                    mcp_references=mcp_reference_materials
+                    mcp_references=mcp_reference_materials,
+                    deai_block=deai_block,
                 )
 
             prompt = prompt_service.apply_project_generation_prompt(
@@ -1883,6 +2132,7 @@ async def generate_chapter_content_stream(
             new_word_count = count_words(full_content)
             current_chapter.word_count = new_word_count
             current_chapter.status = "completed"
+            current_chapter.generated_by_model = getattr(user_ai_service, "default_model", None)
             
             # 更新项目字数
             project.current_words = project.current_words - old_word_count + new_word_count
@@ -1905,7 +2155,11 @@ async def generate_chapter_content_stream(
             
             st_persist.done(word_count=new_word_count)
 
-            # 排队章节分析：独立的 chapter_analyze 后台任务（托盘可见；同章已在分析则跳过）
+            # 单章生成：不自动分析，仅落库（用户可先改正文再手动分析）。
+            # 批量生成（auto_analyze=True）：自动排队分析，累积记忆并支撑批量一致性闸门。
+            if not auto_analyze:
+                return {'word_count': new_word_count, 'analysis_task_id': None, 'analysis_job_id': None}
+
             st_ana = begin_stage("analysis", "排队章节分析")
             task_id = await create_analysis_task(db_session, chapter_id=chapter_id, user_id=current_user_id, project_id=project.id)
             logger.info(f"📋 已创建分析任务: {task_id}")
@@ -2556,8 +2810,9 @@ async def regenerate_chapter_stream(
                 # 初始化重新生成器
                 regenerator = ChapterRegenerator(user_ai_service)
                 
-                # 流式生成新内容
+                # 流式生成新内容（deai 模式：模型出补丁 → 后端套用 → 单个 chunk 整篇新稿 + deai_patch 统计事件）
                 full_content = ""
+                deai_patch = None
                 async for event in regenerator.regenerate_with_feedback(
                     chapter=chapter,
                     analysis=analysis,
@@ -2579,6 +2834,10 @@ async def regenerate_chapter_stream(
                             'word_count': event.get('word_count', 0)
                         }
                         job.publish({**progress_data, 'status': 'processing'})
+                    elif event['type'] == 'deai_patch':
+                        # 去 AI 味补丁套用明细：进任务事件（过程面板可看）并带进最终 result
+                        deai_patch = {k: v for k, v in event.items() if k != 'type'}
+                        job.publish(event)
                     elif event['type'] == 'error':
                         # AI生成错误
                         error_data = {
@@ -2613,6 +2872,7 @@ async def regenerate_chapter_stream(
 
                 # auto_apply：把新稿真正写回章节正文（原稿已在任务的 original_content 中留档，可回滚）
                 applied = False
+                purged_mem = 0
                 if regenerate_request.auto_apply and full_content.strip():
                     target_result = await db_session.execute(
                         select(Chapter).where(Chapter.id == chapter_id)
@@ -2624,6 +2884,9 @@ async def regenerate_chapter_stream(
                         target_chapter.content = full_content
                         target_chapter.word_count = new_wc
                         target_chapter.status = "completed"
+                        # 补丁式润色只改了少数词，作者模型不变；整章重写才算换了写手
+                        if not regenerate_request.deai_mode:
+                            target_chapter.generated_by_model = getattr(user_ai_service, "default_model", None)
                         proj_result = await db_session.execute(
                             select(Project).where(Project.id == target_chapter.project_id)
                         )
@@ -2633,35 +2896,18 @@ async def regenerate_chapter_stream(
                                 0, (target_project.current_words or 0) - old_wc + new_wc
                             )
                         applied = True
-                        logger.info(f"✅ 重生成新稿已应用到章节正文: {chapter_id}")
+                        # 正文被整章覆盖 → 直接删除该章旧分析 + 记忆（不标过期）。清理后回到「未分析」，由用户手动重新分析。
+                        purged_mem = await _purge_chapter_analysis_and_memory(db_session, chapter_id)
+                        logger.info(f"✅ 重生成新稿已应用到章节正文: {chapter_id}，已清理旧分析 + {purged_mem} 条记忆")
 
                 await db_session.commit()
                 db_committed = True
                 st_persist.done(applied=applied, version=regen_task.version_number)
                 analysis_job_id = None
 
-                # auto_apply 后触发重新分析：正文已整章替换，旧的记忆/一致性信号必须刷新，
-                # 否则会以旧稿状态污染后续章节生成（与 generate-stream 的自动分析行为对齐）
+                # 覆盖正文后向量库记忆清理（DB 已删，向量失败不影响主流程）
                 if applied:
-                    try:
-                        analysis_task = AnalysisTask(
-                            chapter_id=chapter_id,
-                            user_id=user_id,
-                            project_id=chapter.project_id,
-                            status='pending',
-                            progress=0
-                        )
-                        db_session.add(analysis_task)
-                        await db_session.commit()
-                        await db_session.refresh(analysis_task)
-                        analysis_job = await start_chapter_analysis(
-                            chapter_id=chapter_id, chapter_number=chapter.chapter_number, chapter_title=chapter.title,
-                            user_id=user_id, project_id=chapter.project_id, task_id=analysis_task.id, ai_service=user_ai_service,
-                        )
-                        analysis_job_id = analysis_job.id
-                        job.progress('🔍 新稿已排队重新分析', 97)
-                    except Exception as _an_err:
-                        logger.warning(f"⚠️ 重生成后排队分析失败（不影响正文应用）: {_an_err}")
+                    await _purge_chapter_vector_memory(user_id_for_job, chapter.project_id, chapter_id, purged_mem)
 
                 logger.info(f"✅ 章节重新生成完成: {chapter_id}, 任务: {task_id}")
                 return {
@@ -2670,6 +2916,7 @@ async def regenerate_chapter_stream(
                     'version_number': regen_task.version_number,
                     'auto_applied': applied,
                     'diff_stats': diff_stats,
+                    'deai_patch': deai_patch,
                     'analysis_job_id': analysis_job_id,
                 }
 
@@ -2823,7 +3070,11 @@ async def apply_regeneration_task(
     if project:
         project.current_words = max(0, (project.current_words or 0) - old_wc + new_wc)
 
+    # 正文被整章覆盖 → 直接删除该章旧分析 + 记忆（不标过期），由用户手动重新分析
+    user_id = getattr(request.state, 'user_id', None)
+    purged_mem = await _purge_chapter_analysis_and_memory(db, chapter_id)
     await db.commit()
+    await _purge_chapter_vector_memory(user_id, chapter.project_id, chapter_id, purged_mem)
 
     label = "新稿" if source == "regenerated" else "改稿前原稿"
     logger.info(f"✅ 应用重生成版本到章节: chapter={chapter_id} task={task_id} source={source}")

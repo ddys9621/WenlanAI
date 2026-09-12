@@ -21,7 +21,7 @@ from app.services.auth_settings_service import AuthSettings, SmtpEncryption
 logger = get_logger(__name__)
 
 SMTP_TIMEOUT_SECONDS = 20
-BRAND_NAME = "HH小说创作"  # 邮件主题/正文里的产品名，与前端品牌一致
+BRAND_NAME = "文澜 AI"  # 邮件主题/正文里的产品名，与前端品牌一致
 
 
 class CooldownError(Exception):

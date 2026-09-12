@@ -17,6 +17,10 @@ class Settings(Base):
     llm_model = Column(String(100), default="gpt-4", comment="模型名称")
     temperature = Column(Float, default=0.7, comment="温度参数")
     max_tokens = Column(Integer, default=2000, comment="最大token数")
+    # 采样多样性参数（降低"AI 味"/困惑度检测）
+    top_p = Column(Float, default=0.95, comment="核采样 top_p，<1 收敛候选词分布")
+    frequency_penalty = Column(Float, default=0.3, comment="频率惩罚 -2~2，越高越抑制重复用词")
+    presence_penalty = Column(Float, default=0.3, comment="存在惩罚 -2~2，越高越鼓励引入新词/话题")
     # 思考/推理强度（全局生效）：OpenAI 走 reasoning_effort，Anthropic 走 thinking.budget_tokens
     reasoning_enabled = Column(Boolean, nullable=False, default=False, comment="是否启用思考/推理模式")
     reasoning_effort = Column(String(20), default="medium", comment="统一思考强度档位/OpenAI reasoning_effort: none|minimal|low|medium|high|xhigh|max")

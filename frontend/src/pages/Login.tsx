@@ -111,7 +111,7 @@ export default function Login() {
     <LoginShell>
       <div className="flex flex-col items-center text-center">
         <BrandLogo size="lg" />
-        <h1 className="mt-5 text-2xl font-semibold tracking-tight text-content">HH小说创作</h1>
+        <h1 className="mt-5 text-2xl font-semibold tracking-tight text-content">文澜 AI</h1>
         <p className="mt-1.5 text-sm text-content-secondary">登录以继续创作</p>
       </div>
 

@@ -1,6 +1,10 @@
-"""章节重新生成服务"""
+"""章节重新生成服务：普通模式按反馈整章重写（流式）；去 AI 味模式走补丁式最小改动（见 _regenerate_deai_patch）。"""
 from typing import Dict, Any, AsyncGenerator, Optional
 from app.services.ai_service import AIService
+from app.services.deai_anchor import locate, normalize_for_match, quote_spans
+from app.services.deai_metrics import compute_metrics, metrics_delta
+from app.services.deai_patch import apply_edits, parse_edits
+from app.services.deai_rules import build_refactor_protocol
 from app.services.prompt_service import prompt_service
 from app.models.chapter import Chapter
 from app.models.memory import PlotAnalysis
@@ -37,6 +41,11 @@ class ChapterRegenerator:
         Yields:
             包含类型和数据的字典: {'type': 'progress'/'chunk', 'data': ...}
         """
+        if getattr(regenerate_request, "deai_mode", False):
+            async for event in self._regenerate_deai_patch(chapter, regenerate_request):
+                yield event
+            return
+
         try:
             logger.info(f"🔄 开始重新生成章节: 第{chapter.chapter_number}章")
             
@@ -96,7 +105,118 @@ class ChapterRegenerator:
         except Exception as e:
             logger.error(f"❌ 重新生成失败: {str(e)}", exc_info=True)
             raise
-    
+
+    # ------------------------------------------------------------------ 去 AI 味：补丁式最小改动
+
+    @staticmethod
+    def _deai_finding_lines(regenerate_request: ChapterRegenerateRequest) -> list[str]:
+        return [
+            f"【去AI味·{f.layer or '措辞'}】{f.feature}：{f.fix or '按判据修正'}（原文：“{f.evidence}”）"
+            for f in getattr(regenerate_request, "deai_findings", None) or []
+        ]
+
+    def build_deai_patch_prompt(self, chapter: Chapter, regenerate_request: ChapterRegenerateRequest) -> str:
+        """去 AI 味补丁提示词：协议 + 修改指令 + 原文 + JSON 补丁格式。
+
+        故意不带项目背景 / 角色 / 大纲 / 前文——那些是重写时的材料，对最小改动只是噪音，还会把模型往"重写"上推。
+        """
+        finding_lines = self._deai_finding_lines(regenerate_request)
+        custom = (regenerate_request.custom_instructions or "").strip()
+        directives = "\n".join(finding_lines) or "（本次未带入具体诊断条目：按协议自行列出缺陷清单——架构 → 篇章 → 措辞——再逐项最小修改）"
+        if custom:
+            directives += f"\n\n作者补充要求：\n{custom}"
+        return f"""你是一位研究 AI 生成文本特征的资深小说编辑，现在对下面这一章做「去 AI 味」最小改动改稿。
+你不输出全文，只输出一份补丁清单：每条给出原文里要改的片段（find）和改后的文字（replace）。
+程序会在原文上机械套用——没被 find 覆盖的字一个都不会变，所以你不需要、也不应该重抄任何没问题的句子。
+
+【改稿协议】
+{build_refactor_protocol(getattr(self.ai_service, "default_model", None))}
+
+【修改指令】
+{directives}
+
+【原文】《{chapter.title}》（第 {chapter.chapter_number} 章，{chapter.word_count or len(chapter.content or '')} 字）
+{chapter.content}
+
+【输出】只输出一个 JSON 对象，不要 Markdown 代码块、不要解释：
+{{"edits": [{{"find": "从原文逐字复制的片段（含标点），8–80 字，必须在全文中唯一——不够唯一就往前后多带几个字", "replace": "改后的文字；整句删除就给空字符串", "why": "对应哪条修改指令 / 判据，一句话"}}]}}
+规则：
+- find 必须与原文逐字相同，否则这条会被丢弃；同一处只给一条，两条的 find 不要重叠；
+- 对话引号里的话不要动，除非修改指令明确指向它；
+- 替换为主、删除次之、增加最少；所有 replace 的总字数不要超过对应 find 的总字数；
+- 没有缺陷的句子不要出现在 find 里；通读中发现的同类问题可以一并修，但 why 里要写出对应的判据。"""
+
+    def _allowed_quote_spans(self, content: str, regenerate_request: ChapterRegenerateRequest) -> list[tuple[int, int]]:
+        """带入的诊断信号正指向的引语区间——只有这些对话允许改。deai_protect_dialogue=False 时全部放开。"""
+        quotes = quote_spans(content)
+        if not getattr(regenerate_request, "deai_protect_dialogue", True):
+            return quotes
+        targets: list[tuple[int, int]] = []
+        for f in getattr(regenerate_request, "deai_findings", None) or []:
+            span = None
+            if f.start is not None and f.end is not None and f.evidence:
+                # 诊断时的偏移只有在那儿仍是这句引证时才可信（正文改过就会错位），否则按 evidence 重新定位
+                at_offset = normalize_for_match(content[f.start:f.end])[0]
+                wanted = normalize_for_match(f.evidence)[0]
+                if wanted and (wanted in at_offset or at_offset in wanted):
+                    span = (f.start, f.end)
+            if span is None and f.evidence:
+                anchor = locate(content, f.evidence)
+                span = (anchor[0], anchor[1]) if anchor else None
+            if span:
+                targets.append(span)
+        return [q for q in quotes if any(q[0] < t_end and q[1] > t_start for t_start, t_end in targets)]
+
+    async def _regenerate_deai_patch(
+        self, chapter: Chapter, regenerate_request: ChapterRegenerateRequest,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """去 AI 味模式：模型出补丁 → 机械套用 → 一次性发出整篇新稿 + 套用统计 + 前后指标对比。"""
+        content = chapter.content or ""
+        logger.info(f"🧽 去 AI 味补丁改稿: 第{chapter.chapter_number}章，带入 {len(regenerate_request.deai_findings or [])} 条诊断")
+        yield {'type': 'progress', 'progress': 10, 'message': '正在构建补丁提示词...'}
+        prompt = self.build_deai_patch_prompt(chapter, regenerate_request)
+        yield {'type': 'progress', 'progress': 15, 'message': '模型正在生成补丁清单...'}
+        try:
+            # 低温：最小改动模式要的是克制，0.7 会鼓励它顺手重写没问题的句子
+            response = await self.ai_service.generate_text_stream_collect(
+                prompt=prompt, temperature=0.3, context="deai-refactor",
+            )
+        except Exception as ai_error:
+            logger.error(f"❌ 去 AI 味补丁生成异常: {ai_error}", exc_info=True)
+            yield {'type': 'error', 'error': f"AI生成服务异常: {ai_error}", 'code': 502, 'message': '生成过程中遇到AI服务问题，请稍后重试'}
+            return
+        raw = response.get("content", "") if isinstance(response, dict) else str(response or "")
+        edits = parse_edits(raw)
+        if not edits:
+            yield {'type': 'error', 'error': '模型没有返回可解析的补丁清单（不是合法 JSON 或 edits 为空）', 'code': 502, 'message': '去 AI 味改稿失败'}
+            return
+
+        yield {'type': 'progress', 'progress': 85, 'message': f'套用 {len(edits)} 条补丁...'}
+        result = apply_edits(content, edits, allowed_quote_spans=self._allowed_quote_spans(content, regenerate_request))
+        if not result.applied:
+            reasons = "；".join(f"「{s['find'][:20]}」{s['reason']}" for s in result.skipped[:5])
+            yield {
+                'type': 'error', 'code': 422, 'message': '去 AI 味改稿失败',
+                'error': f"模型给出 {len(edits)} 条补丁，0 条能在原文中定位套用：{reasons}",
+            }
+            return
+
+        before, after = compute_metrics(content)["metrics"], compute_metrics(result.content)["metrics"]
+        yield {'type': 'chunk', 'content': result.content}
+        yield {
+            'type': 'deai_patch',
+            'edits_proposed': len(edits),
+            'applied': result.applied,
+            'skipped': result.skipped,
+            'chars_before': result.chars_before,
+            'chars_after': result.chars_after,
+            'metrics_before': before,
+            'metrics_after': after,
+            'metrics_delta': metrics_delta(before, after),
+        }
+        logger.info(f"✅ 去 AI 味补丁套用完成：{len(result.applied)} 条套用 / {len(result.skipped)} 条跳过")
+        yield {'type': 'progress', 'progress': 100, 'message': f'改稿完成：套用 {len(result.applied)} 处，跳过 {len(result.skipped)} 处'}
+
     def _build_modification_instructions(
         self,
         analysis: Optional[PlotAnalysis],
@@ -126,16 +246,34 @@ class ChapterRegenerator:
             instructions.append("## ✍️ 用户自定义修改要求：\n")
             instructions.append(regenerate_request.custom_instructions)
             instructions.append("")
+
+        # 2b. 去 AI 味模式：列出带入的诊断信号；没勾 findings 也要有指令（模型按协议自行找同类问题），保证指令非空
+        if getattr(regenerate_request, "deai_mode", False):
+            instructions.append("## 🧽 去 AI 味改稿：\n")
+            finding_lines = self._deai_finding_lines(regenerate_request)
+            if finding_lines:
+                instructions.extend(finding_lines)
+                instructions.append("")
+                instructions.append(
+                    "以上带「去AI味」标记的条目是诊断报告里勾选的问题（含原文引证），逐条最小修改；"
+                    "通读时发现的同类问题一并修。没有列出问题的句子原样保留。"
+                )
+            else:
+                instructions.append(
+                    "本次未带入具体诊断条目：按下方改稿协议先在心里列出缺陷清单（架构 → 篇章 → 措辞），"
+                    "再逐项最小修改；没有缺陷的句子原样保留。"
+                )
+            instructions.append("")
         
         # 3. 重点优化方向
         if regenerate_request.focus_areas:
             instructions.append("## 🎯 重点优化方向：\n")
             focus_map = {
-                "pacing": "节奏把控 - 调整叙事速度，避免拖沓或过快",
-                "emotion": "情感渲染 - 深化人物情感表达，增强感染力",
-                "description": "场景描写 - 丰富环境细节，增强画面感",
-                "dialogue": "对话质量 - 让对话更自然真实，推动剧情",
-                "conflict": "冲突强度 - 强化矛盾冲突，提升戏剧张力"
+                "pacing": "节奏 - 调整叙事速度，拖的地方砍、赶的地方写足",
+                "emotion": "情感 - 情绪写进动作和对话里，该点名就点名（\"他慌了\"），不堆身体渲染和抒情",
+                "description": "场景 - 补具体的东西和动作（谁拿着什么、站在哪儿），环境一处两句，不铺陈",
+                "dialogue": "对话 - 说人话、有信息量，靠对话把剧情往前推",
+                "conflict": "冲突 - 把矛盾顶到明面上，让人当场说出来、做出来"
             }
             
             for area in regenerate_request.focus_areas:
@@ -175,18 +313,17 @@ class ChapterRegenerator:
         project_context: Dict[str, Any],
         regenerate_request: ChapterRegenerateRequest
     ) -> str:
-        """构建完整的重新生成提示词"""
+        """构建完整的重新生成提示词（普通整章重写；去 AI 味模式走 build_deai_patch_prompt，不经这里）"""
         
         prompt_parts = []
         
-        # 系统角色
-        prompt_parts.append("""你是一位经验丰富的专业小说编辑和作家。现在需要根据反馈意见重新创作一个章节。
+        prompt_parts.append("""你是一个在起点、番茄写了几百万字的网文老作者，现在要根据反馈把自己的一章重写一遍。
 
 你的任务是：
-1. 仔细理解原章节的内容和意图
-2. 认真分析所有的修改要求
-3. 在保持故事连贯性的前提下，创作一个改进后的新版本
-4. 确保新版本在艺术性和可读性上都有明显提升
+1. 弄清原章节讲了什么、想干什么
+2. 把所有修改要求看明白
+3. 在保持故事连贯的前提下，创作一个改进后的新版本
+4. 新版本要更好读、更抓人，读起来还是手机上的连载网文，不是文学作品
 
 ---
 """)
@@ -261,12 +398,19 @@ class ChapterRegenerator:
 ---
 """)
         
+        # 文风要求：与正文生成同一套网文大白话规则（含视角边界），重写不能把文风拉回文学腔
+        prompt_parts.append(
+            "## 🎨 文风要求\n\n"
+            + prompt_service.render_chapter_style_rules(project_context.get('narrative_perspective', '第三人称'))
+            + "\n\n---\n"
+        )
+
         # 创作要求
         prompt_parts.append(f"""## ✨ 创作要求
 
 1. **解决问题**：针对上述修改指令中提到的所有问题进行改进
 2. **保持连贯**：确保与前后章节的情节、人物、风格保持一致
-3. **提升质量**：在节奏、情感、描写等方面明显优于原版
+3. **更好读**：节奏、对话、情绪都比原版顺，文风按上面「文风要求」来
 4. **保留精华**：保持原章节中优秀的部分和关键情节
 5. **字数控制**：目标字数约{regenerate_request.target_word_count}字（可适当浮动±20%）
 
@@ -281,6 +425,7 @@ class ChapterRegenerator:
 - **不要**输出章节标题（如"第X章"、"第X章：XXX"等）
 - **不要**输出任何额外的说明、注释或元数据
 - 只需要纯粹的故事正文内容
+- 落笔前再看一眼：段落短、对话多、叙述用主角的口气、环境两句带过、书面词换成嘴上的词、结尾停在钩子上
 
 现在开始：
 """)
