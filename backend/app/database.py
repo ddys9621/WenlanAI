@@ -42,7 +42,6 @@ from app.models.project_default_style import ProjectDefaultStyle  # noqa: F401
 from app.models.project_ai_preference import ProjectAIPreference  # noqa: F401
 from app.models.project_reference_pack import ProjectReferencePack  # noqa: F401
 from app.models.reference_pack import ReferencePack  # noqa: F401
-from app.models.regeneration_task import RegenerationTask  # noqa: F401
 from app.models.relationship import (  # noqa: F401
     CharacterRelationship,
     Organization,

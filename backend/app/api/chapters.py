@@ -1,5 +1,5 @@
 """章节管理API"""
-from fastapi import APIRouter, Depends, HTTPException, Request, Query
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 import json
@@ -18,8 +18,8 @@ from app.models.generation_history import GenerationHistory
 from app.models.writing_style import WritingStyle
 from app.models.analysis_task import AnalysisTask
 from app.models.memory import PlotAnalysis, StoryMemory
-from app.models.regeneration_task import RegenerationTask
 from app.models.chapter_deai_review import ChapterDeaiReview
+from app.models.deai_prompt import DeaiPrompt
 from app.models.plot_card import PlotCard
 from app.models.plot_card_chapter_outline_link import PlotCardChapterOutlineLink
 from app.schemas.chapter import (
@@ -30,16 +30,14 @@ from app.schemas.chapter import (
     ChapterGenerateRequest,
 )
 from app.schemas.deai_review import DeaiReviewFeedbackRequest
-from app.schemas.regeneration import (
-    ApplyRegenerationRequest,
-    ChapterRegenerateRequest
-)
+from app.schemas.regeneration import ChapterRegenerateRequest
 from app.api.ai_jobs import job_sse_response
 from app.services.ai_jobs import AIJobConflictError, ai_jobs, job_session_factory
 from app.services.ai_service import AIService
 from app.services.chapter_analysis_jobs import create_analysis_task, start_chapter_analysis
 from app.services.deai_history import feature_acceptance, load_project_prior, load_recent_review_results, record_feedback
 from app.services.deai_review_service import content_hash, pick_review_model, run_deai_review
+from app.services.deai_rewrite import build_rewrite_prompt
 from app.services.deai_rules import build_write_block
 from app.services.generation_trace import begin_stage, stage_scope, trace_progress, trace_reference
 from app.services.prompt_service import prompt_service
@@ -47,7 +45,6 @@ from app.services.plot_analyzer import PlotAnalyzer
 from app.services.chapter_consistency_service import chapter_consistency_service
 from app.services.memory_service import memory_service
 from app.services.narrative_state_service import narrative_state_service
-from app.services.chapter_regenerator import ChapterRegenerator
 from app.logger import get_logger
 from app.api.settings import get_user_ai_service
 from app.config import settings as config_settings
@@ -529,68 +526,6 @@ async def get_chapter(
     await verify_project_access(chapter.project_id, user_id, db)
     
     return chapter
-
-
-@router.get("/{chapter_id}/navigation", summary="获取章节导航信息")
-async def get_chapter_navigation(
-    chapter_id: str,
-    request: Request,
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    获取章节的导航信息（上一章/下一章）
-    用于章节阅读器的翻页功能
-    """
-    # 获取当前章节
-    result = await db.execute(
-        select(Chapter).where(Chapter.id == chapter_id)
-    )
-    current_chapter = result.scalar_one_or_none()
-    
-    if not current_chapter:
-        raise HTTPException(status_code=404, detail="章节不存在")
-    
-    # 验证用户权限
-    user_id = getattr(request.state, 'user_id', None)
-    await verify_project_access(current_chapter.project_id, user_id, db)
-    
-    # 获取上一章
-    prev_result = await db.execute(
-        select(Chapter)
-        .where(Chapter.project_id == current_chapter.project_id)
-        .where(Chapter.chapter_number < current_chapter.chapter_number)
-        .order_by(Chapter.chapter_number.desc())
-        .limit(1)
-    )
-    prev_chapter = prev_result.scalar_one_or_none()
-    
-    # 获取下一章
-    next_result = await db.execute(
-        select(Chapter)
-        .where(Chapter.project_id == current_chapter.project_id)
-        .where(Chapter.chapter_number > current_chapter.chapter_number)
-        .order_by(Chapter.chapter_number.asc())
-        .limit(1)
-    )
-    next_chapter = next_result.scalar_one_or_none()
-    
-    return {
-        "current": {
-            "id": current_chapter.id,
-            "chapter_number": current_chapter.chapter_number,
-            "title": current_chapter.title
-        },
-        "previous": {
-            "id": prev_chapter.id,
-            "chapter_number": prev_chapter.chapter_number,
-            "title": prev_chapter.title
-        } if prev_chapter else None,
-        "next": {
-            "id": next_chapter.id,
-            "chapter_number": next_chapter.chapter_number,
-            "title": next_chapter.title
-        } if next_chapter else None
-    }
 
 
 @router.put("/{chapter_id}", response_model=ChapterResponse, summary="更新章节")
@@ -2602,487 +2537,94 @@ async def trigger_chapter_analysis_stream(
 
 
 
-# ==================== 章节重新生成相关API ====================
+# ==================== 去 AI 味重写 ====================
 
-@router.post("/{chapter_id}/regenerate-stream", summary="流式重新生成章节内容")
+@router.post("/{chapter_id}/regenerate-stream", summary="按去 AI 味提示词重写正文并覆盖（后台任务 + SSE）")
 async def regenerate_chapter_stream(
     chapter_id: str,
     request: Request,
     regenerate_request: ChapterRegenerateRequest,
     db: AsyncSession = Depends(get_db),
-    user_ai_service: AIService = Depends(get_user_ai_service)
+    user_ai_service: AIService = Depends(get_user_ai_service),
 ):
+    """提示词只带用户勾选的项目去 AI 味提示词 + 本章原文（不带章纲 / 前文 / 设定）。
+
+    完成后直接覆盖正文，并清掉本章已有的分析产物（分析 / 记忆 / 伏笔承诺 / 一致性…），回到「未分析」。不留版本、不可回滚。
     """
-    根据分析建议或自定义指令重新生成章节内容（流式返回）
-    
-    工作流程：
-    1. 验证章节和分析结果
-    2. 创建重新生成任务
-    3. 构建修改指令
-    4. 流式生成新内容
-    5. 保存为版本历史
-    6. 可选自动应用
-    """
-    user_id = getattr(request.state, 'user_id', None)
+    user_id = getattr(request.state, "user_id", None)
     if not user_id:
         raise HTTPException(status_code=401, detail="未登录")
-    
-    # 验证章节存在
-    chapter_result = await db.execute(
-        select(Chapter).where(Chapter.id == chapter_id)
-    )
-    chapter = chapter_result.scalar_one_or_none()
-    
+    chapter = (await db.execute(select(Chapter).where(Chapter.id == chapter_id))).scalar_one_or_none()
     if not chapter:
         raise HTTPException(status_code=404, detail="章节不存在")
-    
-    if not chapter.content or chapter.content.strip() == "":
-        raise HTTPException(status_code=400, detail="章节内容为空，无法重新生成")
-    
-    # 验证用户权限
+    if not (chapter.content or "").strip():
+        raise HTTPException(status_code=400, detail="章节内容为空，无法重写")
     await verify_project_access(chapter.project_id, user_id, db)
-    
-    # 获取分析结果（如果使用分析建议）
-    analysis = None
-    if regenerate_request.modification_source in ['analysis_suggestions', 'mixed']:
-        analysis_result = await db.execute(
-            select(PlotAnalysis)
-            .where(PlotAnalysis.chapter_id == chapter_id)
-            .order_by(PlotAnalysis.created_at.desc())
-            .limit(1)
-        )
-        analysis = analysis_result.scalar_one_or_none()
-        
-        if not analysis:
-            raise HTTPException(status_code=404, detail="该章节暂无分析结果")
-    
-    # 获取项目上下文数据（使用现有db session）
-    try:
-        # 获取项目信息
-        project_result = await db.execute(
-            select(Project).where(Project.id == chapter.project_id)
-        )
-        project = project_result.scalar_one_or_none()
-        
-        # 获取角色信息
-        characters_result = await db.execute(
-            select(Character).where(Character.project_id == chapter.project_id)
-        )
-        characters = characters_result.scalars().all()
-        
-        # 获取章节大纲
-        outline_result = await db.execute(
-            select(ChapterOutline)
-            .where(ChapterOutline.project_id == chapter.project_id)
-            .where(ChapterOutline.order_index == chapter.chapter_number)
-        )
-        outline = outline_result.scalar_one_or_none()
-        
-        # 构建项目上下文
-        project_context = {
-            'project_title': project.title if project else '未知',
-            'genre': project.genre if project else '未设定',
-            'theme': project.theme if project else '未设定',
-            'narrative_perspective': project.narrative_perspective if project else '第三人称',
-            'time_period': project.world_time_period if project else '未设定',
-            'location': project.world_location if project else '未设定',
-            'atmosphere': project.world_atmosphere if project else '未设定',
-            'characters_info': "\n".join([
-                f"- {c.name}({'组织' if c.is_organization else '角色'}, {c.role_type}): {c.personality[:100] if c.personality else ''}"
-                for c in characters
-            ]) if characters else '暂无角色信息',
-            'chapter_outline': outline.summary if outline else chapter.summary or '暂无大纲',
-            'previous_context': '',  # 可以后续扩展添加前置章节上下文
-            'generation_prompt': project.generation_prompt if project else ''
-        }
 
-        # 拆书参考注入（R5-S5）：通过 project_context 把已挂载参考包的 user/system 段传进 regenerator
-        # 设计文档：@/agent-docs/features/dissect_to_creation_pipeline.md §A.2
-        try:
-            from app.services.reference_pack_injector import ReferencePackInjector
-            _injector = ReferencePackInjector()
-            _anchor = (
-                f"{chapter.title or ''} "
-                f"{(outline.summary if outline else (chapter.summary or ''))[:300]}"
-            ).strip() or "章节重生成"
-            _ref_block = await _injector.build_reference_block(
-                db, chapter.project_id,
-                scene="chapter_regenerate",
-                pack_ids=regenerate_request.pack_ids,
-                dimensions=regenerate_request.dimensions,
-                strength=regenerate_request.strength,
-                anchor_query=_anchor,
-            )
-            if _ref_block.user_segment:
-                project_context['dissect_reference_user'] = _ref_block.user_segment
-            if _ref_block.system_segment:
-                project_context['dissect_reference_system'] = _ref_block.system_segment
-            if not _ref_block.is_empty:
-                logger.info(
-                    f"📚 [R5-章节重生成] 注入拆书参考包 {len(_ref_block.used_packs)} 个，"
-                    f"维度={_ref_block.used_dimensions}，强度={_ref_block.used_strength}"
-                )
-        except ValueError:
-            # 项目未挂载参考包 → 优雅跳过
-            pass
-        except Exception as _e:  # pragma: no cover - 防御性兜底
-            logger.warning(f"[R5-章节重生成] 拆书参考注入失败（已跳过）: {_e}")
-    except Exception as e:
-        logger.error(f"获取项目上下文失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"获取项目上下文失败: {str(e)}")
-    
-    # 预构建修改指令并校验分析建议索引
-    try:
-        # 校验分析建议索引
-        if (regenerate_request.modification_source in ['analysis_suggestions', 'mixed'] and 
-            regenerate_request.selected_suggestion_indices and analysis):
-            if not analysis.suggestions or not isinstance(analysis.suggestions, list):
-                raise HTTPException(status_code=400, detail="该章节的分析结果缺少有效建议")
-            
-            for idx in regenerate_request.selected_suggestion_indices:
-                if idx < 0 or idx >= len(analysis.suggestions):
-                    raise HTTPException(status_code=400, detail=f"选择的建议索引 {idx} 超出范围")
-        
-        # 预构建修改指令
-        temp_regenerator = ChapterRegenerator(user_ai_service)
-        modification_instructions = temp_regenerator._build_modification_instructions(
-            analysis=analysis,
-            regenerate_request=regenerate_request
-        )
-        
-        if not modification_instructions.strip():
-            raise HTTPException(status_code=400, detail="未提供有效的修改指令")
-            
-        logger.info(f"📝 修改指令构建完成，长度: {len(modification_instructions)}字符")
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"构建修改指令失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"构建修改指令失败: {str(e)}")
-    
-    user_id_for_job = user_id
+    rows = (await db.execute(
+        select(DeaiPrompt).where(DeaiPrompt.project_id == chapter.project_id, DeaiPrompt.id.in_(regenerate_request.prompt_ids))
+    )).scalars().all()
+    by_id = {row.id: row.content for row in rows}
+    prompt_texts = [by_id[pid] for pid in regenerate_request.prompt_ids if pid in by_id]  # 保持用户勾选顺序
+    if not prompt_texts:
+        raise HTTPException(status_code=400, detail="请至少选择一条本项目的去 AI 味提示词")
+    prompt = build_rewrite_prompt(prompt_texts, chapter.content)
+    original_len = max(len(chapter.content), 1)
+    project_id = chapter.project_id
 
     async def runner(job):
-        """后台任务体：创建重生成任务行 → 流式重写 → 保存版本（可选应用正文并排队分析）。事件进任务日志，可回放。"""
-        db_committed = False
-        async with job_session_factory(user_id_for_job)() as db_session:
-            try:
-                job.progress('开始重新生成章节...', 3)
-                st_prep = begin_stage("prepare", "创建重生成任务")
-                
-                # 版本号递增：修复历史缺陷（模型默认 1 且从未递增，版本列表全是 v1）
-                ver_result = await db_session.execute(
-                    select(func.max(RegenerationTask.version_number))
-                    .where(RegenerationTask.chapter_id == chapter_id)
-                )
-                next_version = int(ver_result.scalar() or 0) + 1
+        """后台任务体：流式重写 → 覆盖正文 → 清旧分析与记忆。事件进任务日志，可回放。"""
+        st_llm = begin_stage("llm", "模型按去 AI 味提示词重写正文")
+        job.progress("开始重写…", 5)
+        full_content = ""
+        accumulated = 0
+        last_progress_at = 0
+        async for chunk in user_ai_service.generate_text_stream(prompt=prompt):
+            full_content += chunk
+            accumulated += len(chunk)
+            job.publish({"type": "content", "content": chunk})
+            if accumulated - last_progress_at >= 200:
+                last_progress_at = accumulated
+                job.publish({
+                    "type": "progress", "message": f"重写中… 已写出 {accumulated} 字",
+                    "progress": int(min(5 + accumulated / original_len * 85, 90)), "status": "processing", "word_count": accumulated,
+                })
+            await asyncio.sleep(0)
+        st_llm.done(chars=accumulated)
+        if not full_content.strip():
+            raise ValueError("模型没有返回内容，正文未改动")
 
-                # 创建重新生成任务
-                regen_task = RegenerationTask(
-                    chapter_id=chapter_id,
-                    analysis_id=analysis.id if analysis else None,
-                    user_id=user_id,
-                    project_id=chapter.project_id,
-                    version_number=next_version,
-                    modification_instructions=modification_instructions,
-                    original_suggestions=analysis.suggestions if analysis else None,
-                    selected_suggestion_indices=regenerate_request.selected_suggestion_indices,
-                    custom_instructions=regenerate_request.custom_instructions,
-                    style_id=regenerate_request.style_id,
-                    target_word_count=regenerate_request.target_word_count,
-                    focus_areas=regenerate_request.focus_areas,
-                    preserve_elements=regenerate_request.preserve_elements.model_dump() if regenerate_request.preserve_elements else None,
-                    status='running',
-                    original_content=chapter.content,
-                    original_word_count=chapter.word_count or count_words(chapter.content),
-                    version_note=regenerate_request.version_note,
-                    started_at=datetime.now()
-                )
-                db_session.add(regen_task)
-                await db_session.commit()
-                await db_session.refresh(regen_task)
-                
-                task_id = regen_task.id
-                logger.info(f"📝 创建重新生成任务: {task_id}")
-                
-                job.publish({'type': 'task_created', 'task_id': task_id})
-                st_prep.done(version=next_version)
-                st_llm = begin_stage("llm", "模型按修改指令重写正文")
-                
-                # 初始化重新生成器
-                regenerator = ChapterRegenerator(user_ai_service)
-                
-                # 流式生成新内容（deai 模式：模型出补丁 → 后端套用 → 单个 chunk 整篇新稿 + deai_patch 统计事件）
-                full_content = ""
-                deai_patch = None
-                async for event in regenerator.regenerate_with_feedback(
-                    chapter=chapter,
-                    analysis=analysis,
-                    regenerate_request=regenerate_request,
-                    project_context=project_context
-                ):
-                    # 处理不同类型的事件
-                    if event['type'] == 'chunk':
-                        # 内容块
-                        chunk = event['content']
-                        full_content += chunk
-                        job.publish({'type': 'content', 'content': chunk})
-                    elif event['type'] == 'progress':
-                        # 进度更新
-                        progress_data = {
-                            'type': 'progress',
-                            'progress': event.get('progress', 0),
-                            'message': event.get('message', ''),
-                            'word_count': event.get('word_count', 0)
-                        }
-                        job.publish({**progress_data, 'status': 'processing'})
-                    elif event['type'] == 'deai_patch':
-                        # 去 AI 味补丁套用明细：进任务事件（过程面板可看）并带进最终 result
-                        deai_patch = {k: v for k, v in event.items() if k != 'type'}
-                        job.publish(event)
-                    elif event['type'] == 'error':
-                        # AI生成错误
-                        error_data = {
-                            'type': 'error',
-                            'error': event.get('error', '未知错误'),
-                            'code': event.get('code', 500),
-                            'message': event.get('message', '生成失败')
-                        }
-                        # 更新任务状态为失败
-                        regen_task.status = 'failed'
-                        regen_task.error_message = event.get('error', '未知错误')
-                        regen_task.completed_at = datetime.now()
-                        await db_session.commit()
-                        
-                        db_committed = True   # 任务行已标 failed，外层不再重复更新
-                        logger.error(f"❌ 章节重新生成失败: {task_id}, 错误: {event.get('error')}")
-                        raise RuntimeError(error_data['error'])
-                    
-                    await asyncio.sleep(0)
-                
-                st_llm.done(chars=len(full_content))
-                st_persist = begin_stage("persist", "保存版本 / 应用正文")
-
-                # 更新任务状态
-                regen_task.status = 'completed'
-                regen_task.regenerated_content = full_content
-                regen_task.regenerated_word_count = count_words(full_content)
-                regen_task.completed_at = datetime.now()
-
-                # 计算差异统计
-                diff_stats = regenerator.calculate_content_diff(chapter.content, full_content)
-
-                # auto_apply：把新稿真正写回章节正文（原稿已在任务的 original_content 中留档，可回滚）
-                applied = False
-                purged_mem = 0
-                if regenerate_request.auto_apply and full_content.strip():
-                    target_result = await db_session.execute(
-                        select(Chapter).where(Chapter.id == chapter_id)
-                    )
-                    target_chapter = target_result.scalar_one_or_none()
-                    if target_chapter:
-                        old_wc = target_chapter.word_count or 0
-                        new_wc = count_words(full_content)
-                        target_chapter.content = full_content
-                        target_chapter.word_count = new_wc
-                        target_chapter.status = "completed"
-                        # 补丁式润色只改了少数词，作者模型不变；整章重写才算换了写手
-                        if not regenerate_request.deai_mode:
-                            target_chapter.generated_by_model = getattr(user_ai_service, "default_model", None)
-                        proj_result = await db_session.execute(
-                            select(Project).where(Project.id == target_chapter.project_id)
-                        )
-                        target_project = proj_result.scalar_one_or_none()
-                        if target_project:
-                            target_project.current_words = max(
-                                0, (target_project.current_words or 0) - old_wc + new_wc
-                            )
-                        applied = True
-                        # 正文被整章覆盖 → 直接删除该章旧分析 + 记忆（不标过期）。清理后回到「未分析」，由用户手动重新分析。
-                        purged_mem = await _purge_chapter_analysis_and_memory(db_session, chapter_id)
-                        logger.info(f"✅ 重生成新稿已应用到章节正文: {chapter_id}，已清理旧分析 + {purged_mem} 条记忆")
-
-                await db_session.commit()
-                db_committed = True
-                st_persist.done(applied=applied, version=regen_task.version_number)
-                analysis_job_id = None
-
-                # 覆盖正文后向量库记忆清理（DB 已删，向量失败不影响主流程）
-                if applied:
-                    await _purge_chapter_vector_memory(user_id_for_job, chapter.project_id, chapter_id, purged_mem)
-
-                logger.info(f"✅ 章节重新生成完成: {chapter_id}, 任务: {task_id}")
-                return {
-                    'task_id': task_id,
-                    'word_count': count_words(full_content),
-                    'version_number': regen_task.version_number,
-                    'auto_applied': applied,
-                    'diff_stats': diff_stats,
-                    'deai_patch': deai_patch,
-                    'analysis_job_id': analysis_job_id,
-                }
-
-                
-            except BaseException as e:   # 含取消：任务行标 failed 后原样抛出，由管理器发 error / 499
-                logger.error(f"❌ 重新生成失败: {str(e)}", exc_info=not isinstance(e, asyncio.CancelledError))
-                if not db_committed:
-                    try:
-                        task_result = await db_session.execute(
-                            select(RegenerationTask).where(RegenerationTask.chapter_id == chapter_id)
-                            .order_by(RegenerationTask.created_at.desc()).limit(1)
-                        )
-                        task = task_result.scalar_one_or_none()
-                        if task and task.status == 'running':
-                            task.status = 'failed'
-                            task.error_message = str(e)[:500] or '已停止'
-                            task.completed_at = datetime.now()
-                            await db_session.commit()
-                    except Exception as update_error:
-                        logger.error(f"更新任务失败状态失败: {str(update_error)}")
-                raise
+        st_persist = begin_stage("persist", "覆盖正文 / 清理旧分析与记忆")
+        async with job_session_factory(user_id)() as db_session:
+            target = (await db_session.execute(select(Chapter).where(Chapter.id == chapter_id))).scalar_one_or_none()
+            if not target:
+                raise ValueError("章节不存在")
+            old_wc = target.word_count or 0
+            new_wc = count_words(full_content)
+            target.content = full_content
+            target.word_count = new_wc
+            target.status = "completed"
+            project = (await db_session.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
+            if project:
+                project.current_words = max(0, (project.current_words or 0) - old_wc + new_wc)
+            purged = await _purge_chapter_analysis_and_memory(db_session, chapter_id)
+            await db_session.commit()
+        st_persist.done(word_count=new_wc, purged_memories=purged)
+        await _purge_chapter_vector_memory(user_id, project_id, chapter_id, purged)
+        logger.info(f"✅ 去 AI 味重写完成并覆盖正文: {chapter_id}，{new_wc} 字，清理旧记忆 {purged} 条")
+        return {"word_count": new_wc}
 
     try:
         job = await ai_jobs.start(
             kind="chapter_regenerate",
-            title=f"重写第 {chapter.chapter_number} 章《{chapter.title}》",
+            title=f"去 AI 味重写第 {chapter.chapter_number} 章《{chapter.title}》",
             user_id=user_id,
-            project_id=chapter.project_id,
-            scope=f"chapter_write:{chapter.project_id}",
+            project_id=project_id,
+            scope=f"chapter_write:{project_id}",
             runner=runner,
-            cancel_message="已停止重写；本次版本未保存",
-            meta={"chapter_id": chapter_id, "auto_apply": regenerate_request.auto_apply},
+            cancel_message="已停止重写；正文未改动",
+            meta={"chapter_id": chapter_id},
         )
     except AIJobConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     return job_sse_response(job)
-
-
-
-@router.get("/{chapter_id}/regeneration/tasks", summary="获取章节的重新生成任务列表")
-async def get_regeneration_tasks(
-    chapter_id: str,
-    request: Request,
-    limit: int = Query(10, ge=1, le=50),
-    db: AsyncSession = Depends(get_db)
-):
-    """获取指定章节的重新生成任务历史"""
-    user_id = getattr(request.state, 'user_id', None)
-    
-    # 验证章节存在和权限
-    chapter_result = await db.execute(
-        select(Chapter).where(Chapter.id == chapter_id)
-    )
-    chapter = chapter_result.scalar_one_or_none()
-    if not chapter:
-        raise HTTPException(status_code=404, detail="章节不存在")
-    
-    await verify_project_access(chapter.project_id, user_id, db)
-    
-    # 获取任务列表
-    result = await db.execute(
-        select(RegenerationTask)
-        .where(RegenerationTask.chapter_id == chapter_id)
-        .order_by(RegenerationTask.created_at.desc())
-        .limit(limit)
-    )
-    tasks = result.scalars().all()
-    
-    return {
-        "chapter_id": chapter_id,
-        "total": len(tasks),
-        "tasks": [
-            {
-                "task_id": task.id,
-                "status": task.status,
-                "version_number": task.version_number,
-                "version_note": task.version_note,
-                "original_word_count": task.original_word_count,
-                "regenerated_word_count": task.regenerated_word_count,
-                "created_at": task.created_at.isoformat() if task.created_at else None,
-                "completed_at": task.completed_at.isoformat() if task.completed_at else None
-            }
-            for task in tasks
-        ]
-    }
-
-
-async def _get_owned_regeneration_task(
-    chapter_id: str,
-    task_id: str,
-    request: Request,
-    db: AsyncSession,
-) -> tuple[Chapter, RegenerationTask]:
-    """校验章节归属 + 任务归属，返回 (chapter, task)。"""
-    user_id = getattr(request.state, 'user_id', None)
-
-    chapter_result = await db.execute(
-        select(Chapter).where(Chapter.id == chapter_id)
-    )
-    chapter = chapter_result.scalar_one_or_none()
-    if not chapter:
-        raise HTTPException(status_code=404, detail="章节不存在")
-
-    await verify_project_access(chapter.project_id, user_id, db)
-
-    task_result = await db.execute(
-        select(RegenerationTask).where(
-            RegenerationTask.id == task_id,
-            RegenerationTask.chapter_id == chapter_id,
-        )
-    )
-    task = task_result.scalar_one_or_none()
-    if not task:
-        raise HTTPException(status_code=404, detail="重新生成任务不存在")
-    return chapter, task
-
-
-@router.post("/{chapter_id}/regeneration/tasks/{task_id}/apply", summary="应用版本内容到章节正文")
-async def apply_regeneration_task(
-    chapter_id: str,
-    task_id: str,
-    request: Request,
-    payload: ApplyRegenerationRequest = ApplyRegenerationRequest(),
-    db: AsyncSession = Depends(get_db)
-):
-    """把某次重新生成任务的内容写回章节正文。
-
-    - source=regenerated：应用该版本的新稿
-    - source=original：回滚到该版本改稿前的原稿快照
-    """
-    chapter, task = await _get_owned_regeneration_task(chapter_id, task_id, request, db)
-
-    source = (payload.source or "regenerated").lower()
-    if source not in ("regenerated", "original"):
-        raise HTTPException(status_code=400, detail="source 仅支持 regenerated / original")
-
-    content = task.regenerated_content if source == "regenerated" else task.original_content
-    if not content or not content.strip():
-        raise HTTPException(status_code=400, detail="该版本对应内容为空，无法应用")
-
-    old_wc = chapter.word_count or 0
-    new_wc = count_words(content)
-    chapter.content = content
-    chapter.word_count = new_wc
-    chapter.status = "completed"
-
-    project_result = await db.execute(
-        select(Project).where(Project.id == chapter.project_id)
-    )
-    project = project_result.scalar_one_or_none()
-    if project:
-        project.current_words = max(0, (project.current_words or 0) - old_wc + new_wc)
-
-    # 正文被整章覆盖 → 直接删除该章旧分析 + 记忆（不标过期），由用户手动重新分析
-    user_id = getattr(request.state, 'user_id', None)
-    purged_mem = await _purge_chapter_analysis_and_memory(db, chapter_id)
-    await db.commit()
-    await _purge_chapter_vector_memory(user_id, chapter.project_id, chapter_id, purged_mem)
-
-    label = "新稿" if source == "regenerated" else "改稿前原稿"
-    logger.info(f"✅ 应用重生成版本到章节: chapter={chapter_id} task={task_id} source={source}")
-    return {
-        "message": f"已把版本 v{task.version_number or 1} 的{label}写入正文",
-        "applied_source": source,
-        "word_count": new_wc,
-    }
