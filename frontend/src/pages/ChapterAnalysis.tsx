@@ -1,971 +1,622 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { Card, List, Button, Space, Empty, Tag, Spin, Alert, Switch, Drawer, message, Popconfirm, Tabs, Collapse } from 'antd';
-import {
-  EyeOutlined,
-  EyeInvisibleOutlined,
-  MenuOutlined,
-  LeftOutlined,
-  RightOutlined,
-  UnorderedListOutlined,
-  DeleteOutlined,
-  CopyOutlined,
-} from '@ant-design/icons';
-import { useParams } from 'react-router-dom';
-import api from '@/services/api';
-import { chapterApi } from '@/services/api';
-import { normalizeAnalysisData, type NormalizedAnalysisData } from '@/utils/chapterAnalysis';
-import AnnotatedText, { type MemoryAnnotation } from '@/components/AnnotatedText';
-import MemorySidebar from '@/components/MemorySidebar';
-import { useChapterSync } from '@/store/hooks';
-
-interface ChapterItem {
-  id: string;
-  chapter_number: number;
-  title: string;
-  content: string;
-  word_count: number;
-  status: string;
-}
-
-interface AnnotationsData {
-  chapter_id: string;
-  chapter_number: number;
-  title: string;
-  word_count: number;
-  annotations: MemoryAnnotation[];
-  has_analysis: boolean;
-  summary: {
-    total_annotations: number;
-    hooks: number;
-    foreshadows: number;
-    plot_points: number;
-    character_events: number;
-  };
-}
-
-interface NavigationData {
-  current: {
-    id: string;
-    chapter_number: number;
-    title: string;
-  };
-  previous: {
-    id: string;
-    chapter_number: number;
-    title: string;
-  } | null;
-  next: {
-    id: string;
-    chapter_number: number;
-    title: string;
-  } | null;
-}
-
-const SEV_COLOR: Record<string, string> = { critical: 'red', high: 'orange', medium: 'gold', low: 'default' }
-const SEV_LABEL: Record<string, string> = { critical: '严重', high: '高', medium: '中', low: '低' }
-const P_STATUS_COLOR: Record<string, string> = { open: 'blue', progressing: 'orange', resolved: 'green', broken: 'red' }
-const P_STATUS_LABEL: Record<string, string> = { open: '未解', progressing: '推进中', resolved: '已回收', broken: '已破裂' }
-const P_TYPE_LABEL: Record<string, string> = { foreshadow: '伏笔', promise: '承诺', mystery: '悬念', conflict: '冲突' }
-
-function NarrativeStatePanel({ data, loading }: { data: NormalizedAnalysisData | null; loading: boolean }) {
-  if (loading) return <div style={{ textAlign: 'center', padding: 40 }}><Spin /></div>
-  if (!data) return <Empty description="暂无叙事状态数据" style={{ marginTop: 60 }} />
-
-  const ns = data.narrative_state
-  const ca = data.consistency_audit
-  const promises = ns?.promises ?? []
-  const timeline = ns?.timeline_events ?? []
-  const relGraph = ns?.relationship_graph
-  const causal = ns?.causal_links ?? []
-  const issues = ca?.issues ?? []
-  const summary = ca?.summary
-
-  const sections: { key: string; label: string; badge: number; children: React.ReactNode }[] = []
-
-  if (promises.length > 0) {
-    sections.push({
-      key: 'promises',
-      label: '🔮 承诺 / 伏笔',
-      badge: promises.length,
-      children: (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {promises.map((p, i) => {
-            const st = String(p.status || 'open')
-            const pt = String(p.promise_type || '')
-            const pr = String(p.priority || '')
-            return (
-              <Card key={String(p.id || i)} size="small" style={{ borderLeft: `3px solid ${st === 'resolved' ? '#10b981' : st === 'broken' ? '#ef4444' : '#007aff'}` }}>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 4 }}>
-                  {pt && <Tag color="purple">{P_TYPE_LABEL[pt] || pt}</Tag>}
-                  <Tag color={P_STATUS_COLOR[st] || 'default'}>{P_STATUS_LABEL[st] || st}</Tag>
-                  {pr === 'critical' && <Tag color="red">紧急</Tag>}
-                  {pr === 'high' && <Tag color="orange">高优</Tag>}
-                </div>
-                <div style={{ fontWeight: 600, fontSize: 13 }}>{String(p.title || '未命名')}</div>
-                {Boolean(p.content) && <div style={{ fontSize: 12, color: '#5f7090', marginTop: 4 }}>{String(p.content)}</div>}
-                <div style={{ fontSize: 11, color: '#93a4be', marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                  {Boolean(p.owner_character_name) && <span>发起: {String(p.owner_character_name)}</span>}
-                  {Boolean(p.target_character_name) && <span>对象: {String(p.target_character_name)}</span>}
-                  {p.source_chapter_number != null && <span>第{String(p.source_chapter_number)}章埋设</span>}
-                  {p.resolved_chapter_number != null && <span>第{String(p.resolved_chapter_number)}章回收</span>}
-                </div>
-              </Card>
-            )
-          })}
-        </div>
-      ),
-    })
-  }
-
-  if (timeline.length > 0) {
-    sections.push({
-      key: 'timeline',
-      label: '⏱️ 时间轴事件',
-      badge: timeline.length,
-      children: (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {timeline.map((evt, i) => {
-            const actors = (evt.actor_names as string[]) || []
-            const targets = (evt.target_names as string[]) || []
-            return (
-              <Card key={String(evt.id || i)} size="small" style={{ borderLeft: '3px solid #007aff' }}>
-                <div style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
-                  {Boolean(evt.event_type) && <Tag color="blue">{String(evt.event_type)}</Tag>}
-                  {evt.public_visibility === 'secret' && <Tag>秘密</Tag>}
-                </div>
-                <div style={{ fontWeight: 600, fontSize: 13 }}>{String(evt.title || '未命名事件')}</div>
-                {Boolean(evt.description) && <div style={{ fontSize: 12, color: '#5f7090', marginTop: 4 }}>{String(evt.description)}</div>}
-                <div style={{ fontSize: 11, color: '#93a4be', marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                  {Boolean(evt.location) && <span>📍 {String(evt.location)}</span>}
-                  {Boolean(evt.time_marker) && <span>🕐 {String(evt.time_marker)}</span>}
-                  {actors.length > 0 && <span>参与: {actors.join(', ')}</span>}
-                  {targets.length > 0 && <span>目标: {targets.join(', ')}</span>}
-                </div>
-              </Card>
-            )
-          })}
-        </div>
-      ),
-    })
-  }
-
-  if (relGraph && relGraph.edges.length > 0) {
-    sections.push({
-      key: 'relationship',
-      label: '💞 关系变化',
-      badge: relGraph.edges.length,
-      children: (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {relGraph.edges.map((e, i) => {
-            const d = Number(e.delta || 0)
-            return (
-              <Card key={i} size="small" style={{ borderLeft: `3px solid ${d > 0 ? '#10b981' : d < 0 ? '#ef4444' : '#d9e4f3'}` }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
-                  <span style={{ fontWeight: 600 }}>{String(e.source)}</span>
-                  <span style={{ color: '#93a4be' }}>→</span>
-                  <span style={{ fontWeight: 600 }}>{String(e.target)}</span>
-                  <Tag color={d > 0 ? 'green' : d < 0 ? 'red' : 'default'} style={{ marginLeft: 'auto' }}>{d > 0 ? '+' : ''}{d}</Tag>
-                </div>
-                <div style={{ fontSize: 11, color: '#93a4be', marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                  {Boolean(e.reason) && <span>{String(e.reason)}</span>}
-                  {Boolean(e.new_status) && <span>状态: {String(e.new_status)}</span>}
-                </div>
-              </Card>
-            )
-          })}
-        </div>
-      ),
-    })
-  }
-
-  if (causal.length > 0) {
-    sections.push({
-      key: 'causal',
-      label: '🔗 因果链',
-      badge: causal.length,
-      children: (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {causal.map((lk, i) => (
-            <Card key={i} size="small" style={{ borderLeft: '3px solid #f59e0b' }}>
-              <div style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
-                <Tag color="gold">重要度 {Number(lk.importance || 0)}</Tag>
-                {Boolean(lk.reversible) && <Tag color="green">可逆</Tag>}
-              </div>
-              <div style={{ fontSize: 12, lineHeight: 1.8 }}>
-                {Boolean(lk.cause) && <div><b>起因：</b>{String(lk.cause)}</div>}
-                {Boolean(lk.event) && <div><b>事件：</b>{String(lk.event)}</div>}
-                {Boolean(lk.decision) && <div><b>决策：</b>{String(lk.decision)}</div>}
-                {Boolean(lk.effect) && <div><b>影响：</b>{String(lk.effect)}</div>}
-              </div>
-            </Card>
-          ))}
-        </div>
-      ),
-    })
-  }
-
-  if (summary && summary.total > 0) {
-    sections.push({
-      key: 'audit',
-      label: '🛡️ 一致性审计',
-      badge: summary.total,
-      children: (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-            {summary.critical > 0 && <Tag color="red">严重 {summary.critical}</Tag>}
-            {summary.high > 0 && <Tag color="orange">高 {summary.high}</Tag>}
-            {summary.medium > 0 && <Tag color="gold">中 {summary.medium}</Tag>}
-            {summary.low > 0 && <Tag>低 {summary.low}</Tag>}
-          </div>
-          {issues.map((iss, i) => {
-            const sev = String(iss.severity || 'medium')
-            return (
-              <Card key={i} size="small" style={{ borderLeft: `3px solid ${sev === 'critical' ? '#ef4444' : sev === 'high' ? '#f59e0b' : sev === 'medium' ? '#f59e0b' : '#d9e4f3'}` }}>
-                <div style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
-                  <Tag color={SEV_COLOR[sev] || 'default'}>{SEV_LABEL[sev] || sev}</Tag>
-                  {Boolean(iss.issue_type) && <Tag>{String(iss.issue_type)}</Tag>}
-                </div>
-                <div style={{ fontWeight: 600, fontSize: 13 }}>{String(iss.title || '未命名问题')}</div>
-                {Boolean(iss.details) && <div style={{ fontSize: 12, color: '#5f7090', marginTop: 4 }}>{String(iss.details)}</div>}
-                <div style={{ fontSize: 11, color: '#93a4be', marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                  {Boolean(iss.character_name) && <span>角色: {String(iss.character_name)}</span>}
-                  {iss.reference_chapter_number != null && <span>参考: 第{String(iss.reference_chapter_number)}章</span>}
-                </div>
-              </Card>
-            )
-          })}
-        </div>
-      ),
-    })
-  }
-
-  if (sections.length === 0) {
-    return <Empty description="本章暂无叙事状态数据" style={{ marginTop: 60 }} />
-  }
-
-  return (
-    <div style={{ padding: 12 }}>
-      <Collapse
-        defaultActiveKey={sections.map(s => s.key)}
-        ghost
-        items={sections.map(s => ({
-          key: s.key,
-          label: (
-            <span style={{ fontWeight: 600, fontSize: 13 }}>
-              {s.label} <Tag style={{ marginLeft: 4 }}>{s.badge}</Tag>
-            </span>
-          ),
-          children: s.children,
-        }))}
-      />
-    </div>
-  )
-}
-
 /**
- * 项目内的章节剧情分析页面
- * 显示章节列表和带标注的章节内容
+ * 剧情分析（章节与正文）：原「章节管理」与「剧情分析」两页合并。
+ *
+ * 左侧章节列表：新建 / 编辑 / 生成 / 去 AI 味重写 / 场景生成 / 分析 / 删除；
+ * 右侧阅读区：正文（带记忆标注）+ 记忆标注 / 叙事状态侧栏；正文任务运行时就地显示流式面板。
+ * 任务编排在 useChapterWriteJobs，页面只管选中章节与阅读态。
  */
-const ChapterAnalysis: React.FC = () => {
-  const { projectId } = useParams<{ projectId: string }>();
-  const { deleteChapter } = useChapterSync();
-  
-  const [chapters, setChapters] = useState<ChapterItem[]>([]);
-  const [selectedChapter, setSelectedChapter] = useState<ChapterItem | null>(null);
-  const [annotationsData, setAnnotationsData] = useState<AnnotationsData | null>(null);
-  const [navigation, setNavigation] = useState<NavigationData | null>(null);
-  const [loading, setLoading] = useState(true);
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  BookOpen, ChevronLeft, ChevronRight, Copy, Download, Film, Layers, Loader2, PanelRightClose, PanelRightOpen,
+  Pencil, Plus, RefreshCw, Search, Trash2, Zap,
+} from 'lucide-react';
+import { toast } from 'sonner';
+import { cn } from '@/lib/utils';
+import { useStore } from '@/store';
+import { useChapterSync } from '@/store/hooks';
+import { chapterApi, type ChapterAnnotationsResponse } from '@/services/api';
+import { normalizeAnalysisData, type NormalizedAnalysisData } from '@/utils/chapterAnalysis';
+import type { MemoryAnnotation } from '@/utils/annotationSegments';
+import type { Chapter, ChapterCanGenerateResponse, ChapterGenerateRequest } from '@/types';
+import { OTHER_JOB_KINDS, WRITE_JOB_KINDS, useChapterWriteJobs } from '@/hooks/useChapterWriteJobs';
+import { AIJobBanner } from '@/components/ai-job/AIJobBanner';
+import AnnotatedText from '@/components/AnnotatedText';
+import MemorySidebar from '@/components/MemorySidebar';
+import { SceneGenerator } from '@/components/SceneGenerator';
+import { BatchGenerateModal } from '@/components/chapters/BatchGenerateModal';
+import { ChapterEditModal } from '@/components/chapters/ChapterEditModal';
+import { ChapterGenerateModal } from '@/components/chapters/ChapterGenerateModal';
+import { ChapterStreamPanel } from '@/components/chapters/ChapterStreamPanel';
+import { DeaiRewriteModal } from '@/components/chapters/DeaiRewriteModal';
+import { NarrativeStatePanel } from '@/components/chapters/NarrativeStatePanel';
+
+const STATUS_MAP: Record<string, { label: string; cls: string }> = {
+  draft: { label: '草稿', cls: 'bg-gray-100 text-gray-500' },
+  writing: { label: '生成中', cls: 'bg-blue-50 text-blue-600' },
+  completed: { label: '已完成', cls: 'bg-emerald-50 text-emerald-600' },
+};
+
+type SidebarTab = 'memory' | 'narrative';
+
+export default function ChapterAnalysis() {
+  const { currentProject, chapters } = useStore();
+  const { refreshChapters, deleteChapter, updateChapter } = useChapterSync();
+  const projectId = currentProject?.id;
+  const sorted = useMemo(() => [...chapters].sort((a, b) => a.chapter_number - b.chapter_number), [chapters]);
+
+  // ---------- 阅读区：选中章节 / 标注 / 叙事状态 ----------
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<Chapter | null>(null);
+  const [annotations, setAnnotations] = useState<ChapterAnnotationsResponse | null>(null);
+  const [narrative, setNarrative] = useState<NormalizedAnalysisData | null>(null);
+  const [narrativeLoading, setNarrativeLoading] = useState(false);
   const [contentLoading, setContentLoading] = useState(false);
   const [showAnnotations, setShowAnnotations] = useState(true);
-  const [activeAnnotationId, setActiveAnnotationId] = useState<string | undefined>();
-  const [sidebarVisible, setSidebarVisible] = useState(false);
-  const [chapterListVisible, setChapterListVisible] = useState(false);
-  const [scrollToContentAnnotation, setScrollToContentAnnotation] = useState<string | undefined>();
-  const [scrollToSidebarAnnotation, setScrollToSidebarAnnotation] = useState<string | undefined>();
-  const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
-  const [narrativeData, setNarrativeData] = useState<NormalizedAnalysisData | null>(null);
-  const [narrativeLoading, setNarrativeLoading] = useState(false);
-  const [sidebarTab, setSidebarTab] = useState<string>('memory');
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>('memory');
+  const [activeAnnotationId, setActiveAnnotationId] = useState<string>();
+  const [scrollToContent, setScrollToContent] = useState<string>();
+  const [scrollToSidebar, setScrollToSidebar] = useState<string>();
 
-  // 监听窗口大小变化
-  useEffect(() => {
-    const handleResize = () => {
-      setIsMobile(window.innerWidth < 768);
-    };
-    
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, []);
-
-  // 加载章节内容和标注
-  const loadChapterContent = useCallback(async (chapterId: string) => {
+  const loadSelected = useCallback(async (id: string) => {
+    setContentLoading(true);
     try {
-      setContentLoading(true);
-
-      const [chapterResponse, annotationsResponse, navigationResponse] = await Promise.all([
-        api.get(`/chapters/${chapterId}`),
-        api.get(`/chapters/${chapterId}/annotations`).catch(() => null),
-        api.get(`/chapters/${chapterId}/navigation`).catch(() => null),
-      ]);
-
-      // 同时加载叙事状态
+      const [ch, ann] = await Promise.all([chapterApi.getChapter(id), chapterApi.getAnnotations(id).catch(() => null)]);
+      setDetail(ch);
+      setAnnotations(ann);
       setNarrativeLoading(true);
-      chapterApi.getAnalysis(chapterId)
-        .then((data) => setNarrativeData(normalizeAnalysisData(data as unknown as Record<string, unknown>)))
-        .catch(() => setNarrativeData(null))
+      chapterApi.getAnalysis(id)
+        .then((d) => setNarrative(normalizeAnalysisData(d as unknown as Record<string, unknown>)))
+        .catch(() => setNarrative(null))
         .finally(() => setNarrativeLoading(false));
-
-      // 提取 data 属性
-      setSelectedChapter(chapterResponse.data || chapterResponse);
-      setAnnotationsData(annotationsResponse ? (annotationsResponse.data || annotationsResponse) : null);
-      setNavigation(navigationResponse ? (navigationResponse.data || navigationResponse) : null);
-    } catch (error) {
-      console.error('加载章节内容失败:', error);
-      message.error('加载章节内容失败');
+    } catch {
+      toast.error('加载章节内容失败');
     } finally {
       setContentLoading(false);
     }
   }, []);
 
-  // 加载章节列表
+  const selectChapter = useCallback((id: string) => {
+    setSelectedId(id);
+    setActiveAnnotationId(undefined);
+    void loadSelected(id);
+  }, [loadSelected]);
+
+  const clearSelection = useCallback(() => {
+    setSelectedId(null);
+    setDetail(null);
+    setAnnotations(null);
+    setNarrative(null);
+  }, []);
+
   useEffect(() => {
-    const loadChapters = async () => {
-      if (!projectId) return;
+    clearSelection();
+    if (projectId) void refreshChapters();
+  }, [projectId, refreshChapters, clearSelection]);
 
-      try {
-        setLoading(true);
-        const response = await api.get(`/chapters/project/${projectId}`);
-        // API 拦截器已经解析了 response.data，所以直接使用
-        const data = response.data || response;
-        const chapterList = data.items || [];
-        setChapters(chapterList);
+  // 首次：默认选第一个有正文的章
+  useEffect(() => {
+    if (selectedId || sorted.length === 0) return;
+    const first = sorted.find((c) => c.word_count > 0) ?? sorted[0];
+    selectChapter(first.id);
+  }, [sorted, selectedId, selectChapter]);
 
-        // 自动选择第一个有内容的章节
-        const firstChapterWithContent = chapterList.find((ch: ChapterItem) => ch.content && ch.content.trim() !== '');
-        if (firstChapterWithContent) {
-          loadChapterContent(firstChapterWithContent.id);
-        }
-      } catch (error) {
-        console.error('加载章节列表失败:', error);
-        message.error('加载章节列表失败');
-      } finally {
-        setLoading(false);
-      }
-    };
+  // ---------- 正文任务 ----------
+  const onChapterWritten = useCallback((id: string) => {
+    if (id === selectedId) void loadSelected(id);
+  }, [selectedId, loadSelected]);
 
-    loadChapters();
-  }, [projectId, loadChapterContent]);
+  const jobs = useChapterWriteJobs({ projectId, chapters: sorted, refreshChapters, onChapterWritten });
+  const streamChapterId = jobs.streamState?.chapterId;
 
-  const handleChapterSelect = (chapterId: string) => {
-    loadChapterContent(chapterId);
-    if (isMobile) {
-      setChapterListVisible(false);
-    }
-  };
+  // 正文任务开始 / 批量切章时自动切到该章
+  useEffect(() => {
+    if (streamChapterId && streamChapterId !== selectedId) selectChapter(streamChapterId);
+  }, [streamChapterId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleDeleteChapter = async (chapterId: string, chapterTitle: string) => {
+  // ---------- 弹窗 ----------
+  const [editState, setEditState] = useState<{ editing: Chapter | null } | null>(null);
+  const [genTarget, setGenTarget] = useState<{ chapter: Chapter; check: ChapterCanGenerateResponse } | null>(null);
+  const [rewriteTarget, setRewriteTarget] = useState<Chapter | null>(null);
+  const [showBatch, setShowBatch] = useState(false);
+  const [sceneTarget, setSceneTarget] = useState<{ outlineId: string; title: string } | null>(null);
+  const [syncing, setSyncing] = useState(false);
+
+  const handleSyncFromOutlines = async () => {
+    if (!projectId) return;
+    setSyncing(true);
     try {
-      await deleteChapter(chapterId);
-      
-      // 从本地状态中移除已删除的章节
-      setChapters(prev => prev.filter(ch => ch.id !== chapterId));
-      
-      // 如果删除的是当前选中的章节，清空选中状态
-      if (selectedChapter?.id === chapterId) {
-        setSelectedChapter(null);
-        setAnnotationsData(null);
-        setNavigation(null);
+      const res = await chapterApi.syncFromOutlines(projectId);
+      if (res.created > 0) {
+        toast.success(res.message);
+        await refreshChapters();
+      } else if (res.total_outlines === 0) {
+        toast.info('当前项目还没有章纲，请先在「故事大纲」→「章纲」中创建');
+      } else {
+        toast.info('所有章纲已有对应章节，无需同步');
       }
-      
-      message.success(`章节《${chapterTitle}》删除成功`);
-    } catch (error) {
-      console.error('删除章节失败:', error);
-      message.error('删除章节失败');
+    } catch {
+      toast.error('同步失败');
+    } finally {
+      setSyncing(false);
     }
   };
 
-  const handlePreviousChapter = () => {
-    if (navigation?.previous) {
-      loadChapterContent(navigation.previous.id);
-    }
-  };
-
-  const handleNextChapter = () => {
-    if (navigation?.next) {
-      loadChapterContent(navigation.next.id);
-    }
-  };
-
-  // 复制章节标题
-  const handleCopyTitle = async () => {
-    if (!selectedChapter) {
-      message.warning('请先选择一个章节');
-      return;
-    }
-
-    const titleText = `第${selectedChapter.chapter_number}章: ${selectedChapter.title}`;
-
+  const handleDelete = async (c: Chapter) => {
+    if (!confirm(`确定删除章节「${c.title}」吗？`)) return;
     try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(titleText);
-        message.success('章节标题已复制到剪贴板');
+      await deleteChapter(c.id);
+      if (c.id === selectedId) clearSelection();
+      toast.success('章节已删除');
+    } catch {
+      toast.error('删除失败');
+    }
+  };
+
+  const openGenerate = async (chapter: Chapter) => {
+    try {
+      const check = await chapterApi.checkCanGenerate(chapter.id);
+      if (!check.can_generate) {
+        toast.error(check.reason || '当前不满足生成条件');
         return;
       }
-
-      const textarea = document.createElement('textarea');
-      textarea.value = titleText;
-      textarea.style.position = 'fixed';
-      textarea.style.opacity = '0';
-      document.body.appendChild(textarea);
-      textarea.select();
-      const successful = document.execCommand('copy');
-      document.body.removeChild(textarea);
-
-      if (successful) {
-        message.success('章节标题已复制到剪贴板');
-      } else {
-        message.error('复制失败，请稍后重试');
-      }
-    } catch (error) {
-      console.error('复制章节标题失败:', error);
-      message.error('复制失败，请稍后重试');
+      setGenTarget({ chapter, check });
+      void jobs.loadRelatedCardsForChapter(chapter);
+    } catch {
+      toast.error('生成条件检查失败');
     }
   };
 
-  // 复制章节内容
-  const handleCopyContent = async () => {
-    if (!selectedChapter?.content) {
-      message.warning('当前章节没有可复制的内容');
-      return;
-    }
+  const confirmGenerate = async (body: ChapterGenerateRequest) => {
+    if (!genTarget) return;
+    const { chapter } = genTarget;
+    // 首次生成前：前置章节若有未分析（缺记忆状态）的，提醒用户是否继续
+    if (!(await jobs.confirmUnanalyzedPrevious(chapter))) return;
+    setGenTarget(null);
+    void jobs.startStream({ chapter, kind: 'chapter_generate', requestBody: body, mode: 'single' }).catch(() => { /* 已 toast / 已停止 */ });
+  };
 
+  const confirmRewrite = (promptIds: string[]) => {
+    if (!rewriteTarget) return;
+    const chapter = rewriteTarget;
+    setRewriteTarget(null);
+    void jobs.startStream({ chapter, kind: 'chapter_regenerate', requestBody: { prompt_ids: promptIds }, mode: 'single' }).catch(() => { /* 已 toast / 已停止 */ });
+  };
+
+  const saveStreamContent = async () => {
+    const state = jobs.streamState;
+    if (!state) return;
     try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(selectedChapter.content);
-        message.success('章节内容已复制到剪贴板');
-        return;
-      }
-
-      const textarea = document.createElement('textarea');
-      textarea.value = selectedChapter.content;
-      textarea.style.position = 'fixed';
-      textarea.style.opacity = '0';
-      document.body.appendChild(textarea);
-      textarea.select();
-      const successful = document.execCommand('copy');
-      document.body.removeChild(textarea);
-
-      if (successful) {
-        message.success('章节内容已复制到剪贴板');
-      } else {
-        message.error('复制失败，请稍后重试');
-      }
-    } catch (error) {
-      console.error('复制章节内容失败:', error);
-      message.error('复制失败，请稍后重试');
+      await updateChapter(state.chapterId, { content: state.content });
+      toast.success('内容已保存');
+      if (state.chapterId === selectedId) void loadSelected(state.chapterId);
+    } catch {
+      toast.error('保存失败');
     }
   };
 
-  const handleAnnotationClick = (annotation: MemoryAnnotation, source: 'content' | 'sidebar' = 'content') => {
+  const copyText = async (text: string, what: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success(`${what}已复制到剪贴板`);
+    } catch {
+      toast.error('复制失败，请稍后重试');
+    }
+  };
+
+  const handleAnnotationClick = (annotation: MemoryAnnotation, source: 'content' | 'sidebar') => {
     setActiveAnnotationId(annotation.id);
-    
     if (source === 'content') {
-      // 从内容区点击，滚动到侧边栏
-      setScrollToSidebarAnnotation(annotation.id);
-      // 清除滚动状态
-      setTimeout(() => setScrollToSidebarAnnotation(undefined), 100);
-      
-      if (isMobile) {
-        setSidebarVisible(true);
-      }
+      setSidebarTab('memory');
+      setSidebarOpen(true);
+      setScrollToSidebar(annotation.id);
+      setTimeout(() => setScrollToSidebar(undefined), 100);
     } else {
-      // 从侧边栏点击，滚动到内容区
-      setScrollToContentAnnotation(annotation.id);
-      // 清除滚动状态
-      setTimeout(() => setScrollToContentAnnotation(undefined), 100);
+      setScrollToContent(annotation.id);
+      setTimeout(() => setScrollToContent(undefined), 100);
     }
   };
 
-  const hasAnnotations = annotationsData && annotationsData.annotations.length > 0;
-
-  if (loading) {
-    return (
-      <div className="animate-fade-in space-y-6">
-        <PageHeader chapterCount={chapters.length} />
-        <div className="hh-panel flex items-center justify-center py-20">
-          <Spin size="large" tip="加载章节中...">
-            <div style={{ minHeight: 100 }} />
-          </Spin>
-        </div>
-      </div>
-    );
-  }
+  // ---------- 派生 ----------
+  const idx = sorted.findIndex((c) => c.id === selectedId);
+  const prev = idx > 0 ? sorted[idx - 1] : null;
+  const next = idx >= 0 && idx < sorted.length - 1 ? sorted[idx + 1] : null;
+  const totalWords = chapters.reduce((s, c) => s + c.word_count, 0);
+  const completedCount = chapters.filter((c) => c.status === 'completed').length;
+  const hasAnnotations = Boolean(annotations && annotations.annotations.length > 0);
+  const streamPanelVisible = Boolean(jobs.streamState && !jobs.panelHidden && jobs.streamState.chapterId === selectedId);
+  const { batchStatus, batchRunning, streamBusy } = jobs;
 
   return (
     <div className="animate-fade-in space-y-6">
-    <PageHeader chapterCount={chapters.length} />
-    <div style={{
-      display: 'flex',
-      height: isMobile ? 'auto' : 'calc(100dvh - 240px)',
-      minHeight: isMobile ? undefined : 520,
-      gap: isMobile ? 0 : 16,
-      flexDirection: isMobile ? 'column' : 'row'
-    }}>
-      {/* 左侧章节列表 - 桌面端 */}
-      {!isMobile && (
-        <Card
-          title="章节列表"
-          style={{ width: 280, height: '100%', overflow: 'hidden' }}
-          styles={{ body: { padding: 0, height: 'calc(100% - 57px)', overflow: 'auto' } }}
-        >
-          {chapters.length === 0 ? (
-            <Empty description="暂无章节" style={{ marginTop: 60 }} />
-          ) : (
-            <List
-              dataSource={chapters}
-              renderItem={(chapter) => (
-                <List.Item
-                  key={chapter.id}
-                  onClick={() => handleChapterSelect(chapter.id)}
-                  style={{
-                    cursor: 'pointer',
-                    padding: '12px 16px',
-                    background: selectedChapter?.id === chapter.id ? 'rgba(0,122,255,0.08)' : 'transparent',
-                    borderLeft: selectedChapter?.id === chapter.id ? '3px solid #007aff' : '3px solid transparent',
-                  }}
-                  actions={[
-                    <Popconfirm
-                      key="delete"
-                      title="删除章节"
-                      description={`确定要删除章节《${chapter.title}》吗？此操作不可恢复。`}
-                      onConfirm={(e) => {
-                        e?.stopPropagation();
-                        handleDeleteChapter(chapter.id, chapter.title);
-                      }}
-                      onCancel={(e) => e?.stopPropagation()}
-                      okText="确定"
-                      cancelText="取消"
-                    >
-                      <Button
-                        type="text"
-                        size="small"
-                        icon={<DeleteOutlined />}
-                        danger
-                        onClick={(e) => e.stopPropagation()}
-                        style={{ color: '#ef4444' }}
-                      />
-                    </Popconfirm>
-                  ]}
-                >
-                  <List.Item.Meta
-                    title={
-                      <span style={{ fontSize: 14, fontWeight: selectedChapter?.id === chapter.id ? 600 : 400 }}>
-                        第{chapter.chapter_number}章: {chapter.title}
-                      </span>
-                    }
-                    description={
-                      <Space size={4}>
-                        <Tag color={chapter.content && chapter.content.trim() !== '' ? 'success' : 'default'}>
-                          {chapter.word_count || 0}字
-                        </Tag>
-                      </Space>
-                    }
-                  />
-                </List.Item>
-              )}
-            />
-          )}
-        </Card>
+      {/* 头部 */}
+      <section className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
+        <div className="min-w-0">
+          <h1 className="text-[28px] font-semibold tracking-tight text-content md:text-[32px]">剧情分析</h1>
+          <p className="mt-2 max-w-[600px] text-sm leading-6 text-content-secondary">
+            {chapters.length > 0 ? `共 ${chapters.length} 章 · ${totalWords.toLocaleString()} 字。` : ''}
+            左侧管理章节，右侧阅读正文与分析结果。从章纲同步生成骨架，再逐章 / 批量交给 AI 成稿；已完成的章可用去 AI 味提示词重写。
+          </p>
+        </div>
+        <div className="flex shrink-0 flex-wrap items-center gap-2.5">
+          <button onClick={() => void handleSyncFromOutlines()} disabled={syncing} className="hh-btn-secondary">
+            {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+            从章纲同步
+          </button>
+          <button onClick={() => setShowBatch(true)} disabled={batchRunning || streamBusy} className="hh-btn-secondary">
+            <Layers className="h-4 w-4" />
+            批量生成
+          </button>
+          <button onClick={() => setEditState({ editing: null })} className="hh-btn-primary">
+            <Plus className="h-4 w-4" />
+            新建章节
+          </button>
+        </div>
+      </section>
+
+      {chapters.length > 0 && (
+        <section className="hh-panel grid grid-cols-2 divide-surface-border/80 md:grid-cols-4 md:divide-x">
+          <StatItem label="章节总数" value={chapters.length} />
+          <StatItem label="已完成" value={completedCount} />
+          <StatItem label="待生成" value={chapters.length - completedCount} />
+          <StatItem label="累计字数" value={totalWords.toLocaleString()} />
+        </section>
       )}
 
-      {/* 移动端章节列表抽屉 */}
-      {isMobile && (
-        <Drawer
-          title="章节列表"
-          placement="left"
-          onClose={() => setChapterListVisible(false)}
-          open={chapterListVisible}
-          width="85%"
-          styles={{ body: { padding: 0 } }}
-        >
-          {chapters.length === 0 ? (
-            <Empty description="暂无章节" style={{ marginTop: 60 }} />
-          ) : (
-            <List
-              dataSource={chapters}
-              renderItem={(chapter) => (
-                <List.Item
-                  key={chapter.id}
-                  onClick={() => handleChapterSelect(chapter.id)}
-                  style={{
-                    cursor: 'pointer',
-                    padding: '12px 16px',
-                    background: selectedChapter?.id === chapter.id ? 'rgba(0,122,255,0.08)' : 'transparent',
-                    borderLeft: selectedChapter?.id === chapter.id ? '3px solid #007aff' : '3px solid transparent',
-                  }}
-                  actions={[
-                    <Popconfirm
-                      key="delete"
-                      title="删除章节"
-                      description={`确定要删除章节《${chapter.title}》吗？此操作不可恢复。`}
-                      onConfirm={(e) => {
-                        e?.stopPropagation();
-                        handleDeleteChapter(chapter.id, chapter.title);
-                      }}
-                      onCancel={(e) => e?.stopPropagation()}
-                      okText="确定"
-                      cancelText="取消"
-                    >
-                      <Button
-                        type="text"
-                        size="small"
-                        icon={<DeleteOutlined />}
-                        danger
-                        onClick={(e) => e.stopPropagation()}
-                        style={{ color: '#ef4444' }}
-                      />
-                    </Popconfirm>
-                  ]}
-                >
-                  <List.Item.Meta
-                    title={
-                      <span style={{ fontSize: 14, fontWeight: selectedChapter?.id === chapter.id ? 600 : 400 }}>
-                        第{chapter.chapter_number}章: {chapter.title}
-                      </span>
-                    }
-                    description={
-                      <Space size={4}>
-                        <Tag color={chapter.content && chapter.content.trim() !== '' ? 'success' : 'default'}>
-                          {chapter.word_count || 0}字
-                        </Tag>
-                      </Space>
-                    }
-                  />
-                </List.Item>
+      {/* 批量生成进度 */}
+      {batchStatus && (
+        <section className="hh-panel space-y-3 p-5">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0 space-y-1">
+              <div className="flex items-center gap-2 text-sm">
+                <span className="font-medium text-content">
+                  {batchStatus.status === 'running'
+                    ? `批量串行生成中 · ${batchStatus.completed}/${batchStatus.total}`
+                    : batchStatus.status === 'completed'
+                      ? `批量生成完成 · ${batchStatus.total}/${batchStatus.total}`
+                      : batchStatus.status === 'cancelled'
+                        ? '批量生成已取消'
+                        : '批量生成失败'}
+                </span>
+                <span className="text-content-tertiary tabular-nums">{Math.round(batchStatus.progress)}%</span>
+              </div>
+              <p className="text-xs text-content-secondary">
+                {batchStatus.currentChapterNumber
+                  ? `当前章节：第 ${batchStatus.currentChapterNumber} 章 · ${batchStatus.currentChapterTitle}`
+                  : batchStatus.message}
+              </p>
+              {batchStatus.skippedCount > 0 && (
+                <p className="text-xs text-content-tertiary">已自动跳过 {batchStatus.skippedCount} 章已有内容的章节</p>
               )}
+              {batchStatus.errorMessage && <p className="text-xs text-red-500">{batchStatus.errorMessage}</p>}
+            </div>
+            {batchStatus.status === 'running' && (
+              <button onClick={jobs.cancelBatch} className="hh-btn-ghost hh-btn-sm text-red-500 hover:bg-red-50 hover:text-red-600">
+                取消
+              </button>
+            )}
+          </div>
+          <div className="hh-progress h-2">
+            <div
+              className={cn('hh-progress-bar', batchStatus.status === 'completed' && 'bg-emerald-500', batchStatus.status === 'error' && 'bg-red-500')}
+              style={{ width: `${Math.min(batchStatus.progress, 100)}%` }}
             />
-          )}
-        </Drawer>
+          </div>
+        </section>
       )}
 
-      {/* 右侧内容区域 */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
-        {!selectedChapter ? (
-          <Card style={{ height: '100%' }}>
-            <Empty description="请从左侧选择一个章节查看" style={{ marginTop: 100 }} />
-          </Card>
-        ) : (
-          <>
-            {/* 工具栏 */}
-            <Card size="small" style={{ marginBottom: isMobile ? 8 : 16 }}>
-              {isMobile ? (
-                // 移动端布局：两行显示
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                  {/* 第一行：标题和翻页按钮 */}
-                  <div style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    gap: 8
-                  }}>
-                    <Button
-                      icon={<LeftOutlined />}
-                      onClick={handlePreviousChapter}
-                      disabled={!navigation?.previous}
-                      title={navigation?.previous ? `上一章: ${navigation.previous.title}` : '已是第一章'}
-                      size="small"
-                    />
-                    <span style={{
-                      fontSize: 14,
-                      fontWeight: 600,
-                      flex: 1,
-                      textAlign: 'center',
-                      whiteSpace: 'nowrap',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      padding: '0 8px'
-                    }}>
-                      第{selectedChapter.chapter_number}章: {selectedChapter.title}
-                    </span>
-                    <Button
-                      icon={<RightOutlined />}
-                      onClick={handleNextChapter}
-                      disabled={!navigation?.next}
-                      title={navigation?.next ? `下一章: ${navigation.next.title}` : '已是最后一章'}
-                      size="small"
-                    />
-                  </div>
+      {/* 后台 AI 任务横幅：分析 / 场景 / 仿写常驻；正文任务在面板不可见（后台运行 / 看别的章）时也进横幅 */}
+      <AIJobBanner projectId={projectId} kinds={streamPanelVisible ? OTHER_JOB_KINDS : [...WRITE_JOB_KINDS, ...OTHER_JOB_KINDS]} />
 
-                  {/* 第二行：章节、复制按钮、开关、分析按钮 */}
-                  <div style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    gap: 8
-                  }}>
-                    <div style={{ display: 'flex', gap: 8 }}>
-                      <Button
-                        icon={<UnorderedListOutlined />}
-                        onClick={() => setChapterListVisible(true)}
-                        size="small"
-                      >
-                        章节
-                      </Button>
-                      <Button
-                        icon={<CopyOutlined />}
-                        onClick={handleCopyTitle}
-                        size="small"
-                        title="复制章节标题"
-                      >
-                        复制标题
-                      </Button>
-                      <Button
-                        icon={<CopyOutlined />}
-                        onClick={handleCopyContent}
-                        size="small"
-                        disabled={!selectedChapter?.content}
-                        title="复制章节内容"
-                      >
-                        复制内容
-                      </Button>
+      {sorted.length === 0 ? (
+        <section className="hh-panel flex flex-col items-center px-6 py-14 text-center">
+          <span className="flex h-14 w-14 items-center justify-center bg-brand/10 text-brand">
+            <BookOpen className="h-7 w-7" />
+          </span>
+          <h2 className="mt-5 text-xl font-semibold tracking-tight text-content">还没有章节</h2>
+          <p className="mt-2 max-w-md text-sm leading-6 text-content-secondary">
+            点击右上角「从章纲同步」把章纲一键转成章节骨架，或「新建章节」手动添加。
+          </p>
+        </section>
+      ) : (
+        <div className="grid gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
+          {/* 左栏：章节列表 */}
+          <section className="hh-panel divide-y divide-surface-border/80 overflow-hidden lg:max-h-[calc(100dvh-220px)] lg:overflow-y-auto">
+            {sorted.map((c) => {
+              const status = STATUS_MAP[c.status] || STATUS_MAP.draft;
+              const isSelected = c.id === selectedId;
+              const generating = jobs.isGenerating(c.id);
+              const currentBatchChapter = batchRunning && batchStatus?.currentChapterId === c.id;
+              const analyzing = jobs.analyzingChapterIds.has(c.id);
+              const canWrite = !generating && !batchRunning && !streamBusy;
+              return (
+                <div
+                  key={c.id}
+                  onClick={() => selectChapter(c.id)}
+                  className={cn(
+                    'cursor-pointer border-l-2 px-4 py-3 transition-colors',
+                    isSelected ? 'border-brand bg-brand/[0.06]' : 'border-transparent hover:bg-brand/[0.04]',
+                    currentBatchChapter && !isSelected && 'bg-brand/[0.03]',
+                  )}
+                >
+                  <div className="flex items-center gap-3">
+                    <div
+                      className={cn(
+                        'flex h-8 w-8 flex-shrink-0 items-center justify-center text-sm font-semibold tabular-nums',
+                        c.status === 'completed' ? 'bg-brand/10 text-brand' : 'bg-surface-hover text-content-secondary',
+                      )}
+                    >
+                      {c.chapter_number}
                     </div>
-
-                    {hasAnnotations && (
-                      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                        <Switch
-                          checked={showAnnotations}
-                          onChange={setShowAnnotations}
-                          checkedChildren={<EyeOutlined />}
-                          unCheckedChildren={<EyeInvisibleOutlined />}
-                          size="small"
-                          style={{
-                            flexShrink: 0,
-                            height: 16,
-                            minHeight: 16,
-                            lineHeight: '16px'
-                          }}
-                        />
-                        <Button
-                          icon={<MenuOutlined />}
-                          onClick={() => setSidebarVisible(true)}
-                          size="small"
-                        >
-                          分析
-                        </Button>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className={cn('truncate text-sm text-content', isSelected ? 'font-semibold' : 'font-medium')}>{c.title}</span>
+                        <span className={cn('flex-shrink-0 px-1.5 py-0.5 text-[10px] font-medium', status.cls)}>{status.label}</span>
                       </div>
-                    )}
+                      <p className="mt-0.5 text-xs text-content-tertiary tabular-nums">
+                        {c.word_count > 0 ? `${c.word_count.toLocaleString()} 字` : '暂无内容'}
+                        {currentBatchChapter && <span className="ml-2 text-brand">串行生成中</span>}
+                      </p>
+                    </div>
                   </div>
+                  <div className="mt-1.5 flex items-center gap-0.5 pl-11" onClick={(e) => e.stopPropagation()}>
+                    <button onClick={() => setEditState({ editing: c })} className="hh-icon-btn-plain h-7 w-7 hover:text-brand" title="编辑" aria-label="编辑">
+                      <Pencil className="h-3.5 w-3.5" />
+                    </button>
+                    {c.status === 'completed' && c.word_count > 0 ? (
+                      <button
+                        onClick={() => setRewriteTarget(c)}
+                        disabled={!canWrite}
+                        className="hh-icon-btn-plain h-7 w-7 hover:text-brand"
+                        title="去 AI 味重写（按项目提示词重写并覆盖正文）"
+                        aria-label="去 AI 味重写"
+                      >
+                        {generating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => void openGenerate(c)}
+                        disabled={!canWrite}
+                        className="hh-icon-btn-plain h-7 w-7 hover:text-brand"
+                        title="AI 生成"
+                        aria-label="AI 生成"
+                      >
+                        {generating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
+                      </button>
+                    )}
+                    {c.chapter_outline_id && (
+                      <button
+                        onClick={() => setSceneTarget({ outlineId: c.chapter_outline_id!, title: c.title })}
+                        className="hh-icon-btn-plain h-7 w-7 hover:text-brand"
+                        title="场景生成"
+                        aria-label="场景生成"
+                      >
+                        <Film className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                    {c.status === 'completed' && (
+                      <button
+                        onClick={() => void jobs.handleAnalyze(c)}
+                        disabled={analyzing}
+                        className="hh-icon-btn-plain h-7 w-7 hover:text-brand"
+                        title="分析（提取记忆 / 叙事状态 / 一致性）"
+                        aria-label="分析"
+                      >
+                        {analyzing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
+                      </button>
+                    )}
+                    <button onClick={() => void handleDelete(c)} className="hh-icon-btn-plain h-7 w-7 hover:text-red-500" title="删除" aria-label="删除">
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </section>
+
+          {/* 右栏：流式面板 / 阅读区 */}
+          {streamPanelVisible && jobs.streamState ? (
+            <ChapterStreamPanel
+              streamState={jobs.streamState}
+              streamJob={jobs.streamJob}
+              streamDone={jobs.streamDone}
+              batchRunning={batchRunning}
+              showProcess={jobs.showProcess}
+              onToggleProcess={() => jobs.setShowProcess((v) => !v)}
+              onHide={jobs.hideStreamPanel}
+              onCancel={jobs.cancelStream}
+              onClose={jobs.closeStreamPanel}
+              relatedCards={jobs.relatedCards}
+              loadingCards={jobs.loadingCards}
+              onContentChange={jobs.setStreamContent}
+              onSave={saveStreamContent}
+            />
+          ) : (
+            <section className="hh-panel flex min-h-[520px] flex-col overflow-hidden">
+              {!selectedId || !detail ? (
+                <div className="flex flex-1 items-center justify-center text-sm text-content-tertiary">
+                  {contentLoading ? <Loader2 className="h-5 w-5 animate-spin text-brand" /> : '从左侧选择一个章节查看'}
                 </div>
               ) : (
-                // 桌面端布局：保持原样
-                <div style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center'
-                }}>
-                  <Space>
-                    <Button
-                      icon={<LeftOutlined />}
-                      onClick={handlePreviousChapter}
-                      disabled={!navigation?.previous}
-                      title={navigation?.previous ? `上一章: ${navigation.previous.title}` : '已是第一章'}
-                    >
-                      上一章
-                    </Button>
-                    <span style={{ fontSize: 16, fontWeight: 600 }}>
-                      第{selectedChapter.chapter_number}章: {selectedChapter.title}
-                    </span>
-                    <Button
-                      icon={<RightOutlined />}
-                      onClick={handleNextChapter}
-                      disabled={!navigation?.next}
-                      title={navigation?.next ? `下一章: ${navigation.next.title}` : '已是最后一章'}
-                    >
-                      下一章
-                    </Button>
-                  </Space>
+                <>
+                  {/* 工具栏 */}
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-surface-border/80 px-5 py-3">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <button onClick={() => prev && selectChapter(prev.id)} disabled={!prev} className="hh-icon-btn-plain h-8 w-8" title={prev ? `上一章：${prev.title}` : '已是第一章'} aria-label="上一章">
+                        <ChevronLeft className="h-4 w-4" />
+                      </button>
+                      <span className="truncate text-sm font-semibold text-content">第 {detail.chapter_number} 章：{detail.title}</span>
+                      <button onClick={() => next && selectChapter(next.id)} disabled={!next} className="hh-icon-btn-plain h-8 w-8" title={next ? `下一章：${next.title}` : '已是最后一章'} aria-label="下一章">
+                        <ChevronRight className="h-4 w-4" />
+                      </button>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button onClick={() => void copyText(`第${detail.chapter_number}章: ${detail.title}`, '章节标题')} className="hh-chip flex items-center gap-1 px-2 py-1 text-[11px]">
+                        <Copy className="h-3 w-3" />
+                        复制标题
+                      </button>
+                      <button onClick={() => void copyText(detail.content || '', '章节内容')} disabled={!detail.content} className="hh-chip flex items-center gap-1 px-2 py-1 text-[11px] disabled:opacity-50">
+                        <Copy className="h-3 w-3" />
+                        复制内容
+                      </button>
+                      {hasAnnotations && (
+                        <label className="flex cursor-pointer items-center gap-1.5 text-xs text-content-secondary">
+                          <input type="checkbox" checked={showAnnotations} onChange={(e) => setShowAnnotations(e.target.checked)} />
+                          显示标注
+                        </label>
+                      )}
+                      <button onClick={() => setSidebarOpen((v) => !v)} className="hh-icon-btn-plain h-8 w-8" title={sidebarOpen ? '隐藏分析面板' : '显示分析面板'} aria-label="分析面板">
+                        {sidebarOpen ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
+                      </button>
+                    </div>
+                  </div>
+                  {hasAnnotations && annotations && (
+                    <p className="border-b border-surface-border/80 px-5 py-2 text-xs text-content-tertiary">
+                      共 {annotations.summary.total_annotations} 个标注：
+                      {annotations.summary.hooks > 0 && ` 🎣${annotations.summary.hooks}个钩子`}
+                      {annotations.summary.foreshadows > 0 && ` 🌟${annotations.summary.foreshadows}个伏笔`}
+                      {annotations.summary.plot_points > 0 && ` 💎${annotations.summary.plot_points}个情节点`}
+                      {annotations.summary.character_events > 0 && ` 👤${annotations.summary.character_events}个角色事件`}
+                    </p>
+                  )}
 
-                  <Space>
-                    <Button
-                      icon={<CopyOutlined />}
-                      onClick={handleCopyTitle}
-                      title="复制章节标题"
-                    >
-                      复制标题
-                    </Button>
-                    <Button
-                      icon={<CopyOutlined />}
-                      onClick={handleCopyContent}
-                      disabled={!selectedChapter?.content}
-                      title="复制章节内容"
-                    >
-                      复制内容
-                    </Button>
-                    {hasAnnotations && (
-                      <>
-                        <Switch
-                          checked={showAnnotations}
-                          onChange={setShowAnnotations}
-                          checkedChildren={<EyeOutlined />}
-                          unCheckedChildren={<EyeInvisibleOutlined />}
-                        />
-                        <span style={{ fontSize: 13, color: '#5f7090' }}>显示标注</span>
-                      </>
+                  <div className="flex flex-1 flex-col gap-4 p-5 xl:flex-row">
+                    {/* 正文 */}
+                    <div className="min-w-0 flex-1 xl:max-h-[calc(100dvh-320px)] xl:overflow-y-auto">
+                      {contentLoading ? (
+                        <div className="flex items-center gap-2 py-6 text-xs text-content-secondary">
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          加载中…
+                        </div>
+                      ) : !detail.content ? (
+                        <div className="py-10 text-center text-sm text-content-tertiary">本章还没有正文：点左侧 ⚡ 交给 AI 生成，或 ✎ 手动编辑。</div>
+                      ) : (
+                        <>
+                          {!hasAnnotations && (
+                            <p className="mb-4 border border-dashed border-surface-border bg-white/60 px-3 py-2 text-xs text-content-tertiary">
+                              该章尚未分析，没有记忆标注。点左侧 🔍 分析后可在正文里高亮钩子 / 伏笔 / 情节点。
+                            </p>
+                          )}
+                          {showAnnotations && hasAnnotations && annotations ? (
+                            <AnnotatedText
+                              content={detail.content}
+                              annotations={annotations.annotations}
+                              onAnnotationClick={(a) => handleAnnotationClick(a, 'content')}
+                              activeAnnotationId={activeAnnotationId}
+                              scrollToAnnotation={scrollToContent}
+                              style={{ lineHeight: 2, fontSize: 16 }}
+                            />
+                          ) : (
+                            <div className="whitespace-pre-wrap break-words text-base leading-8 text-content">{detail.content}</div>
+                          )}
+                        </>
+                      )}
+                    </div>
+
+                    {/* 侧栏：记忆标注 / 叙事状态 */}
+                    {sidebarOpen && (
+                      <aside className="border-t border-surface-border/80 pt-4 xl:w-[380px] xl:shrink-0 xl:border-l xl:border-t-0 xl:pl-4 xl:pt-0">
+                        <div className="mb-3 flex gap-1">
+                          {([['memory', '记忆标注'], ['narrative', '叙事状态']] as const).map(([key, label]) => (
+                            <button
+                              key={key}
+                              onClick={() => setSidebarTab(key)}
+                              className={cn('hh-chip px-3 py-1 text-xs', sidebarTab === key ? 'bg-brand text-white' : 'text-content-secondary')}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                        <div className="xl:max-h-[calc(100dvh-380px)] xl:overflow-y-auto">
+                          {sidebarTab === 'memory' ? (
+                            hasAnnotations && annotations ? (
+                              <MemorySidebar
+                                annotations={annotations.annotations}
+                                activeAnnotationId={activeAnnotationId}
+                                onAnnotationClick={(a) => handleAnnotationClick(a, 'sidebar')}
+                                scrollToAnnotation={scrollToSidebar}
+                              />
+                            ) : (
+                              <p className="py-8 text-center text-xs text-content-tertiary">暂无标注数据</p>
+                            )
+                          ) : (
+                            <NarrativeStatePanel data={narrative} loading={narrativeLoading} />
+                          )}
+                        </div>
+                      </aside>
                     )}
-                  </Space>
-                </div>
+                  </div>
+                </>
               )}
+            </section>
+          )}
+        </div>
+      )}
 
-              {hasAnnotations && annotationsData && (
-                <div style={{
-                  marginTop: 12,
-                  fontSize: isMobile ? 11 : 12,
-                  color: '#93a4be',
-                  lineHeight: 1.5
-                }}>
-                  共有 {annotationsData.summary.total_annotations} 个标注：
-                  {annotationsData.summary.hooks > 0 && ` 🎣${annotationsData.summary.hooks}个钩子`}
-                  {annotationsData.summary.foreshadows > 0 &&
-                    ` 🌟${annotationsData.summary.foreshadows}个伏笔`}
-                  {annotationsData.summary.plot_points > 0 &&
-                    ` 💎${annotationsData.summary.plot_points}个情节点`}
-                  {annotationsData.summary.character_events > 0 &&
-                    ` 👤${annotationsData.summary.character_events}个角色事件`}
-                </div>
-              )}
-            </Card>
-
-            {/* 内容区域 */}
-            <div style={{
-              flex: 1,
-              display: 'flex',
-              gap: isMobile ? 0 : 16,
-              overflow: 'hidden'
-            }}>
-              {/* 章节内容 */}
-              <Card
-                style={{ flex: 1, overflow: 'auto' }}
-                styles={{ body: { padding: isMobile ? '12px' : '24px' } }}
-                loading={contentLoading}
-              >
-                {!contentLoading && (
-                  <>
-                    {!hasAnnotations && (
-                      <Alert
-                        message="暂无分析数据"
-                        description="该章节尚未进行AI分析，无法显示记忆标注。"
-                        type="info"
-                        showIcon
-                        style={{ marginBottom: 24 }}
-                      />
-                    )}
-
-                    {showAnnotations && hasAnnotations && annotationsData ? (
-                      <AnnotatedText
-                        content={selectedChapter.content}
-                        annotations={annotationsData.annotations}
-                        onAnnotationClick={(annotation) => handleAnnotationClick(annotation, 'content')}
-                        activeAnnotationId={activeAnnotationId}
-                        scrollToAnnotation={scrollToContentAnnotation}
-                        style={{
-                          lineHeight: isMobile ? 1.8 : 2,
-                          fontSize: isMobile ? 14 : 16,
-                        }}
-                      />
-                    ) : (
-                      <div
-                        style={{
-                          lineHeight: isMobile ? 1.8 : 2,
-                          fontSize: isMobile ? 14 : 16,
-                          whiteSpace: 'pre-wrap',
-                          wordBreak: 'break-word',
-                        }}
-                      >
-                        {selectedChapter.content}
-                      </div>
-                    )}
-                  </>
-                )}
-              </Card>
-
-              {/* 右侧侧边栏（桌面端）：记忆标注 + 叙事状态 */}
-              {!isMobile && (
-                <Card
-                  style={{ width: 420, overflow: 'auto' }}
-                  styles={{ body: { padding: 0 } }}
-                >
-                  <Tabs
-                    activeKey={sidebarTab}
-                    onChange={setSidebarTab}
-                    centered
-                    size="small"
-                    style={{ height: '100%' }}
-                    items={[
-                      {
-                        key: 'memory',
-                        label: '记忆标注',
-                        children: hasAnnotations && annotationsData ? (
-                          <MemorySidebar
-                            annotations={annotationsData.annotations}
-                            activeAnnotationId={activeAnnotationId}
-                            onAnnotationClick={(annotation) => handleAnnotationClick(annotation, 'sidebar')}
-                            scrollToAnnotation={scrollToSidebarAnnotation}
-                          />
-                        ) : (
-                          <Empty description="暂无标注数据" style={{ marginTop: 60 }} />
-                        ),
-                      },
-                      {
-                        key: 'narrative',
-                        label: '叙事状态',
-                        children: (
-                          <NarrativeStatePanel data={narrativeData} loading={narrativeLoading} />
-                        ),
-                      },
-                    ]}
-                  />
-                </Card>
-              )}
-            </div>
-
-            {/* 移动端抽屉 */}
-            {hasAnnotations && annotationsData && (
-              <Drawer
-                title="章节分析"
-                placement="right"
-                onClose={() => setSidebarVisible(false)}
-                open={sidebarVisible}
-                width={isMobile ? '90%' : '80%'}
-              >
-                <MemorySidebar
-                  annotations={annotationsData.annotations}
-                  activeAnnotationId={activeAnnotationId}
-                  onAnnotationClick={(annotation) => {
-                    handleAnnotationClick(annotation, 'sidebar');
-                    setSidebarVisible(false);
-                  }}
-                  scrollToAnnotation={scrollToSidebarAnnotation}
-                />
-              </Drawer>
-            )}
-          </>
-        )}
-      </div>
+      {/* 弹窗 */}
+      {projectId && (
+        <ChapterEditModal
+          open={editState !== null}
+          projectId={projectId}
+          editing={editState?.editing ?? null}
+          defaultChapterNumber={sorted.length > 0 ? sorted[sorted.length - 1].chapter_number + 1 : 1}
+          onClose={() => setEditState(null)}
+          onSaved={(id) => {
+            void refreshChapters();
+            if (id === selectedId) void loadSelected(id);
+            else if (!editState?.editing) selectChapter(id);
+          }}
+        />
+      )}
+      {projectId && genTarget && (
+        <ChapterGenerateModal
+          open
+          projectId={projectId}
+          chapter={genTarget.chapter}
+          genCheck={genTarget.check}
+          relatedCards={jobs.relatedCards}
+          loadingCards={jobs.loadingCards}
+          onClose={() => setGenTarget(null)}
+          onConfirm={(body) => void confirmGenerate(body)}
+        />
+      )}
+      {projectId && rewriteTarget && (
+        <DeaiRewriteModal
+          open
+          projectId={projectId}
+          chapter={rewriteTarget}
+          busy={streamBusy || batchRunning}
+          onClose={() => setRewriteTarget(null)}
+          onConfirm={confirmRewrite}
+        />
+      )}
+      <BatchGenerateModal
+        open={showBatch}
+        chapters={sorted}
+        onClose={() => setShowBatch(false)}
+        onStart={(args) => {
+          setShowBatch(false);
+          void jobs.startBatch(args);
+        }}
+      />
+      {sceneTarget && (
+        <SceneGenerator
+          chapterOutlineId={sceneTarget.outlineId}
+          chapterTitle={sceneTarget.title}
+          projectId={projectId}
+          onClose={() => setSceneTarget(null)}
+          onComplete={() => void refreshChapters()}
+        />
+      )}
     </div>
-    </div>
-  );
-};
-
-function PageHeader({ chapterCount }: { chapterCount: number }) {
-  return (
-    <section className="min-w-0">
-      <h1 className="text-[28px] font-semibold tracking-tight text-content md:text-[32px]">剧情分析</h1>
-      <p className="mt-2 max-w-[600px] text-sm leading-6 text-content-secondary">
-        逐章查看 AI 分析结果：正文中的钩子、伏笔、情节点标注，以及叙事状态与一致性审计。
-        {chapterCount > 0 && ` 共 ${chapterCount} 章。`}
-      </p>
-    </section>
   );
 }
 
-export default ChapterAnalysis;
+function StatItem({ label, value }: { label: string; value: number | string }) {
+  return (
+    <div className="px-5 py-4 md:px-6">
+      <p className="text-xs text-content-tertiary">{label}</p>
+      <p className="mt-1 text-2xl font-semibold tracking-tight text-content tabular-nums">{value}</p>
+    </div>
+  );
+}

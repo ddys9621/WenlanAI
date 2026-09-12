@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.exceptions import RequestValidationError
+from fastapi.encoders import jsonable_encoder
 from contextlib import asynccontextmanager
 
 from app.config import settings as config_settings
@@ -109,11 +110,13 @@ app = FastAPI(
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """处理请求验证错误"""
     logger.error(f"请求验证失败: {exc.errors()}")
+    # pydantic v2 的 field_validator 抛 ValueError 时 errors()[i]["ctx"]["error"] 是异常对象，直接塞进 JSONResponse 会
+    # TypeError 变成 500；用 jsonable_encoder 与 FastAPI 默认处理器保持一致
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content={
             "detail": "请求参数验证失败",
-            "errors": exc.errors()
+            "errors": jsonable_encoder(exc.errors())
         }
     )
 
