@@ -3,10 +3,7 @@ from typing import List, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 
-from app.models import (
-    PlotCard, PlotLine, ChapterOutline,
-    PlotCardPlotLineLink, ChapterOutlinePlotLineLink
-)
+from app.models import PlotCard, PlotLine, PlotCardPlotLineLink
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -100,36 +97,3 @@ class PlotLinkService:
             "removed_count": removed_count,
             "message": f"成功移除 {removed_count} 个剧情卡片关联"
         }
-
-    @staticmethod
-    async def get_plot_line_card_ids(
-        db: AsyncSession,
-        plot_line_id: str
-    ) -> List[str]:
-        """获取剧情线关联的剧情卡片ID列表"""
-        
-        result = await db.execute(
-            select(PlotCardPlotLineLink.plot_card_id).where(
-                PlotCardPlotLineLink.plot_line_id == plot_line_id
-            )
-        )
-        
-        # scalars() 返回的直接是字符串值，不是对象
-        return list(result.scalars().all())
-    
-    @staticmethod
-    async def get_plot_line_chapter_outlines(
-        db: AsyncSession,
-        plot_line_id: str
-    ) -> List[ChapterOutline]:
-        """获取剧情线关联的章纲列表"""
-        
-        query = select(ChapterOutline).join(
-            ChapterOutlinePlotLineLink,
-            ChapterOutline.id == ChapterOutlinePlotLineLink.chapter_outline_id
-        ).where(
-            ChapterOutlinePlotLineLink.plot_line_id == plot_line_id
-        ).order_by(ChapterOutline.chapter_number.asc())
-        
-        result = await db.execute(query)
-        return result.scalars().all()

@@ -27,55 +27,56 @@ router = APIRouter(prefix="/plot-lines", tags=["剧情线"])
 logger = get_logger(__name__)
 
 
+async def _serialize_plot_lines(db: AsyncSession, lines: List[PlotLine]) -> List[PlotLineResponse]:
+    """批量转响应模型：关联卡片 id、章纲数各一条 GROUP BY / IN 查询取齐，不随剧情线数增长"""
+    if not lines:
+        return []
+    line_ids = [line.id for line in lines]
+    card_ids_by_line: Dict[str, List[str]] = {lid: [] for lid in line_ids}
+    card_rows = await db.execute(
+        select(PlotCardPlotLineLink.plot_line_id, PlotCardPlotLineLink.plot_card_id)
+        .where(PlotCardPlotLineLink.plot_line_id.in_(line_ids))
+    )
+    for line_id, card_id in card_rows.all():
+        card_ids_by_line[line_id].append(card_id)
+    outline_rows = await db.execute(
+        select(ChapterOutlinePlotLineLink.plot_line_id, func.count(ChapterOutlinePlotLineLink.id))
+        .where(ChapterOutlinePlotLineLink.plot_line_id.in_(line_ids))
+        .group_by(ChapterOutlinePlotLineLink.plot_line_id)
+    )
+    outline_count_by_line = dict(outline_rows.all())
+
+    responses = []
+    for line in lines:
+        timeline_data: Dict[str, Any] | None = None
+        if line.timeline_data:
+            try:
+                timeline_data = json.loads(line.timeline_data)
+            except Exception:
+                timeline_data = None
+        plot_card_ids = card_ids_by_line[line.id]
+        responses.append(PlotLineResponse(
+            id=line.id,
+            project_id=line.project_id,
+            story_outline_id=line.story_outline_id,
+            title=line.title,
+            description=line.description,
+            line_type=line.line_type,
+            order_index=line.order_index,
+            estimated_chapters=line.estimated_chapters,
+            plot_cards=plot_card_ids,
+            timeline_data=timeline_data,
+            created_at=line.created_at,
+            updated_at=line.updated_at,
+            chapter_outline_count=outline_count_by_line.get(line.id, 0),
+            plot_card_count=len(plot_card_ids),
+        ))
+    return responses
+
+
 async def _serialize_plot_line(db: AsyncSession, line: PlotLine) -> PlotLineResponse:
-    """将剧情线 ORM 实例转换为响应模型，包含关联统计"""
-
-    timeline_data: Dict[str, Any] | None = None
-    if line.timeline_data:
-        try:
-            timeline_data = json.loads(line.timeline_data)
-        except Exception:
-            timeline_data = None
-
-    try:
-        plot_card_ids = await PlotLinkService.get_plot_line_card_ids(db, line.id)
-    except Exception as e:
-        logger.error(f"查询关联剧情卡片失败: {e}")
-        plot_card_ids = []
-
-    # 获取关联的章纲数量 - 使用服务层方法
-    try:
-        # 直接使用现有的服务方法
-        linked_outlines = await PlotLinkService.get_plot_line_chapter_outlines(db, line.id)
-        chapter_outline_count = len(linked_outlines)
-    except Exception as e:
-        logger.error(f"查询关联章纲数量失败: {e}")
-        chapter_outline_count = 0
-
-    # 构建统一的响应对象
-    response_data = {
-        "id": line.id,
-        "project_id": line.project_id,
-        "story_outline_id": line.story_outline_id,
-        "title": line.title,
-        "description": line.description,
-        "line_type": line.line_type,
-        "order_index": line.order_index,
-        "estimated_chapters": line.estimated_chapters,
-        "plot_cards": plot_card_ids,
-        "timeline_data": timeline_data,
-        "created_at": line.created_at,
-        "updated_at": line.updated_at,
-        # 统一的关联统计
-        "chapter_outlines": [{"id": f"mock_{i}"} for i in range(chapter_outline_count)],
-        "chapter_outline_count": chapter_outline_count,
-        "plot_card_count": len(plot_card_ids) if plot_card_ids else 0
-    }
-
-    logger.debug(f"剧情线响应数据构建完成: {line.title}")
-    response = PlotLineResponse(**response_data)
-
-    return response
+    """单条剧情线转响应模型（含关联统计）"""
+    return (await _serialize_plot_lines(db, [line]))[0]
 
 
 @router.get("/project/{project_id}", response_model=PlotLineListResponse)
@@ -106,12 +107,8 @@ async def get_plot_lines(
     query = query.offset(skip).limit(limit)
     result = await db.execute(query)
     lines = result.scalars().all()
-    
-    serialized_lines: List[PlotLineResponse] = []
-    for line in lines:
-        serialized_lines.append(await _serialize_plot_line(db, line))
 
-    return PlotLineListResponse(total=total, items=serialized_lines)
+    return PlotLineListResponse(total=total, items=await _serialize_plot_lines(db, list(lines)))
 
 
 @router.get("/{line_id}", response_model=PlotLineResponse)
@@ -310,7 +307,7 @@ def make_plot_lines_runner(
                 dimensions=request.dimensions,
                 strength=request.strength,
             )
-            return [(await _serialize_plot_line(db, line)).model_dump(mode="json") for line in lines]
+            return [item.model_dump(mode="json") for item in await _serialize_plot_lines(db, list(lines))]
 
     return runner
 

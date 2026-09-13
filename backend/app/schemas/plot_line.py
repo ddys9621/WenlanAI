@@ -41,8 +41,7 @@ class PlotLineResponse(PlotLineBase):
     timeline_data: Optional[Dict[str, Any]] = Field(None, description="时间线数据")
     created_at: datetime = Field(..., description="创建时间")
     updated_at: datetime = Field(..., description="更新时间")
-    # 关联统计字段 - 统一格式
-    chapter_outlines: Optional[List[Dict[str, str]]] = Field(default_factory=list, description="关联的章纲列表（用于统计）")
+    # 关联统计字段
     chapter_outline_count: int = Field(0, description="关联的章纲数量")
     plot_card_count: int = Field(0, description="关联的剧情卡片数量")
 
