@@ -162,6 +162,8 @@ export interface PlotBridge {
   title: string;
   goal: string;
   showoff_point: string;
+  /** 兑现方式枚举（题材模板 payoff_types 之一，如 打脸 / 扮猪吃虎）；LLM 未给出可识别值时为 null */
+  payoff_type?: string | null;
   golden_finger_usage: string | null;
   c1_intro: string | null;
   c2_build: string | null;

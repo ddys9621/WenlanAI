@@ -299,6 +299,10 @@ async def build_bridge_position(db: AsyncSession, ctx: Any) -> str:
             "next_bridge_goal", "（下一桥段未设定）"
         ),
         template=ctx.bridge_context.get("template") or "showoff",
+        opening=ctx.bridge_context.get("opening"),
+        prev_bridge_hook=ctx.bridge_context.get("prev_bridge_hook") or "",
+        shape=ctx.bridge_context.get("shape") or "standard",
+        c3_hook_style=ctx.bridge_context.get("c3_hook_style") or "none",
     )
     primary_secondary = ctx.bridge_context.get("primary_secondary")
     if text and primary_secondary:

@@ -89,6 +89,11 @@ class PlotBridge(Base):
         nullable=False,
         comment="装逼/爽点设计，如『即兴一首劝学诗征服大儒』",
     )
+    payoff_type = Column(
+        String(40),
+        nullable=True,
+        comment="兑现方式枚举（题材模板 payoff_types 之一，如 打脸 / 扮猪吃虎）；账本按类型统计避免长线套路重复",
+    )
     golden_finger_usage = Column(
         Text,
         nullable=True,

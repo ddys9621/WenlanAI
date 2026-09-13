@@ -2,11 +2,14 @@
 
 规则（设计文档 @/agent-docs/plans/2026-09-10-sub-line-anchoring-phase1.md §0.3）：
 - 且仅一条主线；桥段总数 T = max(1, round(estimated_chapters / 4))
-- 节点配额 = 最大余数法，每节点至少 1 个桥段
+- 节点配额 = 最大余数法，每节点至少 1 个桥段；份额优先用节点 chapters（篇幅），缺失时用 weight（重要性）
+- 主线 ≥ 5 个节点时首节点最多 OPENING_BEAT_MAX_BRIDGES 个桥段（开篇不拖），超出配额按份额回流
 - 桥段 n 覆盖第 4(n-1)+1 … 4n 章
-- 锚定支线（所有节点带 anchor_beat）：节点整体落进所锚定主线节点的一个桥段（merge → 末桥段，offset → 均匀散开避开末桥段）
+- 锚定支线（所有节点带 anchor_beat）：节点整体落进所锚定主线节点的一个桥段（merge → 末桥段，offset → 均匀散开避开末桥段）；
+  主推配额多于节点数时，权重最高的 offset 节点扩成 2 个连续桥段（用满预算）
 - 未锚定支线（旧数据）：节点按累计权重铺满全书 [0,1]，与桥段区间求交
 - 每桥段只保留一条主 B 线（role=primary），其余 mention；锚定支线主推桥段数受 estimated_chapters/4 配额约束
+- companion（伴生）支线：首次出场后到锚定终点之间没有任务的桥段自动补 mention（保温一句），不让线消失几十章
 """
 from __future__ import annotations
 
@@ -19,6 +22,10 @@ from app.utils.plot_line_types import normalize_plot_line_type
 
 CHAPTERS_PER_BRIDGE = 4
 SUB_BUDGET_SHARE = 0.4   # 支线总篇幅预算占全书上限（网文 B 线占比经验 20-40%）
+# 开篇节点（觉醒 / 金手指到手）最多占几个桥段：网文前 30 章定生死，开篇不能拖。
+# 只对 ≥ OPENING_CAP_MIN_BEATS 个节点的主线生效——节点更少时首节点是"卷"级单元，不夹。
+OPENING_BEAT_MAX_BRIDGES = 3
+OPENING_CAP_MIN_BEATS = 5
 
 
 class BridgePlanningPreconditionError(ValueError):
@@ -31,6 +38,7 @@ class BridgePlanningConflictError(RuntimeError):
 
 VALID_MODES: tuple[str, ...] = ("companion", "inserted", "converge")
 VALID_RELATIONS: tuple[str, ...] = ("offset", "merge")
+MENTION_FILL_MODES: tuple[str, ...] = ("companion",)   # 锚定区间内自动补保温的支线模式
 
 
 @dataclass(frozen=True)
@@ -38,9 +46,15 @@ class BeatData:
     index: int
     title: str
     description: str
-    weight: float
+    weight: float                    # 重要性（全书高潮最高）；主线篇幅优先用 chapters，缺失时才按 weight 分
     anchor_beat: int | None = None   # 锚定的主线节点 index；None = 未锚定（旧数据）
     relation: str = "offset"         # offset（与主线错峰推进）/ merge（汇入主线该节点的兑现桥段）
+    key: str = ""                    # 节点类型（opening / power_up / face_slap …），进桥段 prompt
+    chapters: int | None = None      # 本节点预计章数（篇幅）；None = 旧数据
+    location: str = ""               # 主要舞台（地图 / 势力 / 城市）
+    antagonist: str = ""             # 主要对手 / 压力来源及层级
+    realm: str = ""                  # 主角境界 / 实力 / 地位从哪到哪
+    phases: tuple[dict[str, Any], ...] = ()   # 长节点阶段拆分结果（bridge_phases.parse_phases 产出；空 = 未拆）
 
 
 @dataclass(frozen=True)
@@ -195,6 +209,9 @@ def parse_plot_line(line: Any) -> PlotLineData:
         except (TypeError, ValueError):
             weight = 0.0
         relation = b.get("relation")
+        chapters = _opt_int(b.get("chapters"))
+        raw_phases = b.get("phases")
+        phases = tuple(p for p in raw_phases if isinstance(p, dict)) if isinstance(raw_phases, list) else ()
         beats.append(BeatData(
             index=int(b.get("index", i + 1)),
             title=str(b.get("title") or f"节点{i + 1}").strip(),
@@ -202,6 +219,12 @@ def parse_plot_line(line: Any) -> PlotLineData:
             weight=weight,
             anchor_beat=_opt_int(b.get("anchor_beat")),
             relation=relation if relation in VALID_RELATIONS else "offset",
+            key=str(b.get("key") or "").strip(),
+            chapters=chapters if chapters and chapters > 0 else None,
+            location=str(b.get("location") or "").strip(),
+            antagonist=str(b.get("antagonist") or "").strip(),
+            realm=str(b.get("realm") or "").strip(),
+            phases=phases,
         ))
     beats.sort(key=lambda x: x.index)
     mode = raw.get("mode")
@@ -266,30 +289,31 @@ def _secondary_tasks(
     return tasks
 
 
-def _task(line: PlotLineData, beat: BeatData) -> SecondaryBeatTask:
+def _task(line: PlotLineData, beat: BeatData, start: float = 0.0, end: float = 1.0) -> SecondaryBeatTask:
     return SecondaryBeatTask(
         plot_line_id=line.id, line_title=line.title, line_type=line.line_type,
         beat_index=beat.index, beat_title=beat.title, beat_description=beat.description,
-        coverage_start=0.0, coverage_end=1.0, role="primary", relation=beat.relation,
+        coverage_start=start, coverage_end=end, role="primary", relation=beat.relation,
     )
 
 
-def _anchored_tasks(line: PlotLineData, bridges_by_beat: dict[int, list[int]]) -> dict[int, list[SecondaryBeatTask]]:
+def _anchored_tasks(
+    line: PlotLineData, bridges_by_beat: dict[int, list[int]], total_bridges: int
+) -> dict[int, list[SecondaryBeatTask]]:
     """锚定支线落位：每个支线节点整体进一个桥段（coverage 0→1），锚定区间外的桥段休眠。
 
     - merge：进所锚定主线节点的最后一个桥段（该节点的兑现桥段）
     - offset：在该节点的桥段里均匀散开；节点有 ≥2 个桥段时避开最后一个（兑现桥段留给主线）
     - anchor_beat 不是主线节点 index 时夹到最近的主线节点（容错，不抛错）
+    - 预算解耦：主推配额（estimated_chapters/4）多于节点数时，权重最高的 offset 节点扩成 2 个连续桥段
+      （前半 0→50%、后半 50→100%），只向同锚定节点内的相邻非末桥段扩，不与本线其他节点撞桥段
     """
-    main_indices = sorted(bridges_by_beat)
     grouped: dict[int, list[BeatData]] = {}
     for b in line.beats:
-        anchor = b.anchor_beat if b.anchor_beat in bridges_by_beat else min(
-            main_indices, key=lambda m: (abs(m - b.anchor_beat), m)
-        )
-        grouped.setdefault(anchor, []).append(b)
+        grouped.setdefault(_nearest_main_beat(b.anchor_beat, bridges_by_beat), []).append(b)
 
     out: dict[int, list[SecondaryBeatTask]] = {}
+    placement: dict[int, tuple[int, list[int]]] = {}   # beat.index → (落位桥段, 该锚定节点可用的 offset 候选桥段)
     for anchor in sorted(grouped):
         numbers = bridges_by_beat[anchor]
         offsets = [b for b in grouped[anchor] if b.relation != "merge"]
@@ -297,9 +321,21 @@ def _anchored_tasks(line: PlotLineData, bridges_by_beat: dict[int, list[int]]) -
         for k, b in enumerate(offsets):
             target = candidates[int((k + 0.5) * len(candidates) / len(offsets))]
             out.setdefault(target, []).append(_task(line, b))
+            placement[b.index] = (target, candidates)
         for b in grouped[anchor]:
             if b.relation == "merge":
                 out.setdefault(numbers[-1], []).append(_task(line, b))
+
+    spare = primary_quota(line.estimated_chapters, total_bridges) - len(line.beats)
+    offsets_by_weight = sorted((b for b in line.beats if b.relation != "merge"), key=lambda b: (-b.weight, b.index))
+    if spare >= 1 and offsets_by_weight:
+        top = offsets_by_weight[0]
+        target, candidates = placement[top.index]
+        for neighbour in (target + 1, target - 1):
+            if neighbour in candidates and neighbour not in out:
+                out[target] = [replace(t, coverage_end=0.5) if t.beat_index == top.index else t for t in out[target]]
+                out[neighbour] = [_task(line, top, 0.5, 1.0)]
+                break
     return out
 
 
@@ -361,6 +397,40 @@ def _apply_budget_caps(
     return tasks_by_bridge
 
 
+def _nearest_main_beat(anchor: int | None, bridges_by_beat: dict[int, list[int]]) -> int | None:
+    if anchor is None or not bridges_by_beat:
+        return None
+    if anchor in bridges_by_beat:
+        return anchor
+    return min(sorted(bridges_by_beat), key=lambda m: (abs(m - anchor), m))
+
+
+def _fill_companion_mentions(
+    tasks_by_bridge: dict[int, list[SecondaryBeatTask]], lines: list[PlotLineData], bridges_by_beat: dict[int, list[int]]
+) -> dict[int, list[SecondaryBeatTask]]:
+    """伴生型支线保温：从本线首次出场的桥段起，到锚定终点节点的最后一个桥段，没有任务的桥段补一条 mention。
+
+    引用最近一个已出场的支线节点（coverage 1→1 = 已完成，只带过现状）。首次出场之前不补——事件还没发生。
+    只对 MENTION_FILL_MODES 生效：inserted 是一次性插入后退场，converge 独立发展后并入，都不该被硬塞保温。
+    """
+    for line in lines:
+        if not is_anchored(line) or line.mode not in MENTION_FILL_MODES:
+            continue
+        present = sorted(n for n, ts in tasks_by_bridge.items() if any(t.plot_line_id == line.id for t in ts))
+        if not present:
+            continue
+        end_anchor = _nearest_main_beat(line.anchor_end_beat, bridges_by_beat)
+        last = max(bridges_by_beat[end_anchor]) if end_anchor is not None else present[-1]
+        latest: SecondaryBeatTask | None = None
+        for n in range(present[0], max(last, present[-1]) + 1):
+            mine = [t for t in tasks_by_bridge[n] if t.plot_line_id == line.id]
+            if mine:
+                latest = max(mine, key=lambda t: t.beat_index)
+            elif latest is not None:
+                tasks_by_bridge[n].append(replace(latest, role="mention", coverage_start=1.0, coverage_end=1.0))
+    return tasks_by_bridge
+
+
 def _line_budgets(
     tasks_by_bridge: dict[int, list[SecondaryBeatTask]], lines: list[PlotLineData], total: int
 ) -> tuple[LineBudget, ...]:
@@ -387,10 +457,27 @@ def _line_budgets(
     return tuple(out)
 
 
+def beat_shares(main: PlotLineData) -> list[float]:
+    """节点篇幅份额：所有节点都带 chapters 时按 chapters（重要性与篇幅分离），否则退回 weight。"""
+    if all(b.chapters for b in main.beats):
+        return [float(b.chapters) for b in main.beats]
+    return [b.weight for b in main.beats]
+
+
+def main_beat_quotas(main: PlotLineData, total: int) -> list[int]:
+    """主线节点 → 桥段配额：最大余数法 + 开篇节点上限（超出部分按份额回流给其余节点，总数不变）。"""
+    shares = beat_shares(main)
+    quotas = apportion(shares, total, minimum=1)
+    if len(quotas) >= OPENING_CAP_MIN_BEATS and quotas[0] > OPENING_BEAT_MAX_BRIDGES:
+        rest_total = sum(quotas) - OPENING_BEAT_MAX_BRIDGES
+        quotas = [OPENING_BEAT_MAX_BRIDGES, *apportion(shares[1:], rest_total, minimum=1)]
+    return quotas
+
+
 def compute_bridge_slots(lines: list[PlotLineData]) -> BridgeSlotPlan:
     main = select_main_line(lines)
     total = max(1, round(main.estimated_chapters / CHAPTERS_PER_BRIDGE))
-    quotas = apportion([b.weight for b in main.beats], total, minimum=1)
+    quotas = main_beat_quotas(main, total)
     total = sum(quotas)
     secondaries = [l for l in lines if l.line_type != "main" and l.beats]
 
@@ -408,13 +495,14 @@ def compute_bridge_slots(lines: list[PlotLineData]) -> BridgeSlotPlan:
     tasks_by_bridge: dict[int, list[SecondaryBeatTask]] = {n: [] for n in range(1, total + 1)}
     for line in secondaries:
         if is_anchored(line):
-            for n, ts in _anchored_tasks(line, bridges_by_beat).items():
+            for n, ts in _anchored_tasks(line, bridges_by_beat, total).items():
                 tasks_by_bridge[n].extend(ts)
         else:
             for n in range(1, total + 1):
                 tasks_by_bridge[n].extend(_secondary_tasks([line], (n - 1) / total, n / total))
     tasks_by_bridge = _resolve_roles(tasks_by_bridge, secondaries)
     tasks_by_bridge = _apply_budget_caps(tasks_by_bridge, secondaries, total)
+    tasks_by_bridge = _fill_companion_mentions(tasks_by_bridge, secondaries, bridges_by_beat)
 
     slots = [
         BridgeSlot(

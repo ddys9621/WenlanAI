@@ -33,6 +33,12 @@ class Project(Base):
     chapter_count = Column(Integer, comment="章节数量")
     narrative_perspective = Column(String(50), comment="叙事视角：first_person/third_person/omniscient")
     character_count = Column(Integer, default=5, comment="角色数量")
+    c3_hook_style = Column(
+        String(20),
+        default="none",
+        server_default="none",
+        comment="桥段 C3 兑现章末尾：none 不留钩子（默认，付费文）/ soft 收束+半钩（免费平台章末钩子）",
+    )
 
     # DEPRECATED：工程化桥段流水线固定进入桥段规划，业务代码不再读写此列；保留仅为兼容旧库（不做 DROP COLUMN）
     enable_bridge_planning = Column(

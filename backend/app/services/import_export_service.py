@@ -92,6 +92,7 @@ class ImportExportService:
             "chapter_count": project.chapter_count,
             "narrative_perspective": project.narrative_perspective,
             "character_count": project.character_count,
+            "c3_hook_style": project.c3_hook_style,
             "user_id": project.user_id,
             "created_at": project.created_at.isoformat() if project.created_at else None,
         }
@@ -774,6 +775,7 @@ class ImportExportService:
                 chapter_count=project_data.get("chapter_count"),
                 narrative_perspective=project_data.get("narrative_perspective"),
                 character_count=project_data.get("character_count"),
+                c3_hook_style=project_data.get("c3_hook_style") or "none",
                 current_words=project_data.get("current_words", 0),  # 保留原项目的字数
                 wizard_step=4,  # 导入的项目设置为向导完成状态
                 wizard_status="completed"  # 标记向导已完成

@@ -30,6 +30,24 @@ def _clip(value: Any, limit: int) -> str:
     return " ".join(str(value or "").split())[:limit]
 
 
+# ---------------- 节点结构化字段 ----------------
+
+def beat_facts_lines(beat: Any, indent: str = "  ") -> list[str]:
+    """节点类型 / 舞台 / 对手 / 境界（BeatData 的结构化字段；空字段跳过）。"""
+    lines: list[str] = []
+    if getattr(beat, "key", ""):
+        lines.append(f"{indent}节点类型：{beat.key}")
+    facts = [
+        f"{label}：{value}"
+        for label, value in (("舞台", getattr(beat, "location", "")), ("对手", getattr(beat, "antagonist", "")),
+                             ("境界", getattr(beat, "realm", "")))
+        if value
+    ]
+    if facts:
+        lines.append(indent + " ｜ ".join(facts))
+    return lines
+
+
 # ---------------- 大纲核心字段 ----------------
 
 def story_core_lines(fields: dict[str, Any]) -> list[str]:
@@ -68,6 +86,23 @@ def opening_block(fields: dict[str, Any], template: BridgeTemplate) -> str:
 
 # ---------------- 已填桥段账本 ----------------
 
+def payoff_type_stats_line(filled: list[Any], *, recent: int = 3) -> str:
+    """兑现方式全书统计：累计次数（多→少）+ 最近 recent 次序列 + 上一桥段同型警告。全部未标 → 空串。"""
+    types = [getattr(b, "payoff_type", None) for b in filled]
+    if not any(types):
+        return ""
+    counts: dict[str, int] = {}
+    for t in types:
+        if t:
+            counts[t] = counts.get(t, 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    text = "兑现方式累计：" + "、".join(f"{t}×{n}" for t, n in ranked)
+    text += "｜最近：" + " → ".join(t or "未标" for t in types[-recent:])
+    if types[-1]:
+        text += f"｜上一桥段用了「{types[-1]}」，本批第一个桥段不得再用"
+    return text
+
+
 async def filled_ledger_block(
     db: AsyncSession,
     project_id: str,
@@ -101,12 +136,16 @@ async def filled_ledger_block(
     for b in recent_ones:
         parts = [f"目标 {_clip(b.goal, 80)}"]
         if b.showoff_point:
-            parts.append(f"兑现 {_clip(b.showoff_point, 60)}")
+            tag = f"[{b.payoff_type}]" if getattr(b, "payoff_type", None) else ""
+            parts.append(f"兑现{tag} {_clip(b.showoff_point, 60)}")
         if b.c4_aftermath:
             parts.append(f"收尾 {_clip(b.c4_aftermath, 80)}")
         if b.next_bridge_hook:
             parts.append(f"钩子 {_clip(b.next_bridge_hook, 60)}")
         lines.append(f"- 桥段 {b.bridge_number}《{_clip(b.title, 20)}》：{'｜'.join(parts)}")
+    stats = payoff_type_stats_line(filled)
+    if stats:
+        lines.append(stats)
 
     text = "\n".join(lines)
     if older:
@@ -207,6 +246,7 @@ def build_fill_provenance(
     story_fields: list[str],
     pack_title: str | None,
     dimensions: dict[str, str],
+    phase: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """一次桥段填充调用"参考了什么、缺了什么"。落 plot_bridges.generation_meta，也随 SSE meta 事件下发。"""
     filled = list(prompt.slots_filled)
@@ -246,6 +286,7 @@ def build_fill_provenance(
             "ledger_bridge_numbers": list(ledger_numbers),
             "opening_rules": opening,
             "bridge_numbers": list(bridge_numbers),
+            "phase": dict(phase) if phase else None,
         },
         "tokens_estimate": prompt.actual_tokens_estimate,
         "warnings": warnings,

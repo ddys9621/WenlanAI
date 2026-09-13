@@ -1863,7 +1863,7 @@ async def _plot_lines_pipeline(
         )
 
         emit(f"生成主线（全书 {chapter_count} 章）...", 10)
-        main_lines = await service.generate_plot_lines(line_type="main", count=1, **common)
+        main_lines = await service.generate_plot_lines(line_type="main", count=1, chapter_count=chapter_count, **common)
         if not main_lines:
             raise _PlotPipelineError("主线生成失败：AI 未返回剧情线", 500)
         main = main_lines[0]
@@ -1895,14 +1895,20 @@ async def _plot_lines_pipeline(
             raise _PlotPipelineError(f"剧情线已生成但不满足桥段规划前置条件：{exc}", 400) from exc
 
         main_data = parse_plot_line(main)
+        message = "剧情线生成完成"
+        if plan.total_chapters != chapter_count:
+            # 桥段按 4 章取整（每节点至少 1 个桥段），实际章数可能与用户填的不同——必须明示，别让用户以为还是原数
+            message += f"（桥段按每桥段 4 章取整：实际规划 {plan.total_chapters} 章，共 {plan.total_bridges} 个桥段）"
+            emit(f"每桥段 4 章取整：实际规划 {plan.total_chapters} 章（你填的是 {chapter_count} 章）", 96)
         return {
-            "message": "剧情线生成完成",
+            "message": message,
             "main_line": {
                 "id": main.id, "title": main.title,
                 "estimated_chapters": main.estimated_chapters, "beat_count": len(main_data.beats),
             },
             "sub_lines": [{"id": s.id, "title": s.title} for s in sub_lines],
             "plan_preview": {"total_bridges": plan.total_bridges, "total_chapters": plan.total_chapters},
+            "chapter_count_requested": chapter_count,
             "sub_budget_cap": cap,
             "line_budgets": plan.to_dict()["line_budgets"],
         }

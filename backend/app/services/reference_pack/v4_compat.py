@@ -209,17 +209,20 @@ async def fetch_bridge_context(
         if not bridge:
             return None
 
-        # 查下一桥段
-        next_bridge = (await db.execute(
+        # 查上下桥段：下桥段目标给 C4 引子，上桥段钩子给非开篇 C1 承接
+        neighbours = (await db.execute(
             select(PlotBridge)
             .where(PlotBridge.project_id == bridge.project_id)
-            .where(PlotBridge.bridge_number == bridge.bridge_number + 1)
-        )).scalar_one_or_none()
+            .where(PlotBridge.bridge_number.in_([bridge.bridge_number - 1, bridge.bridge_number + 1]))
+        )).scalars().all()
+        next_bridge = next((b for b in neighbours if b.bridge_number == bridge.bridge_number + 1), None)
+        prev_bridge = next((b for b in neighbours if b.bridge_number == bridge.bridge_number - 1), None)
 
         # 题材模板：优先桥段填充时记录的 generation_meta.template，否则按项目 genre 解析
         import json
 
         from app.models.project import Project
+        from app.services.bridge_hook_style import normalize_c3_hook_style
         from app.services.bridge_templates import resolve_template
 
         recorded = None
@@ -244,6 +247,18 @@ async def fetch_bridge_context(
             if isinstance(t, dict) and t.get("role", "primary") != "mention"
         )
 
+        # 桥段形态：节点收官 / 全书高潮节点收官（需要主线节点权重定位高潮节点）
+        from app.services.bridge_shapes import SHAPE_STANDARD, bridge_shape, climax_beat_index
+        from app.services.bridge_slot_planner import parse_plot_line
+
+        shape = SHAPE_STANDARD
+        if bridge.plot_line_id and bridge.beat_index is not None:
+            from app.models.plot_line import PlotLine
+
+            line = (await db.execute(select(PlotLine).where(PlotLine.id == bridge.plot_line_id))).scalar_one_or_none()
+            climax = climax_beat_index(parse_plot_line(line)) if line is not None else None
+            shape = bridge_shape(bridge.beat_coverage_end, bridge.beat_index, climax)
+
         return {
             "title": bridge.title,
             "goal": bridge.goal,
@@ -251,6 +266,10 @@ async def fetch_bridge_context(
             "next_bridge_goal": next_bridge.goal if next_bridge else "（下一桥段未设定）",
             "template": template_key,
             "primary_secondary": primary_secondary,
+            "opening": bridge.bridge_number == 1,
+            "prev_bridge_hook": (prev_bridge.next_bridge_hook or "") if prev_bridge else "",
+            "shape": shape,
+            "c3_hook_style": normalize_c3_hook_style(getattr(project, "c3_hook_style", None)),
         }
     except Exception as exc:
         logger.warning("[v4_compat] fetch_bridge_context 失败: %s", exc)

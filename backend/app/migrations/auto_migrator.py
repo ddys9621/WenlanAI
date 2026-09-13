@@ -399,6 +399,30 @@ async def ensure_plot_bridge_generation_meta_column(engine: AsyncEngine):
             logger.info("✅ plot_bridges.generation_meta already exists")
 
 
+async def ensure_project_c3_hook_style_column(engine: AsyncEngine):
+    """Ensure projects.c3_hook_style exists（C3 兑现章末尾：none 不留钩子 / soft 半钩；默认 none 保持现状）。"""
+    async with engine.begin() as conn:
+        if not await column_exists(conn, "projects", "c3_hook_style"):
+            logger.info("🔧 Adding projects.c3_hook_style column (C3 章末风格开关)")
+            await apply_sql(conn, [
+                "ALTER TABLE projects ADD COLUMN c3_hook_style VARCHAR(20) DEFAULT 'none'",
+            ])
+        else:
+            logger.info("✅ projects.c3_hook_style already exists")
+
+
+async def ensure_plot_bridge_payoff_type_column(engine: AsyncEngine):
+    """Ensure plot_bridges.payoff_type exists（兑现方式枚举，nullable VARCHAR(40)；账本按类型统计避免长线套路重复）。"""
+    async with engine.begin() as conn:
+        if not await column_exists(conn, "plot_bridges", "payoff_type"):
+            logger.info("🔧 Adding plot_bridges.payoff_type column (兑现方式枚举)")
+            await apply_sql(conn, [
+                "ALTER TABLE plot_bridges ADD COLUMN payoff_type VARCHAR(40)",
+            ])
+        else:
+            logger.info("✅ plot_bridges.payoff_type already exists")
+
+
 async def ensure_character_aliases_column(engine: AsyncEngine):
     """Ensure characters.aliases exists（角色曾用名，改名时自动追加旧名）。
 
@@ -552,6 +576,8 @@ async def run_auto_migrations(engine: AsyncEngine):
         await ensure_plot_bridge_beat_columns(engine)  # V4.1 方案 C：桥段绑定剧情线节点
         await ensure_plot_bridge_secondary_beats_column(engine)  # 工程化桥段流水线：副线任务
         await ensure_plot_bridge_generation_meta_column(engine)  # 桥段填充溯源
+        await ensure_plot_bridge_payoff_type_column(engine)  # 兑现方式枚举（账本全书统计）
+        await ensure_project_c3_hook_style_column(engine)  # C3 章末风格开关（默认不留钩子）
         await ensure_character_aliases_column(engine)  # 角色曾用名（改名级联兜底）
         await ensure_settings_reasoning_columns(engine)  # 思考强度全局设置字段
         await ensure_settings_sampling_columns(engine)  # 采样多样性字段（降低 AI 味）

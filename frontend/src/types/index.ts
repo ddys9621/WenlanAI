@@ -168,6 +168,9 @@ export interface ProjectAIPreference {
   global_defaults: EffectiveAIConfig;
 }
 
+/** 桥段 C3 兑现章末尾：none 不留钩子（默认，付费文）/ soft 收束 + 半钩（免费平台章末钩子） */
+export type C3HookStyle = 'none' | 'soft';
+
 // 项目类型定义
 export interface Project {
   id: string;  // UUID字符串
@@ -188,6 +191,7 @@ export interface Project {
   chapter_count?: number;
   narrative_perspective?: string;
   character_count?: number;
+  c3_hook_style?: C3HookStyle | null;
   created_at: string;
   updated_at: string;
 }
@@ -225,6 +229,7 @@ export interface ProjectUpdate {
   chapter_count?: number;
   narrative_perspective?: string;
   character_count?: number;
+  c3_hook_style?: C3HookStyle;
   // current_words 由章节内容自动计算，不在此接口中
 }
 

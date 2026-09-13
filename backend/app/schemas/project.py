@@ -39,6 +39,7 @@ class ProjectUpdate(BaseModel):
     chapter_count: Optional[int] = None
     narrative_perspective: Optional[str] = None
     character_count: Optional[int] = None
+    c3_hook_style: Optional[str] = Field(None, pattern="^(none|soft)$", description="桥段 C3 章末：none 不留钩子 / soft 半钩")
     # current_words 由章节内容自动计算，不允许手动修改
 
 
@@ -57,6 +58,7 @@ class ProjectResponse(ProjectBase):
     chapter_count: Optional[int] = None
     narrative_perspective: Optional[str] = None
     character_count: Optional[int] = None
+    c3_hook_style: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     

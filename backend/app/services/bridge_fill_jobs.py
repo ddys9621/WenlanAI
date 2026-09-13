@@ -4,6 +4,7 @@
 2026-09-11 泛化为 ai_jobs.AIJobManager 后，本模块只剩桥段特有的部分：
 - 进度文案 / 百分比（按 draft 总数）
 - partial / thinking 打字机快照原样透传（最新态）
+- phase_plan → 进度文案 + 一条 reference（长节点拆成了哪些阶段）
 - batch_done → meta + bridges + 一条 reference（本批参考了什么，给通用弹窗的参考面板）
 - 每个主线节点一个 stage（通用弹窗的过程时间线）
 桥段表 status 仍是唯一持久状态：任务中断 = 当前子批保持 draft，下次点填充即续跑。
@@ -46,6 +47,20 @@ def _provenance_items(prov: dict[str, Any]) -> list[dict[str, str]]:
     ]
 
 
+def _phase_items(phases: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """把长节点阶段拆分结果压成通用 reference 条目。"""
+    items = []
+    for p in phases:
+        detail = str(p.get("goal") or "")
+        if p.get("antagonist"):
+            detail += f"｜对手：{p['antagonist']}"
+        items.append({
+            "title": f"阶段 {p.get('index')}《{p.get('title')}》桥段 {p.get('bridge_start')}-{p.get('bridge_end')}",
+            "detail": detail,
+        })
+    return items
+
+
 def make_bridge_fill_runner(
     *,
     ai_service: Any,
@@ -78,6 +93,10 @@ def make_bridge_fill_runner(
                     job.progress(label, pct())
                 elif kind in LIVE_PASSTHROUGH:
                     job.publish(evt)
+                elif kind == "phase_plan":
+                    phases = evt.get("phases") or []
+                    trace_reference("bridge_phases", f"节点 {evt['beat_index']} 阶段拆分", _phase_items(phases))
+                    job.progress(f"节点 {evt['beat_index']} 拆成 {len(phases)} 个阶段，开始逐阶段填充", pct())
                 elif kind == "batch_done":
                     done_count += len(evt["bridges"])
                     nums = evt["bridge_numbers"]

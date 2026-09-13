@@ -1,6 +1,23 @@
 """剧情相关的 Prompt 模板"""
 from typing import Dict, Any, Optional, List
 
+# 主线节点数按书长缩放：约每 20 章一个节点（≈ 一个 10-30 章的剧情单元），夹在 [5, 16]
+CHAPTERS_PER_MAIN_BEAT = 20
+MIN_MAIN_BEATS = 5
+MAX_MAIN_BEATS = 16
+# 开篇节点（觉醒 / 金手指到手 / 第一次打脸）篇幅上限：网文前 30 章定生死，开篇不能拖
+OPENING_BEAT_MAX_CHAPTERS = 12
+
+
+def suggested_beat_count(chapters: Optional[int]) -> tuple[int, int]:
+    """全书章数 → 建议主线节点数区间 (lo, hi)。未知章数沿用旧的 5-8。"""
+    if not chapters or chapters <= 0:
+        return MIN_MAIN_BEATS, 8
+    target = round(chapters / CHAPTERS_PER_MAIN_BEAT)
+    clamp = lambda v: max(MIN_MAIN_BEATS, min(MAX_MAIN_BEATS, v))  # noqa: E731
+    lo, hi = clamp(target - 1), clamp(max(target + 2, 8))
+    return (hi, hi) if lo > hi else (lo, hi)
+
 
 class PlotPromptTemplates:
     """剧情 Prompt 模板管理器"""
@@ -317,6 +334,11 @@ class PlotPromptTemplates:
                 genre_structure = cls.GENRE_PLOT_STRUCTURES[key]
                 break
 
+        # 主线且已知全书章数：estimated_chapters 固定为全书章数，描述按全书体量规划
+        chapter_count = project_data.get('chapter_count')
+        main_with_length = line_type == "main" and isinstance(chapter_count, int) and chapter_count > 0
+        length_row = f"\n| 全书章数 | {chapter_count} 章 |" if main_with_length else ""
+
         base_prompt = f"""
 # 剧情线生成任务
 
@@ -326,10 +348,16 @@ class PlotPromptTemplates:
 | 书名 | {project_data.get('title', '未命名项目')} |
 | 类型 | {genre} |
 | 主题 | {project_data.get('theme', '待定')} |
-| 背景 | {project_data.get('world_time_period', '现代')} · {project_data.get('world_location', '待定')} |
+| 背景 | {project_data.get('world_time_period', '现代')} · {project_data.get('world_location', '待定')} |{length_row}
 
 ## 剧情线类型
 **{line_type}**: {line_type_descriptions.get(line_type, '通用剧情线')}"""
+
+        if main_with_length:
+            base_prompt += f"""
+
+## 全书体量
+主线贯穿全书共 {chapter_count} 章。描述必须按这个体量规划：开局（前 ~10 章内金手指到手 / 第一次冲突）→ 若干个卷 / 地图阶段（每阶段换更高层级的对手与舞台）→ 终局。写清每个阶段主角的境界 / 地位变化与对手层级，不要按短篇的体量去写。"""
 
         # 添加类型化结构引导
         if genre_structure:
@@ -457,6 +485,18 @@ class PlotPromptTemplates:
         if custom_prompt:
             base_prompt += f"\n## 特殊要求\n{custom_prompt}\n"
         
+        example_est = chapter_count if main_with_length else 25
+        if main_with_length:
+            est_rule = f"5. 全书共 {chapter_count} 章，主线贯穿全书：estimated_chapters 必须等于 {chapter_count}（固定值，不要自行估算）"
+        else:
+            est_rule = """5. estimated_chapters 的估算逻辑（请在心里计算后直接给出数字，不要在JSON里解释）：
+   - 主线剧情线(main): 通常 30-50 章（占项目总章节数的 60-80%）
+   - 重要支线(sub): 根据复杂度，通常 10-25 章
+   - 次要支线/角色线(character/minor): 通常 5-12 章
+   - 估算参考因素：
+     * 剧情复杂度：涉及角色多、冲突复杂的需要更多章节
+     * 剧情线的重要性和篇幅占比"""
+
         base_prompt += f"""
 ## 输出格式
 请按以下JSON格式输出，数组必须包含且仅包含 {count} 个元素：
@@ -469,7 +509,7 @@ class PlotPromptTemplates:
         "title": "剧情线标题",
         "description": "剧情线详细描述",
         "line_type": "main",
-        "estimated_chapters": 25,
+        "estimated_chapters": {example_est},
         "plot_cards": []
     }}
 ]
@@ -483,14 +523,8 @@ class PlotPromptTemplates:
    - 必须存在 estimated_chapters 字段，不能省略
    - estimated_chapters 的值必须是**阿拉伯数字整型**，例如 25、30、40
    - **不要**写成字符串或带单位的形式，例如 "25章"、"三十"、"30 chapters" 都是错误的
-   - 正确示例：`"estimated_chapters": 30`
-5. estimated_chapters 的估算逻辑（请在心里计算后直接给出数字，不要在JSON里解释）：
-   - 主线剧情线(main): 通常 30-50 章（占项目总章节数的 60-80%）
-   - 重要支线(sub): 根据复杂度，通常 10-25 章
-   - 次要支线/角色线(character/minor): 通常 5-12 章
-   - 估算参考因素：
-     * 剧情复杂度：涉及角色多、冲突复杂的需要更多章节
-     * 剧情线的重要性和篇幅占比
+   - 正确示例：`"estimated_chapters": {example_est}`
+{est_rule}
 6. 不要在字段名中使用中文
 7. **所有文字内容（标题、描述等）必须使用简体中文撰写**，不得出现英文描述
 """
@@ -522,29 +556,53 @@ class PlotPromptTemplates:
                 beat_types_hint = ", ".join(list(genre_structure['beat_types'].keys())[:6])
                 break
 
-        prompt = f"""为以下剧情线设计5-8个节点(beats)，采用网文节奏。
+        chapters = line.get('estimated_chapters')
+        chapters = chapters if isinstance(chapters, int) and chapters > 0 else None
+        lo, hi = suggested_beat_count(chapters)
+        count_text = f"{lo}-{hi} 个节点" if lo != hi else f"{lo} 个节点"
+
+        length_block = ""
+        chapters_field = ""
+        chapters_rule = ""
+        if chapters:
+            opening_cap = min(OPENING_BEAT_MAX_CHAPTERS, max(4, chapters // 10))
+            length_block = f"""
+【全书体量】全书 {chapters} 章，约每 {CHAPTERS_PER_MAIN_BEAT} 章一个节点；每个节点 = 一个 10-30 章的剧情单元（一张地图 / 一个对手层级 / 一件大事），后续会被切成若干个 4 章桥段来写
+【篇幅纪律】
+- chapters 之和 = {chapters}；第一个节点（开篇：金手指到手 / 第一次冲突）≤ {opening_cap} 章，前 30 章内必须进入第一个正式冲突循环
+- weight 只表示重要性（高潮节点最高），不再代表篇幅；篇幅由 chapters 单独给出
+- 相邻节点必须换舞台或换对手层级，不得在同一层级原地打转"""
+            chapters_field = f"\n- chapters: 本节点预计章数（整数，之和 = {chapters}）"
+            chapters_rule = ', "chapters": 8'
+        rhythm = genre_structure['rhythm_guide'] if genre_structure else ""
+
+        prompt = f"""为以下剧情线设计 {count_text}(beats)，采用网文节奏。
 
 【项目】{title} ({genre})
 【剧情线】{line_title} ({line_type})
-【描述】{line_desc}
+【描述】{line_desc}{length_block}
 
 【网文节奏要求】
 1. 每2-3个节点安排一个爽点（打脸/突破/收获）
 2. 每个节点结尾要有钩子（悬念/危机/期待）
-3. 冲突要持续升级，敌人越来越强
+3. 冲突要持续升级，敌人越来越强：对手层级、赌注、舞台逐节点抬高，不得回落
+{rhythm}
 
 【节点结构】
 - index: 序号
 - key: 节点类型（{beat_types_hint}）
 - title: 标题（网文感，吸引人）
 - description: 200-300字，包含：核心事件、爽点设计、承上启下、钩子设计
-- weight: 权重（和=1.0）
+- weight: 重要性权重（和=1.0，全书最大高潮所在节点最高）{chapters_field}
+- location: 本节点主要舞台（地图 / 势力 / 城市，可空）
+- antagonist: 本节点主要对手或压力来源及其层级（可空）
+- realm: 本节点主角境界 / 实力 / 地位从哪到哪（如"炼气三层→炼气五层"，可空）
 
 【输出格式】仅输出JSON数组：
 ```json
 [
-  {{"index": 1, "key": "opening", "title": "废材觉醒：被驱逐的天才", "description": "故事开始，主角曾是天才却沦为废物，遭众人嘲笑。就在绝望时刻，沉睡的金手指觉醒...", "weight": 0.12}},
-  {{"index": 2, "key": "power_up", "title": "秘密修炼：逆天功法", "description": "主角开始秘密修炼，白天装弱夜晚苦练，实力飞速提升但隐而不发...", "weight": 0.15}}
+  {{"index": 1, "key": "opening", "title": "废材觉醒：被驱逐的天才", "description": "故事开始，主角曾是天才却沦为废物，遭众人嘲笑。就在绝望时刻，沉睡的金手指觉醒...", "weight": 0.08{chapters_rule}, "location": "青云镇", "antagonist": "族中长辈与同辈天才", "realm": "凡人→炼气一层"}},
+  {{"index": 2, "key": "power_up", "title": "秘密修炼：逆天功法", "description": "主角开始秘密修炼，白天装弱夜晚苦练，实力飞速提升但隐而不发...", "weight": 0.12{chapters_rule}, "location": "青云宗外门", "antagonist": "外门执事", "realm": "炼气一层→炼气四层"}}
 ]
 ```"""
         return prompt

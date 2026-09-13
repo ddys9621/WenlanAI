@@ -28,6 +28,7 @@ from app.models.plot_line import PlotLine
 from app.models.project import Project
 from app.models.story_outline import StoryOutline
 from app.services.bridge_prompt_context import (
+    beat_facts_lines,
     build_fill_provenance,
     filled_ledger_block,
     next_bridge_block,
@@ -35,6 +36,29 @@ from app.services.bridge_prompt_context import (
     pov_line,
     prev_bridge_last_chapter_block,
     story_core_lines,
+)
+from app.services.bridge_hook_style import (
+    C3_HOOK_NONE,
+    expansion_c3_rule,
+    methodology_for,
+    normalize_c3_hook_style,
+)
+from app.services.bridge_phases import (
+    PHASE_SPLIT_MIN_BRIDGES,
+    parse_phases,
+    phase_facts,
+    phase_for_bridge,
+    phase_ranges,
+    render_phase_block,
+    render_phase_split_task,
+)
+from app.services.bridge_shapes import (
+    SHAPE_STANDARD,
+    bridge_shape,
+    climax_beat_index,
+    shape_expansion_block,
+    shape_fill_rule,
+    shape_label,
 )
 from app.services.bridge_slot_planner import (
     CHAPTERS_PER_BRIDGE,
@@ -80,6 +104,7 @@ def bridge_to_dict(b: PlotBridge) -> dict[str, Any]:
         "title": b.title,
         "goal": b.goal,
         "showoff_point": b.showoff_point,
+        "payoff_type": b.payoff_type,
         "golden_finger_usage": b.golden_finger_usage,
         "c1_intro": b.c1_intro,
         "c2_build": b.c2_build,
@@ -107,10 +132,34 @@ async def load_plot_line_data(db: AsyncSession, project_id: str) -> list[PlotLin
     return [parse_plot_line(line) for line in result.scalars().all()]
 
 
+async def _bridge_shape_for(db: AsyncSession, bridge: PlotBridge) -> str:
+    """桥段形态：需要主线节点权重找全书高潮节点；桥段未绑节点 → standard。"""
+    if not bridge.plot_line_id or bridge.beat_index is None:
+        return SHAPE_STANDARD
+    line = (await db.execute(select(PlotLine).where(PlotLine.id == bridge.plot_line_id))).scalar_one_or_none()
+    climax = climax_beat_index(parse_plot_line(line)) if line is not None else None
+    return bridge_shape(bridge.beat_coverage_end, bridge.beat_index, climax)
+
+
+def _opt_index(raw_beat: dict[str, Any]) -> int | None:
+    try:
+        return int(raw_beat.get("index"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _task_progress_text(t: dict[str, Any]) -> str:
+    """副线任务进度文案；保温任务且节点已完成（coverage 1→1）时不显示误导性的 100%→100%。"""
+    start, end = float(t.get("coverage_start", 0)), float(t.get("coverage_end", 0))
+    if t.get("role", "primary") == "mention" and start >= 1.0 and end >= 1.0:
+        return "（已完成，只带过现状）"
+    return f"进度 {start * 100:.0f}% → {end * 100:.0f}%"
+
+
 def _secondary_task_line(t: dict[str, Any], *, with_desc: bool) -> str:
     text = (
         f"- {t.get('line_type')}《{t.get('line_title')}》[节点 {t.get('beat_index')}] {t.get('beat_title')}："
-        f"进度 {float(t.get('coverage_start', 0)) * 100:.0f}% → {float(t.get('coverage_end', 0)) * 100:.0f}%"
+        f"{_task_progress_text(t)}"
     )
     if with_desc and t.get("beat_description"):
         text += f"｜{str(t['beat_description'])[:120]}"
@@ -147,16 +196,12 @@ async def _load_beat_context_for_bridge(
     if not plot_line or not plot_line.timeline_data:
         return ""
 
-    try:
-        td = json.loads(plot_line.timeline_data)
-        beats = td.get("beats", []) or []
-    except (json.JSONDecodeError, TypeError):
-        return ""
+    beats = list(parse_plot_line(plot_line).beats)   # 已按 index 排序
     if not beats:
         return ""
 
     # 找到对应 beat（按 index 匹配；找不到容错）
-    current_beat = next((b for b in beats if b.get("index") == bridge.beat_index), None)
+    current_beat = next((b for b in beats if b.index == bridge.beat_index), None)
     if not current_beat:
         return ""
 
@@ -176,32 +221,29 @@ async def _load_beat_context_for_bridge(
 
     lines = ["【📍 桥段所属节点（V4.1 方案 C 分层契合）】"]
     lines.append(f"- 剧情线：{line_type_label}《{plot_line.title}》")
-    cur_idx = current_beat.get("index", bridge.beat_index)
-    cur_title = (current_beat.get("title") or f"节点{cur_idx}").strip()
-    cur_weight = float(current_beat.get("weight", 0) or 0)
-    lines.append(f"- 所属节点：[节点 {cur_idx}] {cur_title}（权重 {cur_weight:.0%}）")
-    if current_beat.get("description"):
-        lines.append(f"  描述：{str(current_beat['description']).strip()[:200]}")
+    cur_idx = current_beat.index
+    lines.append(f"- 所属节点：[节点 {cur_idx}] {current_beat.title}（权重 {current_beat.weight:.0%}）")
+    if current_beat.description:
+        lines.append(f"  描述：{current_beat.description[:200]}")
+    lines.extend(beat_facts_lines(current_beat))
     lines.append(f"- 本桥段在该节点覆盖进度：{coverage_text}")
+    phase = phase_for_bridge(current_beat.phases, bridge.bridge_number) if current_beat.phases else None
+    if phase:
+        lines.append(
+            f"- 所属阶段：阶段 {phase['index']}/{len(current_beat.phases)}《{phase['title']}》"
+            f"（桥段 {phase['bridge_start']}-{phase['bridge_end']}）：{phase['goal']}"
+        )
+        facts = phase_facts(phase)
+        if facts:
+            lines.append(f"  {facts}")
 
     # 前后节点摘要
-    sorted_beats = sorted(beats, key=lambda b: b.get("index", 0))
-    prev_beat = next(
-        (b for b in reversed(sorted_beats) if b.get("index", 0) < cur_idx), None
-    )
-    next_beat = next(
-        (b for b in sorted_beats if b.get("index", 0) > cur_idx), None
-    )
+    prev_beat = next((b for b in reversed(beats) if b.index < cur_idx), None)
+    next_beat = next((b for b in beats if b.index > cur_idx), None)
     if prev_beat:
-        lines.append(
-            f"- 上一节点：[节点 {prev_beat.get('index')}] "
-            f"{(prev_beat.get('title') or '').strip()}（已收尾）"
-        )
+        lines.append(f"- 上一节点：[节点 {prev_beat.index}] {prev_beat.title}（已收尾）")
     if next_beat:
-        lines.append(
-            f"- 下一节点：[节点 {next_beat.get('index')}] "
-            f"{(next_beat.get('title') or '').strip()}（待开启）"
-        )
+        lines.append(f"- 下一节点：[节点 {next_beat.index}] {next_beat.title}（待开启）")
 
     lines.append("")
     end_pct = int((ce or 0) * 100) if ce is not None else None
@@ -247,6 +289,7 @@ BRIDGE_FILL_TASK_PROMPT = """请为下面 {count} 个桥段槽位填写内容。
 - 标「主B线」的桥段：该支线节点所述事件必须在本桥段 4 章内发生并推进到位（建议放 C1 下半或 C4，不得抢占主线{payoff_label}）
 - 标「保温」的支线：只需一句话带过其现状，不得展开新事件
 - 金手指使用方式在相邻桥段间不得重复
+- payoff_type 只能从列表中选：{payoff_types}；相邻桥段不得同型，参考账本里的「兑现方式累计」优先选全书用得少的
 - 人名、地名、势力名只能使用【本书角色】【世界规则表】里已有的；确需新角色时在 goal 里用“新角色：身份”标注
 - 最后一个桥段的 next_bridge_hook 要为下一节点开头留引子
 {extra_constraints}
@@ -258,6 +301,7 @@ BRIDGE_FILL_TASK_PROMPT = """请为下面 {count} 个桥段槽位填写内容。
     "title": "桥段简洁标题（8-15 字）",
     "goal": "本桥段要解决的具体问题（30-60 字）",
     "showoff_point": "{payoff_hint}（40-80 字）",
+    "payoff_type": "兑现方式，从【{payoff_types}】中选一个原词",
     "golden_finger_usage": "{golden_finger_hint}（20-40 字）",
     "c1_intro": "{c1_hint}（80-120 字）",
     "c2_build": "{c2_hint}（80-120 字）",
@@ -269,15 +313,22 @@ BRIDGE_FILL_TASK_PROMPT = """请为下面 {count} 个桥段槽位填写内容。
 """
 
 
-def render_fill_task(template: BridgeTemplate, count: int, slot_table: str) -> str:
-    """按题材模板渲染填充任务段。"""
+def render_fill_task(
+    template: BridgeTemplate,
+    count: int,
+    slot_table: str,
+    shape_rules: tuple[str, ...] = (),
+    c3_hook_style: str = C3_HOOK_NONE,
+) -> str:
+    """按题材模板渲染填充任务段；shape_rules = 本批收官 / 高潮桥段的形态约束行；c3_hook_style = C3 章末风格。"""
     return BRIDGE_FILL_TASK_PROMPT.format(
         count=count,
         template_name=template.name,
-        methodology=template.methodology,
+        methodology=methodology_for(template.methodology, c3_hook_style),
         slot_table=slot_table,
         payoff_label=template.payoff_label,
-        extra_constraints="\n".join(f"- {c}" for c in template.extra_constraints),
+        payoff_types=" / ".join(template.payoff_types),
+        extra_constraints="\n".join(f"- {c}" for c in (*template.extra_constraints, *shape_rules)),
         payoff_hint=template.payoff_hint,
         golden_finger_hint=template.golden_finger_hint,
         c1_hint=template.card_hints["c1_intro"],
@@ -295,10 +346,26 @@ class FillContext:
     prev_bridge_number: int | None
     ledger_numbers: list[int]
     opening: bool
+    phase: dict[str, Any] | None = None   # {"index", "title", "count"}；节点未拆阶段时 None
 
 
-def render_expansion_task(template: BridgeTemplate, bridge: PlotBridge, c_start: int, pov_rule: str) -> str:
-    """按题材模板渲染章纲展开任务段。"""
+OPENING_C1_RULE = "本桥段是开篇桥段（黄金三章）：C1 日常代入压缩到不超过章篇幅的 1/3，其余篇幅直接进入钩子"
+CONTINUED_C1_RULE = (
+    "本桥段非开篇：C1 前 1/4 直接承接上桥段的收尾与钩子（人物已在路上 / 已到现场），"
+    "不得写无关日常、不得重述前情，其余篇幅进入本桥段的信息差"
+)
+
+
+def render_expansion_task(
+    template: BridgeTemplate,
+    bridge: PlotBridge,
+    c_start: int,
+    pov_rule: str,
+    shape: str = SHAPE_STANDARD,
+    c3_hook_style: str = C3_HOOK_NONE,
+) -> str:
+    """按题材模板渲染章纲展开任务段；shape = 桥段形态（收官 / 高潮加密时追加「# 桥段形态」段）；c3_hook_style = C3 章末风格。"""
+    shape_block = shape_expansion_block(shape)
     return CHAPTER_EXPANSION_TASK_PROMPT.format(
         title=bridge.title,
         goal=bridge.goal,
@@ -317,7 +384,10 @@ def render_expansion_task(template: BridgeTemplate, bridge: PlotBridge, c_start:
         build_label=template.position_labels["build"],
         payoff_label=template.position_labels["payoff"],
         aftermath_label=template.position_labels["aftermath"],
+        c1_rule=OPENING_C1_RULE if bridge.bridge_number == 1 else CONTINUED_C1_RULE,
+        c3_end_rule=expansion_c3_rule(c3_hook_style),
         pov_rule=pov_rule,
+        shape_block=f"\n{shape_block}\n" if shape_block else "",
     )
 
 _FILL_FIELDS = (
@@ -325,6 +395,17 @@ _FILL_FIELDS = (
     "c1_intro", "c2_build", "c3_payoff", "c4_aftermath", "next_bridge_hook",
 )
 _FILL_SHORT_FIELDS = {"title": 200, "goal": 500, "showoff_point": 500}
+
+
+def normalize_payoff_type(raw: Any, template: BridgeTemplate) -> str | None:
+    """LLM 给的兑现方式 → 模板枚举原词；精确匹配优先，否则取字符串里出现的第一个枚举（"打脸（当众碾压）"→"打脸"）；都不是 → None。"""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip()
+    if text in template.payoff_types:
+        return text
+    hits = [(text.find(t), t) for t in template.payoff_types if t in text]
+    return min(hits)[1] if hits else None
 
 
 def parse_partial_bridges(text: str, numbers: list[int]) -> list[dict[str, Any]]:
@@ -384,11 +465,12 @@ CHAPTER_EXPANSION_TASK_PROMPT = """请把下面这个桥段展开为 4 个详细
 # 四章位置语义（{template_name}）
 - C1 intro：{intro_label}
 - C2 build：{build_label}
-- C3 payoff：{payoff_label}（章末不留钩子）
+- C3 payoff：{payoff_label}（{c3_end_rule}）
 - C4 aftermath：{aftermath_label}
+- {c1_rule}
 - {pov_rule}
 - 人名只能使用【本书角色】里的名字；`characters_involved` / `pov` 不得出现新名字
-
+{shape_block}
 # 场景卡片设计要求
 - 每章 3-5 张，按章内时间顺序排列
 - `card_type` 取值之一：`event`（事件推进）/ `scene`（场景描写）/ `dialogue`（关键对话）/ `inner`（内心独白）/ `conflict`（冲突高潮）
@@ -505,6 +587,28 @@ class BridgePlanningService:
 
     # ---------------- 填充层（LLM，按主线节点分批） ----------------
 
+    @staticmethod
+    def _beat_block(main: PlotLineData, beat_index: int, heading: str) -> tuple[list[str], str | None]:
+        """【📍 所属主线节点】当前节点（描述 / 类型 / 舞台 / 对手 / 境界）+ 上一节点 + 下一节点。返回 (行, 下一节点标题)。"""
+        beats = list(main.beats)
+        cur = next(b for b in beats if b.index == beat_index)
+        pos = beats.index(cur)
+        parts = [heading, f"- 主线：《{main.title}》（全书 {main.estimated_chapters} 章）",
+                 f"- 当前节点：[节点 {cur.index}] {cur.title}（权重 {cur.weight:.0%}）"]
+        if cur.description:
+            parts.append(f"  描述：{cur.description[:300]}")
+        parts.extend(beat_facts_lines(cur))
+        if pos > 0:
+            p = beats[pos - 1]
+            parts.append(f"- 上一节点：[节点 {p.index}] {p.title}（已收尾）")
+        next_beat_title: str | None = None
+        if pos + 1 < len(beats):
+            nx = beats[pos + 1]
+            next_beat_title = nx.title
+            desc = f"｜{nx.description[:150]}" if nx.description else ""
+            parts.append(f"- 下一节点：[节点 {nx.index}] {nx.title}（待开启）{desc}")
+        return parts, next_beat_title
+
     async def _build_fill_context(
         self,
         db: AsyncSession,
@@ -514,8 +618,9 @@ class BridgePlanningService:
         chunk: list[PlotBridge],
         template: BridgeTemplate,
         fields: dict[str, Any],
+        phases: list[dict[str, Any]] | None = None,
     ) -> FillContext:
-        """故事前提（含终极目标）+ 开篇规则（仅桥段 1）+ 所属节点（含前后节点描述）+ 已填桥段账本。"""
+        """故事前提（含终极目标）+ 开篇规则（仅桥段 1）+ 所属节点（含前后节点描述）+ 节点内阶段 + 已填桥段账本。"""
         parts: list[str] = story_core_lines(fields)
         story_fields = [
             k for k in ("premise", "golden_finger", "selling_points", "main_tropes", "power_system", "ultimate_goal")
@@ -527,24 +632,14 @@ class BridgePlanningService:
             parts.append("")
             parts.append(opening_block(fields, template))
 
-        beats = list(main.beats)
-        cur = next(b for b in beats if b.index == beat_index)
-        pos = beats.index(cur)
+        beat_lines, next_beat_title = self._beat_block(main, beat_index, "【📍 本批所属主线节点】")
         parts.append("")
-        parts.append("【📍 本批所属主线节点】")
-        parts.append(f"- 主线：《{main.title}》（全书 {main.estimated_chapters} 章）")
-        parts.append(f"- 当前节点：[节点 {cur.index}] {cur.title}（权重 {cur.weight:.0%}）")
-        if cur.description:
-            parts.append(f"  描述：{cur.description[:300]}")
-        if pos > 0:
-            p = beats[pos - 1]
-            parts.append(f"- 上一节点：[节点 {p.index}] {p.title}（已收尾）")
-        next_beat_title: str | None = None
-        if pos + 1 < len(beats):
-            nx = beats[pos + 1]
-            next_beat_title = nx.title
-            desc = f"｜{nx.description[:150]}" if nx.description else ""
-            parts.append(f"- 下一节点：[节点 {nx.index}] {nx.title}（待开启）{desc}")
+        parts.extend(beat_lines)
+
+        phase = phase_for_bridge(phases, chunk[0].bridge_number) if phases else None
+        if phase:
+            parts.append("")
+            parts.append(render_phase_block(phases, current_index=phase["index"]))
 
         ledger, ledger_numbers = await filled_ledger_block(db, project_id, before_number=chunk[0].bridge_number)
         if ledger:
@@ -558,18 +653,30 @@ class BridgePlanningService:
             prev_bridge_number=ledger_numbers[-1] if ledger_numbers else None,
             ledger_numbers=ledger_numbers,
             opening=opening,
+            phase={"index": phase["index"], "title": phase["title"], "count": len(phases)} if phase else None,
         )
 
     @staticmethod
-    def _slot_table(beat_bridges: list[PlotBridge], target_numbers: list[int]) -> str:
-        """节点全部槽位；本批要填的前缀 ★，其余仅供衔接参考。"""
+    def _slot_table(
+        beat_bridges: list[PlotBridge],
+        target_numbers: list[int],
+        phases: list[dict[str, Any]] | None = None,
+        climax_index: int | None = None,
+    ) -> str:
+        """节点全部槽位；本批要填的前缀 ★，其余仅供衔接参考；有阶段拆分时按阶段分组；收官 / 高潮桥段带形态标签。"""
         rows: list[str] = []
+        current_phase: int | None = None
         for b in beat_bridges:
+            phase = phase_for_bridge(phases, b.bridge_number) if phases else None
+            if phase and phase["index"] != current_phase:
+                current_phase = phase["index"]
+                rows.append(f"── 阶段 {phase['index']}《{phase['title']}》（桥段 {phase['bridge_start']}-{phase['bridge_end']}）：{phase['goal'][:60]}")
             c_start, c_end = chapter_range(b.bridge_number)
             cs = (b.beat_coverage_start or 0.0) * 100
             ce = (b.beat_coverage_end or 0.0) * 100
             mark = "★ " if b.bridge_number in target_numbers else "- "
-            row = f"{mark}桥段 {b.bridge_number}：第 {c_start}-{c_end} 章，节点进度 {cs:.0f}% → {ce:.0f}%"
+            label = shape_label(bridge_shape(b.beat_coverage_end, b.beat_index, climax_index))
+            row = f"{mark}桥段 {b.bridge_number}：第 {c_start}-{c_end} 章，节点进度 {cs:.0f}% → {ce:.0f}%{label}"
             try:
                 secondary = json.loads(b.secondary_beats) if b.secondary_beats else []
             except (json.JSONDecodeError, TypeError):
@@ -578,15 +685,115 @@ class BridgePlanningService:
                 if not isinstance(t, dict):
                     continue
                 label = "保温" if t.get("role", "primary") == "mention" else "主B线"
+                progress = _task_progress_text(t)
                 row += (
                     f"\n    · {label}：{t.get('line_type')}《{t.get('line_title')}》"
-                    f"[节点 {t.get('beat_index')}] {t.get('beat_title')} "
-                    f"进度 {float(t.get('coverage_start', 0)) * 100:.0f}% → {float(t.get('coverage_end', 0)) * 100:.0f}%"
+                    f"[节点 {t.get('beat_index')}] {t.get('beat_title')}"
+                    f"{progress if progress.startswith('（') else ' ' + progress}"
                 )
                 if label == "主B线" and t.get("beat_description"):
                     row += f"｜{str(t['beat_description'])[:80]}"
             rows.append(row)
         return "\n".join(rows)
+
+    async def _stream_llm(
+        self,
+        *,
+        prompt: str,
+        system_prompt: str,
+        model: str,
+        live: dict[str, Any],
+        snapshot: Callable[[str], Any] | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """流式调 LLM：转发 thinking / partial 事件（携带 live 里的 beat_index / bridge_numbers），
+        最后 yield {"type": "_collected", "content", "finish_reason"} 供调用方解析。"""
+        buffer: list[str] = []
+        content_chars = 0
+        finish_reason: str | None = None
+        last_partial = float("-inf")
+        async for ev in self.ai_service.generate_text_stream_events(
+            prompt=prompt, system_prompt=system_prompt, model=model or None, temperature=0.6,
+        ):
+            if ev.kind == "content":
+                buffer.append(ev.text)
+                content_chars += len(ev.text)
+                now = time.monotonic()
+                if snapshot is not None and now - last_partial >= self.partial_interval:
+                    snap = snapshot("".join(buffer))
+                    if snap:
+                        last_partial = now
+                        yield {"type": "partial", **live, "bridges": snap, "content_chars": content_chars,
+                               "elapsed": round(ev.elapsed, 1)}
+            elif ev.kind in ("reasoning", "heartbeat"):
+                yield {"type": "thinking", **live, "reasoning_chars": ev.reasoning_chars,
+                       "content_chars": content_chars, "elapsed": round(ev.elapsed, 1)}
+            elif ev.kind == "done":
+                finish_reason = ev.finish_reason
+        yield {"type": "_collected", "content": "".join(buffer), "finish_reason": finish_reason}
+
+    @staticmethod
+    def _fill_chunks(beat_bridges: list[PlotBridge], phases: list[dict[str, Any]]) -> list[list[PlotBridge]]:
+        """填充批次：有阶段时一个阶段一批（只含仍是 draft 的桥段；阶段超长再按 FILL_BATCH_MAX 切），否则按 FILL_BATCH_MAX 切。"""
+        groups: list[list[PlotBridge]] = []
+        if phases:
+            by_phase: dict[int, list[PlotBridge]] = {}
+            rest: list[PlotBridge] = []
+            for b in beat_bridges:
+                phase = phase_for_bridge(phases, b.bridge_number)
+                (by_phase.setdefault(phase["index"], []) if phase else rest).append(b)
+            groups = [by_phase[k] for k in sorted(by_phase)] + ([rest] if rest else [])
+        else:
+            groups = [beat_bridges]
+        return [g[i:i + FILL_BATCH_MAX] for g in groups for i in range(0, len(g), FILL_BATCH_MAX)]
+
+    async def _plan_beat_phases(
+        self,
+        db: AsyncSession,
+        project_id: str,
+        main: PlotLineData,
+        beat: Any,
+        all_numbers: list[int],
+        template: BridgeTemplate,
+        fields: dict[str, Any],
+        prompt: Any,
+        model: str,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """长节点阶段拆分：一次 LLM 调用把节点拆成 K 个递进阶段，落 PlotLine.timeline_data，最后 yield phase_plan。"""
+        ranges = phase_ranges(all_numbers)
+        beat_lines, _ = self._beat_block(main, beat.index, "【📍 待拆分的主线节点】")
+        user_prompt = "\n\n".join([
+            prompt.user_prompt,
+            "\n".join(story_core_lines(fields)),
+            "\n".join(beat_lines),
+            render_phase_split_task(beat.index, beat.title, ranges, template.payoff_label),
+        ])
+        collected: dict[str, Any] = {}
+        async for ev in self._stream_llm(
+            prompt=user_prompt, system_prompt=prompt.system_prompt, model=model,
+            live={"beat_index": beat.index, "bridge_numbers": all_numbers, "stage": "phase_plan"},
+        ):
+            if ev["type"] == "_collected":
+                collected = ev
+            else:
+                yield ev
+        what = f"节点 {beat.index} 阶段拆分"
+        content = _collected_json_text(collected, what=what)
+        raw = safe_parse_json(content, default=[], expected_type="array", log_prefix="[BridgePhase]")
+        phases = parse_phases(raw, ranges)
+        if phases is None:
+            got = len(raw) if isinstance(raw, list) else 0
+            raise ValueError(f"节点 {beat.index} 的阶段数量不符或字段缺失：期望 {len(ranges)} 个阶段（含 title/goal），LLM 返回 {got} 个")
+
+        line = (await db.execute(select(PlotLine).where(PlotLine.id == main.id))).scalar_one()
+        td = json.loads(line.timeline_data) if line.timeline_data else {}
+        for raw_beat in td.get("beats") or []:
+            if isinstance(raw_beat, dict) and _opt_index(raw_beat) == beat.index:
+                raw_beat["phases"] = phases
+        line.timeline_data = json.dumps(td, ensure_ascii=False)
+        await db.commit()
+        logger.info("[BridgePhase] project=%s 节点 %d 拆成 %d 个阶段（桥段 %d-%d）",
+                    project_id, beat.index, len(phases), all_numbers[0], all_numbers[-1])
+        yield {"type": "phase_plan", "beat_index": beat.index, "bridge_numbers": all_numbers, "phases": phases}
 
     async def fill_bridges(
         self,
@@ -598,9 +805,10 @@ class BridgePlanningService:
         """按主线节点顺序，把 status=draft 的桥段分批交给 LLM 填内容 → ready。
 
         可续跑：只处理 draft；beat_index 指定时只填该节点。
-        同节点桥段每 FILL_BATCH_MAX 个一次 LLM 调用（子批之间靠账本衔接）。
+        节点桥段数 ≥ PHASE_SPLIT_MIN_BRIDGES 且尚未拆阶段 → 先一次 LLM 拆阶段（落 timeline_data，续跑复用），
+        之后一个阶段一批；否则同节点桥段每 FILL_BATCH_MAX 个一次 LLM 调用（子批之间靠账本衔接）。
         LLM 返回条目与槽位不一致 → ValueError（该批保持 draft，调用方终止流）。
-        事件：beat_start → batch_done（每子批，含 provenance）→ beat_done → … → done
+        事件：beat_start → [phase_plan] → batch_done（每批，含 provenance）→ beat_done → … → done
         """
         effective_model = model_name or getattr(self.ai_service, "default_model", None) or ""
         drafts_result = await db.execute(
@@ -617,12 +825,14 @@ class BridgePlanningService:
 
         lines = await load_plot_line_data(db, project_id)
         main = next(l for l in lines if l.id == drafts[0].plot_line_id)
+        climax_index = climax_beat_index(main)
         by_beat: dict[int, list[PlotBridge]] = {}
         for b in drafts:
             by_beat.setdefault(b.beat_index, []).append(b)
 
         project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
         template = resolve_template(getattr(project, "genre", None))
+        c3_hook_style = normalize_c3_hook_style(getattr(project, "c3_hook_style", None))
         outline = (await db.execute(
             select(StoryOutline)
             .where(StoryOutline.project_id == project_id, StoryOutline.is_active == True)  # noqa: E712
@@ -646,49 +856,54 @@ class BridgePlanningService:
             beat_bridges = by_beat[b_idx]
             numbers = [b.bridge_number for b in beat_bridges]
             yield {"type": "beat_start", "beat_index": b_idx, "bridge_numbers": numbers}
-            beat_title = next((b.title for b in main.beats if b.index == b_idx), f"节点{b_idx}")
+            cur_beat = next(b for b in main.beats if b.index == b_idx)
+            beat_title = cur_beat.title
 
-            for start in range(0, len(beat_bridges), FILL_BATCH_MAX):
-                chunk = beat_bridges[start:start + FILL_BATCH_MAX]
+            # 长节点：先拆阶段（已存 timeline_data 的直接复用），再按阶段分批
+            all_numbers = sorted((await db.execute(
+                select(PlotBridge.bridge_number).where(
+                    PlotBridge.project_id == project_id, PlotBridge.plot_line_id == main.id, PlotBridge.beat_index == b_idx,
+                )
+            )).scalars().all())
+            phases: list[dict[str, Any]] = [dict(p) for p in cur_beat.phases]
+            if not phases and len(all_numbers) >= PHASE_SPLIT_MIN_BRIDGES:
+                async for ev in self._plan_beat_phases(
+                    db, project_id, main, cur_beat, all_numbers, template, fields, prompt, effective_model,
+                ):
+                    if ev["type"] == "phase_plan":
+                        phases = ev["phases"]
+                    yield ev
+
+            for chunk in self._fill_chunks(beat_bridges, phases):
                 chunk_numbers = [b.bridge_number for b in chunk]
-                fill_ctx = await self._build_fill_context(db, project_id, main, b_idx, chunk, template, fields)
+                fill_ctx = await self._build_fill_context(db, project_id, main, b_idx, chunk, template, fields, phases)
+                shape_rules = tuple(
+                    rule for b in chunk
+                    if (rule := shape_fill_rule(
+                        bridge_shape(b.beat_coverage_end, b.beat_index, climax_index), b.bridge_number, template.payoff_label,
+                    ))
+                )
                 user_prompt = "\n\n".join([
                     prompt.user_prompt,
                     fill_ctx.text,
-                    render_fill_task(template, len(chunk), self._slot_table(beat_bridges, chunk_numbers)),
+                    render_fill_task(
+                        template, len(chunk),
+                        self._slot_table(beat_bridges, chunk_numbers, phases, climax_index),
+                        shape_rules, c3_hook_style,
+                    ),
                 ])
                 what = f"节点 {b_idx} 桥段 {chunk_numbers[0]}-{chunk_numbers[-1]} 填充"
-                buffer: list[str] = []
-                content_chars = 0
-                finish_reason: str | None = None
-                last_partial = float("-inf")
-                async for ev in self.ai_service.generate_text_stream_events(
-                    prompt=user_prompt,
-                    system_prompt=prompt.system_prompt,
-                    model=effective_model or None,
-                    temperature=0.6,
+                collected: dict[str, Any] = {}
+                async for ev in self._stream_llm(
+                    prompt=user_prompt, system_prompt=prompt.system_prompt, model=effective_model,
+                    live={"beat_index": b_idx, "bridge_numbers": chunk_numbers},
+                    snapshot=lambda text: parse_partial_bridges(text, chunk_numbers),
                 ):
-                    if ev.kind == "content":
-                        buffer.append(ev.text)
-                        content_chars += len(ev.text)
-                        now = time.monotonic()
-                        if now - last_partial >= self.partial_interval:
-                            snapshot = parse_partial_bridges("".join(buffer), chunk_numbers)
-                            if snapshot:
-                                last_partial = now
-                                yield {
-                                    "type": "partial", "beat_index": b_idx, "bridge_numbers": chunk_numbers,
-                                    "bridges": snapshot, "content_chars": content_chars, "elapsed": round(ev.elapsed, 1),
-                                }
-                    elif ev.kind in ("reasoning", "heartbeat"):
-                        yield {
-                            "type": "thinking", "beat_index": b_idx, "bridge_numbers": chunk_numbers,
-                            "reasoning_chars": ev.reasoning_chars, "content_chars": content_chars,
-                            "elapsed": round(ev.elapsed, 1),
-                        }
-                    elif ev.kind == "done":
-                        finish_reason = ev.finish_reason
-                content = _collected_json_text({"content": "".join(buffer), "finish_reason": finish_reason}, what=what)
+                    if ev["type"] == "_collected":
+                        collected = ev
+                    else:
+                        yield ev
+                content = _collected_json_text(collected, what=what)
                 data = safe_parse_json(content, default=[], expected_type="array", log_prefix="[BridgeFill]")
                 items = {
                     int(d["bridge_number"]): d
@@ -714,6 +929,7 @@ class BridgePlanningService:
                     story_fields=fill_ctx.story_fields,
                     pack_title=pack_title or None,
                     dimensions=dimensions,
+                    phase=fill_ctx.phase,
                 )
                 meta_json = json.dumps(provenance, ensure_ascii=False)
                 for b in chunk:
@@ -725,6 +941,7 @@ class BridgePlanningService:
                         value = value.strip()
                         limit = _FILL_SHORT_FIELDS.get(field_name)
                         setattr(b, field_name, value[:limit] if limit else value)
+                    b.payoff_type = normalize_payoff_type(item.get("payoff_type"), template)
                     b.generation_meta = meta_json
                     b.status = "ready"
                 await db.commit()
@@ -813,6 +1030,8 @@ class BridgePlanningService:
                 prompt_parts.append(block)
         prompt_parts.append(render_expansion_task(
             template, bridge, c_start, pov_line(getattr(project, "narrative_perspective", None)),
+            shape=await _bridge_shape_for(db, bridge),
+            c3_hook_style=normalize_c3_hook_style(getattr(project, "c3_hook_style", None)),
         ))
         user_prompt = "\n\n".join(prompt_parts)
 

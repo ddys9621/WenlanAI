@@ -19,6 +19,7 @@ import { cn } from '@/lib/utils';
 import { useStore } from '@/store';
 import { useProjectSync } from '@/store/hooks';
 import { wizardStreamApi } from '@/services/api';
+import type { C3HookStyle } from '@/types';
 import { MCPSelector } from '@/components/MCPSelector';
 import {
   ReferencePackSelector,
@@ -39,11 +40,17 @@ interface WorldSettingForm {
   theme: string;
   genre: string;
   generation_prompt: string;
+  c3_hook_style: C3HookStyle;
   world_time_period: string;
   world_location: string;
   world_atmosphere: string;
   world_rules: string;
 }
+
+const C3_HOOK_OPTIONS: { value: C3HookStyle; label: string; description: string }[] = [
+  { value: 'none', label: '不留钩子（默认）', description: '兑现章爽完即收，靠爽感把读者带进下一章；适合付费连载。' },
+  { value: 'soft', label: '收束 + 半钩', description: '收束场景后再落一个不解释的小异样（≤2 句）；适合免费平台，每章末都要钩子。' },
+];
 
 const BLOCKS: WorldBlock[] = [
   {
@@ -93,6 +100,7 @@ export default function WorldSetting() {
     theme: '',
     genre: '',
     generation_prompt: '',
+    c3_hook_style: 'none',
     world_time_period: '',
     world_location: '',
     world_atmosphere: '',
@@ -106,6 +114,7 @@ export default function WorldSetting() {
         theme: currentProject.theme || '',
         genre: currentProject.genre || '',
         generation_prompt: currentProject.generation_prompt || '',
+        c3_hook_style: currentProject.c3_hook_style === 'soft' ? 'soft' : 'none',
         world_time_period: currentProject.world_time_period || '',
         world_location: currentProject.world_location || '',
         world_atmosphere: currentProject.world_atmosphere || '',
@@ -200,6 +209,7 @@ export default function WorldSetting() {
         theme: currentProject.theme || '',
         genre: currentProject.genre || '',
         generation_prompt: currentProject.generation_prompt || '',
+        c3_hook_style: currentProject.c3_hook_style === 'soft' ? 'soft' : 'none',
         world_time_period: currentProject.world_time_period || '',
         world_location: currentProject.world_location || '',
         world_atmosphere: currentProject.world_atmosphere || '',
@@ -330,6 +340,29 @@ export default function WorldSetting() {
               </p>
             </div>
           )}
+        </div>
+
+        <div className="mt-5">
+          <label className="mb-1.5 block text-[13px] font-medium text-content">桥段兑现章（C3）末尾</label>
+          {editing ? (
+            <select
+              value={form.c3_hook_style}
+              onChange={(e) => setForm((prev) => ({ ...prev, c3_hook_style: e.target.value as C3HookStyle }))}
+              className="hh-field"
+            >
+              {C3_HOOK_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          ) : (
+            <p className="text-sm leading-6 text-content">
+              {C3_HOOK_OPTIONS.find((opt) => opt.value === form.c3_hook_style)?.label}
+            </p>
+          )}
+          <p className="mt-1 text-xs leading-5 text-content-tertiary">
+            {C3_HOOK_OPTIONS.find((opt) => opt.value === form.c3_hook_style)?.description}
+            影响桥段填充、章纲展开与正文写作三处 prompt；已填充的桥段需重新填充才会生效。
+          </p>
         </div>
       </section>
 

@@ -985,6 +985,9 @@ function BridgeCard({ bridge, partial = null, generating = false, onEdit, onExpa
         </dd>
         <dt className="text-content-tertiary">{ui.payoffLabel}</dt>
         <dd className={cn('leading-6', isGhost(bridge.showoff_point, 'showoff_point') ? 'italic text-content-secondary' : 'text-content')}>
+          {bridge.payoff_type && (
+            <span className="mr-1.5 rounded bg-surface-hover px-1.5 py-0.5 text-xs text-content-secondary">{bridge.payoff_type}</span>
+          )}
           {show(bridge.showoff_point, 'showoff_point') ?? (generating ? '…' : '')}
         </dd>
         {show(bridge.golden_finger_usage, 'golden_finger_usage') && (

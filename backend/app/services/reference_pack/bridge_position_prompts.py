@@ -373,6 +373,75 @@ INFINITE_AFTERMATH = """【🎯 桥段位置约束 - 本章 = 桥段「{bridge_t
 """
 
 
+# ============================================================
+# 非开篇桥段的 C1（承接版，1:3）—— 四个题材族各一份
+# ============================================================
+# N+1 日常代入是给"新读者第一次进书"用的；第 2 个桥段起读者早已代入，再来半章起床吃饭就是断节奏。
+# 上桥段 C4 已经明确"下一步去哪 / 做什么"，本章开头必须直接接上，不得重述、不得回无关日常。
+
+_CONTINUED_HEAD = """【🎯 桥段位置约束 - 本章 = 桥段「{bridge_title}」C1 章（承接上桥段）】
+
+本桥段目标：{bridge_goal}
+本桥段{payoff_label}：{bridge_showoff}
+上桥段留下的钩子：{prev_bridge_hook}
+
+**章内结构（严格 1:3，本桥段不是开篇，读者已代入，不写日常铺垫）**：
+
+▼ 开头（约 {lead_word_count} 字）— 目的：承接
+   - 从上桥段结尾的钩子 / 引子直接接上：人物已在路上 / 已到现场 / 已开口，不得重述上桥段内容
+   - **禁止**：无关日常（起床、吃饭、寒暄等与本桥段无关的铺垫）；**禁止**：用回忆或旁白复述前情
+   - 若需要新舞台 / 新人物，直接以事件带出，不做静态介绍
+"""
+
+CONTINUED_INTRO_TAILS: dict[str, str] = {
+    "showoff": """
+▼ 主体（约 {body_word_count} 字）— 目的：拉期待（信息差）
+   - 展示"对方面临一个主角可以解决的困境"，制造"读者知道对方有困境，但对方不知道主角能解决"的信息差
+   - **禁止**：在本章解决问题（解决是 C3 的事）；**禁止**：让主角开始装（装是 C2 章尾的事）
+
+**章末钩子**：以信息差为钩，让读者期待下一章看主角介入
+""",
+    "mystery": """
+▼ 主体（约 {body_word_count} 字）— 目的：抛出反常
+   - 出现一个反常细节 / 新案情 / 与已知事实矛盾的信息，让读者先于角色察觉“不对”
+   - **禁止**：在本章解释反常（解释是 C3 的事）
+
+**章末钩子**：以反常细节为钩，让读者想看主角怎么追
+""",
+    "romance": """
+▼ 主体（约 {body_word_count} 字）— 目的：暴露缺口
+   - 暴露一个未被满足的情感需要，或埋下一个误解的种子；读者看得见缺口，角色自己未必看得见
+   - **禁止**：在本章解决缺口
+
+**章末钩子**：以缺口为钩，让读者想看它怎么被触碰
+""",
+    "infinite": """
+▼ 主体（约 {body_word_count} 字）— 目的：入局与表面规则
+   - 进入新局，亮出表面规则（可见的、字面的），用一个小惩罚或旁人的死亡证明规则是真的
+   - **禁止**：在本章看破规则的真实含义
+
+**章末钩子**：以第一条致命规则为钩
+""",
+}
+
+_PAYOFF_LABEL_BY_FAMILY = {"showoff": "装逼点", "mystery": "反转点", "romance": "情感兑现点", "infinite": "破局点"}
+CONTINUED_INTRO_LEAD_RATIO = 0.25
+
+
+def format_continued_intro(
+    family: str, bridge_title: str, bridge_goal: str, bridge_showoff: str,
+    target_word_count: int, prev_bridge_hook: str,
+) -> str:
+    tail = CONTINUED_INTRO_TAILS.get(family) or CONTINUED_INTRO_TAILS["showoff"]
+    lead = int(target_word_count * CONTINUED_INTRO_LEAD_RATIO)
+    return (_CONTINUED_HEAD + tail).format(
+        bridge_title=bridge_title, bridge_goal=bridge_goal, bridge_showoff=bridge_showoff,
+        payoff_label=_PAYOFF_LABEL_BY_FAMILY.get(family, "装逼点"),
+        prev_bridge_hook=prev_bridge_hook.strip() or "（上桥段未记录钩子：按上桥段 C4 的收尾与引子直接接）",
+        lead_word_count=lead, body_word_count=target_word_count - lead,
+    )
+
+
 # 题材族 → 位置 → 模板（key 与 app/services/bridge_templates.py 一致）
 BRIDGE_POSITION_TEMPLATES_BY_FAMILY: dict[str, dict[str, str]] = {
     "showoff": {
@@ -405,6 +474,10 @@ def format_position_constraint(
     target_word_count: int = 3000,
     next_bridge_goal: str = "（下一桥段未设定）",
     template: str = "showoff",
+    opening: bool | None = None,
+    prev_bridge_hook: str = "",
+    shape: str = "standard",
+    c3_hook_style: str = "none",
 ) -> str:
     """格式化指定位置的约束模板。
 
@@ -416,14 +489,51 @@ def format_position_constraint(
         target_word_count: 本章目标字数（用于计算上下半篇幅）
         next_bridge_goal: 下一桥段目标（仅 aftermath 使用）
         template: 题材族 key（showoff / mystery / romance / infinite），未知回落 showoff
+        opening: 是否开篇桥段（桥段 1）。False → C1 用承接版（1:3，直接接上桥段钩子）；
+            True / None（未知，旧调用方）→ 5:5 日常代入版
+        prev_bridge_hook: 上桥段留给本桥段的钩子（仅承接版 C1 使用）
+        shape: 桥段形态（bridge_shapes：standard / finale / climax_finale），收官 / 高潮桥段在 C2-C4 追加形态段
+        c3_hook_style: C3 章末风格（bridge_hook_style：none 不留钩子 / soft 半钩），仅 payoff 位置生效
 
     Returns:
         格式化后的 prompt 段，可直接拼入 user_prompt
     """
-    family = BRIDGE_POSITION_TEMPLATES_BY_FAMILY.get(template) or BRIDGE_POSITION_TEMPLATES_BY_FAMILY["showoff"]
+    text = _format_position_body(
+        position, bridge_title, bridge_goal, bridge_showoff, target_word_count, next_bridge_goal, template,
+        opening, prev_bridge_hook,
+    )
+    if not text:
+        return ""
+    from app.services.bridge_hook_style import apply_writing_payoff_style
+    from app.services.bridge_shapes import shape_writing_rule
+
+    if position == "payoff":
+        text = apply_writing_payoff_style(text, c3_hook_style)
+    extra = shape_writing_rule(shape, position)
+    return f"{text}\n{extra}\n" if extra else text
+
+
+def _format_position_body(
+    position: str,
+    bridge_title: str,
+    bridge_goal: str,
+    bridge_showoff: str,
+    target_word_count: int,
+    next_bridge_goal: str,
+    template: str,
+    opening: bool | None,
+    prev_bridge_hook: str,
+) -> str:
+    family_key = template if template in BRIDGE_POSITION_TEMPLATES_BY_FAMILY else "showoff"
+    family = BRIDGE_POSITION_TEMPLATES_BY_FAMILY[family_key]
     template = family.get(position)
     if not template:
         return ""
+
+    if position == "intro" and opening is False:
+        return format_continued_intro(
+            family_key, bridge_title, bridge_goal, bridge_showoff, target_word_count, prev_bridge_hook,
+        )
 
     # 按位置计算各部分字数（4:6 / 9:1 等比例已写死在模板里）
     if position == "intro":

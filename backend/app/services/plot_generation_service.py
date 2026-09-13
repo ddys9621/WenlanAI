@@ -18,6 +18,11 @@ from app.utils.plot_line_types import normalize_plot_line_type
 
 logger = get_logger(__name__)
 
+# 单条剧情线节点数上限（主线按书长缩放最多 16，留余量）
+MAX_BEATS_PER_LINE = 20
+# 节点可选的结构化上下文字段（进 timeline_data，供桥段规划 prompt 注入）
+OPTIONAL_BEAT_TEXT_FIELDS = ("location", "antagonist", "realm")
+
 
 class PlotGenerationService:
     """剧情生成服务类"""
@@ -925,8 +930,8 @@ class PlotGenerationService:
         Returns:
             归一化后的 beats 列表，校验失败返回 None
         """
-        # 检查基本结构
-        if not beats or len(beats) < 3 or len(beats) > 15:
+        # 检查基本结构（上限 20：主线节点数按书长缩放最多 16，留余量）
+        if not beats or len(beats) < 3 or len(beats) > MAX_BEATS_PER_LINE:
             logger.warning(f"⚠️ [阶段 2] 剧情线 {line_index} 节点校验失败: 数量异常 ({len(beats) if beats else 0})")
             return None
 
@@ -939,6 +944,19 @@ class PlotGenerationService:
             if missing_fields:
                 logger.warning(f"⚠️ [阶段 2] 剧情线 {line_index} 节点 {i+1} 缺少字段: {missing_fields}")
                 return None
+
+            # 篇幅字段（可选）：正整数保留，其他一律置 None（规划器按 weight 回退）
+            if "chapters" in beat:
+                raw_chapters = beat.get("chapters")
+                try:
+                    chapters_value = int(float(raw_chapters)) if not isinstance(raw_chapters, bool) else 0
+                except (TypeError, ValueError):
+                    chapters_value = 0
+                beat["chapters"] = chapters_value if chapters_value > 0 else None
+            # 结构化上下文字段（可选）：统一成去空白字符串
+            for text_key in OPTIONAL_BEAT_TEXT_FIELDS:
+                if text_key in beat:
+                    beat[text_key] = str(beat.get(text_key) or "").strip()
 
             # 检查权重类型，尝试转换
             weight = beat.get("weight", 0)
@@ -989,6 +1007,8 @@ class PlotGenerationService:
         strength: Optional[str] = None,
         # 支线篇幅预算上限（章）：向导按全书 40% 均分下发；None = 不夹紧
         sub_budget_cap: Optional[int] = None,
+        # 全书章数：主线结构 / 节点 prompt 按它规划体量，主线 estimated_chapters 固定为它；None = 用项目 chapter_count
+        chapter_count: Optional[int] = None,
     ) -> List[PlotLine]:
         """生成剧情线
 
@@ -1004,6 +1024,9 @@ class PlotGenerationService:
             project = project_result.scalar_one_or_none()
             if not project:
                 raise ValueError("项目不存在")
+            book_chapters = chapter_count if isinstance(chapter_count, int) and chapter_count > 0 else (
+                project.chapter_count if isinstance(project.chapter_count, int) and project.chapter_count > 0 else None
+            )
 
             # 获取大纲内容（用于语义检索）
             outline_content = None
@@ -1029,6 +1052,7 @@ class PlotGenerationService:
                 "genre": project.genre,
                 "theme": project.theme,
                 "target_words": project.target_words,
+                "chapter_count": book_chapters,
                 "narrative_perspective": project.narrative_perspective,
                 "world_time_period": project.world_time_period,
                 "world_location": project.world_location,
@@ -1283,6 +1307,9 @@ class PlotGenerationService:
                     # 支线篇幅预算夹紧（只在锚定路径下生效；主线不受影响）
                     if main_ctx is not None and sub_budget_cap:
                         normalized_estimated = min(normalized_estimated, sub_budget_cap)
+                    # 主线贯穿全书：已知全书章数时 estimated_chapters 固定为它（节点 prompt 据此规划体量）
+                    if line_type == "main" and book_chapters:
+                        normalized_estimated = book_chapters
 
                     # 保存到阶段 1 结果列表
                     generated_lines_data.append({
