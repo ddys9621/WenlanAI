@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
+from sqlalchemy.orm import defer
 import json
 import asyncio
 from datetime import datetime
@@ -477,26 +478,21 @@ async def get_project_chapters(
     request: Request,
     db: AsyncSession = Depends(get_db)
 ):
-    """获取指定项目的所有章节（路径参数版本）"""
+    """获取指定项目的所有章节（不含正文：列表只用元数据，正文按章 GET /chapters/{id}）"""
     # 验证用户权限
     user_id = getattr(request.state, 'user_id', None)
     await verify_project_access(project_id, user_id, db)
-    
-    # 获取总数
-    count_result = await db.execute(
-        select(func.count(Chapter.id)).where(Chapter.project_id == project_id)
-    )
-    total = count_result.scalar_one()
-    
-    # 获取章节列表
+
+    # 不分页、一次取全，total 直接用行数；defer(content) 让几百章的全文不再进内存 / 不再进响应
     result = await db.execute(
         select(Chapter)
+        .options(defer(Chapter.content))
         .where(Chapter.project_id == project_id)
         .order_by(Chapter.chapter_number)
     )
     chapters = result.scalars().all()
-    
-    return ChapterListResponse(total=total, items=chapters)
+
+    return ChapterListResponse(total=len(chapters), items=chapters)
 
 
 @router.get("/{chapter_id}", response_model=ChapterResponse, summary="获取章节详情")

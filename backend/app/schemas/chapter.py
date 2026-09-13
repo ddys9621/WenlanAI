@@ -42,10 +42,26 @@ class ChapterResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ChapterListItem(BaseModel):
+    """章节列表项：不带正文（列表页只用标题 / 字数 / 状态，正文按章单独拉，避免几百章全文一次下发）"""
+    id: str
+    project_id: str
+    chapter_outline_id: Optional[str] = None
+    title: str
+    chapter_number: int
+    summary: Optional[str] = None
+    word_count: int = 0
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class ChapterListResponse(BaseModel):
     """章节列表响应模型"""
     total: int
-    items: list[ChapterResponse]
+    items: list[ChapterListItem]
 
 
 class ChapterGenerateRequest(BaseModel):
