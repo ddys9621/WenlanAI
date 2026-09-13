@@ -22,7 +22,7 @@ export interface StreamState {
   mode: 'single' | 'batch';
 }
 
-export interface BatchStatusState {
+interface BatchStatusState {
   status: 'running' | 'completed' | 'cancelled' | 'error';
   total: number;
   completed: number;
@@ -35,7 +35,7 @@ export interface BatchStatusState {
   errorMessage?: string;
 }
 
-export type WriteJobKind = 'chapter_generate' | 'chapter_regenerate';
+type WriteJobKind = 'chapter_generate' | 'chapter_regenerate';
 
 /** 页面自带面板承担正文任务；横幅只兜底其它任务，面板隐藏（后台运行）时才把正文任务也放进横幅 */
 export const WRITE_JOB_KINDS = ['chapter_generate', 'chapter_regenerate'];

@@ -26,10 +26,10 @@ export const isConnectionLost = (message: string) =>
 const RECONNECT_DELAY_MS = 1500;
 const MAX_RECONNECT_ATTEMPTS = 40; // ≈ 1 分钟
 
-export type AIJobListener = (message: SSEMessage, job: AIJobState) => void;
-export type AIJobSettled = (job: AIJobState) => void;
+type AIJobListener = (message: SSEMessage, job: AIJobState) => void;
+type AIJobSettled = (job: AIJobState) => void;
 
-export interface StartAIJobParams<TResult = unknown> {
+interface StartAIJobParams<TResult = unknown> {
   kind: string;
   title: string;
   projectId?: string | null;

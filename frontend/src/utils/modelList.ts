@@ -1,6 +1,6 @@
 import type { AIModelOption } from '@/types'
 
-export interface ModelGroup {
+interface ModelGroup {
   /** 分组名（vendor 前缀）；null = 不分组 */
   group: string | null
   items: AIModelOption[]

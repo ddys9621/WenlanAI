@@ -52,7 +52,7 @@ async function readErrorDetail(response: Response): Promise<string> {
 type ResolveSSE = (value: unknown) => void;
 type RejectSSE = (reason?: unknown) => void;
 
-export class SSEPostClient<TResult = unknown, TRequest = unknown> {
+class SSEPostClient<TResult = unknown, TRequest = unknown> {
   private url: string;
   private data: TRequest;
   private options: SSEClientOptions<TResult>;

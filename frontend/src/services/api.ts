@@ -108,7 +108,7 @@ export interface ChapterWriteResult {
 }
 
 /** 生成前预检查：前面「有正文但未分析（无记忆状态）」的章节 */
-export interface ChapterGenerationPrecheck {
+interface ChapterGenerationPrecheck {
   count: number;
   chapters: Array<{ id: string; chapter_number: number; title: string }>;
   message: string;
@@ -1443,7 +1443,7 @@ export const imitationApi = {
 };
 
 /** 仿写任务的 result 事件 data */
-export interface ImitationJobResult {
+interface ImitationJobResult {
   chars: number;
   used_dimensions: string[];
   strength: string;

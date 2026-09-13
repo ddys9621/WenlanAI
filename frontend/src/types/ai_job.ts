@@ -167,7 +167,7 @@ export const AI_JOB_SUMMARY_KEYS: readonly (keyof AIJobSummary)[] = [
   'id', 'kind', 'title', 'projectId', 'meta', 'status', 'startedAt', 'finishedAt', 'progress', 'wordCount', 'llm', 'error', 'connection',
 ];
 
-export const AI_JOB_KIND_LABELS: Record<string, string> = {
+const AI_JOB_KIND_LABELS: Record<string, string> = {
   bridge_fill: '桥段填充',
   bridge_expand: '桥段展开',
   character_generate: '角色生成',
