@@ -1,5 +1,4 @@
-import React, { useMemo, useEffect, useRef } from 'react';
-import { Tooltip } from 'antd';
+import React, { useMemo, useEffect, useRef, useState } from 'react';
 import {
   buildSegments,
   resolveSpans,
@@ -35,6 +34,15 @@ const TYPE_ICONS: Record<AnnotationType, string> = {
   character_event: '👤',
 };
 
+/** 悬停中的片段：fixed 定位的浮层不受阅读区 overflow 裁剪，上方空间不够就翻到下方 */
+interface HoverState {
+  key: number;
+  covering: MemoryAnnotation[];
+  x: number;
+  top: number;
+  bottom: number;
+}
+
 /**
  * 带标注的文本组件
  * 将记忆标注可视化地展示在章节文本中
@@ -48,17 +56,15 @@ const AnnotatedText: React.FC<AnnotatedTextProps> = ({
   style,
 }) => {
   const annotationRefs = useRef<Record<string, HTMLSpanElement | null>>({});
+  const [hover, setHover] = useState<HoverState | null>(null);
 
   // 当需要滚动到特定标注时
   useEffect(() => {
     if (scrollToAnnotation && annotationRefs.current[scrollToAnnotation]) {
-      const element = annotationRefs.current[scrollToAnnotation];
-      element?.scrollIntoView({
-        behavior: 'smooth',
-        block: 'center',
-      });
+      annotationRefs.current[scrollToAnnotation]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
   }, [scrollToAnnotation]);
+
   // 解析标注在正文中的区间（丢弃类型未知 / 位置无效的标注）
   const spans = useMemo(() => {
     const resolved = resolveSpans(content, annotations ?? []);
@@ -75,31 +81,18 @@ const AnnotatedText: React.FC<AnnotatedTextProps> = ({
   // 单条标注的工具提示内容
   const renderTooltipBody = (annotation: MemoryAnnotation) => (
     <div key={annotation.id}>
-      <div style={{ fontWeight: 'bold', marginBottom: 4 }}>
+      <div className="mb-1 font-semibold">
         {TYPE_ICONS[annotation.type]} {annotation.title}
       </div>
-      <div style={{ fontSize: 12, opacity: 0.9 }}>
+      <div className="text-xs opacity-90">
         {annotation.content.slice(0, 100)}
         {annotation.content.length > 100 ? '...' : ''}
       </div>
-      <div style={{ marginTop: 8, fontSize: 11, opacity: 0.7 }}>
-        重要性: {(annotation.importance * 10).toFixed(1)}/10
-      </div>
+      <div className="mt-2 text-[11px] opacity-70">重要性: {(annotation.importance * 10).toFixed(1)}/10</div>
       {annotation.tags && annotation.tags.length > 0 && (
-        <div style={{ marginTop: 4, fontSize: 11 }}>
+        <div className="mt-1 flex flex-wrap gap-1 text-[11px]">
           {annotation.tags.map((tag, i) => (
-            <span
-              key={i}
-              style={{
-                display: 'inline-block',
-                background: 'rgba(255,255,255,0.2)',
-                padding: '2px 6px',
-                borderRadius: 0,
-                marginRight: 4,
-              }}
-            >
-              {tag}
-            </span>
+            <span key={i} className="bg-white/20 px-1.5 py-px">{tag}</span>
           ))}
         </div>
       )}
@@ -117,6 +110,7 @@ const AnnotatedText: React.FC<AnnotatedTextProps> = ({
     const primary = starting[0] ?? covering[0];
     const color = TYPE_COLORS[primary.type];
     const isActive = covering.some((a) => a.id === activeAnnotationId);
+    const isHovered = hover?.key === segment.start;
 
     // 多条标注共享片段时：点击在它们之间轮换，方便逐个查看
     const handleClick = () => {
@@ -124,61 +118,52 @@ const AnnotatedText: React.FC<AnnotatedTextProps> = ({
       onAnnotationClick?.(covering[(activeIndex + 1) % covering.length]);
     };
 
-    // 工具提示内容（片段被多条标注覆盖时依次列出）
-    const tooltipContent = (
-      <div style={{ maxWidth: 300, display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {covering.map(renderTooltipBody)}
-      </div>
-    );
-
     return (
-      <Tooltip key={segment.start} title={tooltipContent} placement="top">
-        <span
-          ref={(el) => {
-            for (const annotation of starting) {
-              annotationRefs.current[annotation.id] = el;
-            }
-          }}
-          data-annotation-id={covering.map((a) => a.id).join(' ')}
-          className={`annotated-text ${isActive ? 'active' : ''}`}
-          style={{
-            position: 'relative',
-            borderBottom: `2px solid ${color}`,
-            cursor: 'pointer',
-            backgroundColor: isActive ? `${color}22` : 'transparent',
-            transition: 'all 0.2s',
-            padding: '2px 0',
-          }}
-          onClick={handleClick}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.backgroundColor = `${color}33`;
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.backgroundColor = isActive
-              ? `${color}22`
-              : 'transparent';
-          }}
-        >
-          {segment.content}
-          {starting.length > 0 && (
-            <span
-              style={{
-                position: 'absolute',
-                top: -20,
-                left: '50%',
-                transform: 'translateX(-50%)',
-                fontSize: 14,
-                whiteSpace: 'nowrap',
-                pointerEvents: 'none',
-              }}
-            >
-              {starting.map((a) => TYPE_ICONS[a.type]).join('')}
-            </span>
-          )}
-        </span>
-      </Tooltip>
+      <span
+        key={segment.start}
+        ref={(el) => {
+          for (const annotation of starting) {
+            annotationRefs.current[annotation.id] = el;
+          }
+        }}
+        data-annotation-id={covering.map((a) => a.id).join(' ')}
+        className={`annotated-text ${isActive ? 'active' : ''}`}
+        style={{
+          position: 'relative',
+          borderBottom: `2px solid ${color}`,
+          cursor: 'pointer',
+          backgroundColor: isHovered ? `${color}33` : isActive ? `${color}22` : 'transparent',
+          transition: 'all 0.2s',
+          padding: '2px 0',
+        }}
+        onClick={handleClick}
+        onMouseEnter={(e) => {
+          const r = e.currentTarget.getBoundingClientRect();
+          setHover({ key: segment.start, covering, x: r.left + r.width / 2, top: r.top, bottom: r.bottom });
+        }}
+        onMouseLeave={() => setHover((h) => (h?.key === segment.start ? null : h))}
+      >
+        {segment.content}
+        {starting.length > 0 && (
+          <span
+            style={{
+              position: 'absolute',
+              top: -20,
+              left: '50%',
+              transform: 'translateX(-50%)',
+              fontSize: 14,
+              whiteSpace: 'nowrap',
+              pointerEvents: 'none',
+            }}
+          >
+            {starting.map((a) => TYPE_ICONS[a.type]).join('')}
+          </span>
+        )}
+      </span>
     );
   };
+
+  const flipBelow = hover ? hover.top < 180 : false;
 
   return (
     <div
@@ -191,6 +176,19 @@ const AnnotatedText: React.FC<AnnotatedTextProps> = ({
       }}
     >
       {segments.map(renderAnnotatedSegment)}
+      {hover && (
+        <div
+          role="tooltip"
+          className="pointer-events-none fixed z-50 flex max-w-[300px] flex-col gap-2.5 bg-content px-3 py-2 text-sm leading-normal text-white shadow-lg"
+          style={{
+            left: hover.x,
+            top: flipBelow ? hover.bottom + 8 : hover.top - 8,
+            transform: flipBelow ? 'translateX(-50%)' : 'translate(-50%, -100%)',
+          }}
+        >
+          {hover.covering.map(renderTooltipBody)}
+        </div>
+      )}
     </div>
   );
 };

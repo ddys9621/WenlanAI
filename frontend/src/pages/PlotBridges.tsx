@@ -16,6 +16,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   Button,
+  ConfigProvider,
   Form,
   Input,
   Modal,
@@ -43,6 +44,7 @@ import {
 import { toast } from 'sonner';
 
 import { cn } from '@/lib/utils';
+import { ANTD_THEME } from '@/lib/antdTheme';
 import { plotBridgesApi } from '@/services/plotBridgesApi';
 import { settingsApi } from '@/services/api';
 import { AIJobBanner } from '@/components/ai-job/AIJobBanner';
@@ -153,7 +155,16 @@ function useAvailableModels() {
   return { options, defaultModel, loading, refresh: () => void loadModels(true) };
 }
 
+/** 本页是唯一还在用 antd 的页面：ConfigProvider 跟着页面懒加载，不再放在 main.tsx 拖累首屏主包 */
 export default function PlotBridgesPage() {
+  return (
+    <ConfigProvider theme={ANTD_THEME}>
+      <PlotBridgesPageInner />
+    </ConfigProvider>
+  );
+}
+
+function PlotBridgesPageInner() {
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
   const [bridges, setBridges] = useState<PlotBridge[]>([]);
