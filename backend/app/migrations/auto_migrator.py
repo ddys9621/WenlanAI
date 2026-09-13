@@ -291,6 +291,28 @@ async def ensure_book_dissect_v31_columns(engine: AsyncEngine):
                 logger.info("✅ book_dissect_tasks.%s already exists", col_name)
 
 
+async def ensure_book_dissect_batch_columns(engine: AsyncEngine):
+    """Ensure 分批抽取 columns exist on book_dissect_tasks table.
+
+    - chapters_per_request (int, default=0)：每次 LLM 请求抽取的章节数，0 = 自动规划
+    - chapter_limit (int, default=0)：只抽取前 N 章，0 = 全部
+    """
+    batch_columns = [
+        ("chapters_per_request", "INTEGER DEFAULT 0"),
+        ("chapter_limit", "INTEGER DEFAULT 0"),
+    ]
+
+    async with engine.begin() as conn:
+        for col_name, col_def in batch_columns:
+            if not await column_exists(conn, "book_dissect_tasks", col_name):
+                logger.info("🔧 Adding book_dissect_tasks.%s column (分批抽取)", col_name)
+                await apply_sql(conn, [
+                    f"ALTER TABLE book_dissect_tasks ADD COLUMN {col_name} {col_def}",
+                ])
+            else:
+                logger.info("✅ book_dissect_tasks.%s already exists", col_name)
+
+
 async def ensure_reference_pack_v32_columns(engine: AsyncEngine):
     """Ensure V3.2 columns exist on reference_packs table.
 
@@ -568,6 +590,7 @@ async def run_auto_migrations(engine: AsyncEngine):
         await ensure_plot_cards_scene_columns(engine)  # 场景级创作循环字段
         await ensure_book_dissect_v2_columns(engine)  # 拆书 V2 字段
         await ensure_book_dissect_v31_columns(engine)  # 拆书 V3.1 字段
+        await ensure_book_dissect_batch_columns(engine)  # 拆书分批抽取：每批章数 / 截取前 N 章
         await ensure_reference_pack_v32_columns(engine)  # 拆书 V3.2 synopsis 复活
         await ensure_reference_pack_v4_columns(engine)  # V4 P0-5：维度 JSON + 三档预压缩列
         await ensure_project_generation_prompt_column(engine)

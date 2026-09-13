@@ -104,11 +104,15 @@ _NUM_PART = r"(?:[0-9]+|[零〇○一二两三四五六七八九十百千万壹�
 # 标题行内空白：仅允许行内空白（空格/Tab/全角空格），禁止换行，避免跨行匹配
 _INLINE_WS = r"[ \t\u3000]*"
 
+# 部分阅读器 / 网站导出的 txt 会在标题前加流水号："1.第1章 xxx" / "12、第十二章 xxx" / "3: 第3章"
+# 只在紧跟「第X章」时视为前缀，避免把正文里的编号列表（"1.准备工作"）当标题
+_SERIAL_PREFIX = rf"(?:[0-9]+{_INLINE_WS}[.．、:：]{_INLINE_WS})?"
+
 # 中文章节标题主体（第X章/第X回/第X节）
-# 例："第一章 起源" / "第 1 章" / "第十二回　悟空大闹天宫"
+# 例："第一章 起源" / "第 1 章" / "第十二回　悟空大闹天宫" / "1.第1章这是个意外"
 # 严格要求标题独占一行：使用 _INLINE_WS 而非 \s，禁止 \n 进入匹配
 _CN_CHAPTER_RE = re.compile(
-    rf"^{_INLINE_WS}第{_INLINE_WS}({_NUM_PART}){_INLINE_WS}([章回节卷篇折])"
+    rf"^{_INLINE_WS}{_SERIAL_PREFIX}第{_INLINE_WS}({_NUM_PART}){_INLINE_WS}([章回节卷篇折])"
     rf"(?:{_INLINE_WS}[:：、,，.\-—]?{_INLINE_WS}([^\n]{{0,80}}?))?{_INLINE_WS}$",
     re.MULTILINE,
 )
@@ -229,7 +233,7 @@ def _find_all_titles(text: str) -> List[ChapterMatch]:
 
 # 用于从 raw_title 中剥离序号前缀，保留纯标题。
 _TITLE_STRIP_PATTERNS = [
-    re.compile(rf"^第\s*{_NUM_PART}\s*[章回节卷篇折]\s*[:：、,，.\-—\s]?\s*"),
+    re.compile(rf"^{_SERIAL_PREFIX}第\s*{_NUM_PART}\s*[章回节卷篇折]\s*[:：、,，.\-—\s]?\s*"),
     re.compile(r"^(?:CHAPTER|Chapter)\s+(?:[0-9IVXLCDM]+|[A-Za-z]+)\s*[:：\-—.\s]?\s*"),
 ]
 

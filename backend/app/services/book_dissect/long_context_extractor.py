@@ -1,10 +1,11 @@
-"""拆书 V3.1: 长上下文一次抽取器
+"""拆书 V3.1: 长上下文多章抽取器
 
-把整本书一次性塞给 LLM，返回 list[ChapterFact]。
+把一批连续章节（可以是整本书，也可以是分批规划出的若干章）一次塞给 LLM，
+返回 list[ChapterFact]。
 与 ChapterFactExtractor（逐章版）的关键差异：
-- 跳过 EntityScanner / DictionaryClassifier（LLM 自己看完全书做共指）
-- 1 次 LLM 调用产出全书 ChapterFact 数组
-- 不需要 prior_summary 注入（全书都在 prompt 里）
+- 1 次 LLM 调用产出整批 ChapterFact 数组，LLM 自己在批内做共指
+- 可选注入全书字典 / 前批摘要，保证跨批规范名一致（整本一次时两者为空）
+- finish_reason=length 视为整批失败（截断的 JSON 会静默丢章），交上层拆半重试
 
 设计文档：agent-docs/features/book_dissect_v31_quality_optimization.md §4
 
@@ -12,15 +13,16 @@
 - NovelHopQA 2025：完整上下文 + 强模型 EM>95%
 - LaRA ICML 2025：32k 内长上下文 ≥ RAG，128k 持平
 
-调用前置：必须先经 LongContextRouter.decide() 判定 use_long_context=True，
-否则应走逐章流水线。
+批大小由 batch_planner.plan_batches 决定，调用方需保证单批在模型预算内。
 """
 
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 from app.services.book_dissect.chapter_fact_extractor import (
+    ChapterFactExtractor,
     _get_str,
     _parse_characters,
     _parse_concepts,
@@ -35,18 +37,18 @@ from app.services.book_dissect.prompts import (
     LONG_CONTEXT_EXTRACT_PROMPT,
     SYSTEM_PROMPT_V31_LONG_CONTEXT,
 )
-from app.services.book_dissect.v2_types import ChapterFact
+from app.services.book_dissect.v2_types import ChapterFact, DictionaryEntry
 from app.utils.json_cleaner import safe_parse_json
 
 logger = logging.getLogger(__name__)
 
 
 class LongContextExtractionError(Exception):
-    """长上下文抽取彻底失败（LLM 调用 / JSON 解析）。"""
+    """长上下文抽取彻底失败（LLM 调用 / JSON 解析 / 输出截断）。"""
 
 
 class LongContextExtractor:
-    """整本书一次性抽取 ChapterFact 列表。"""
+    """一批章节一次性抽取 ChapterFact 列表。"""
 
     DEFAULT_TEMPERATURE = 0.1
 
@@ -63,24 +65,32 @@ class LongContextExtractor:
     async def extract_all(
         self,
         chapters: list[Chapter],
+        dictionary: Optional[list[DictionaryEntry]] = None,
+        prior_summary: Optional[str] = None,
     ) -> list[ChapterFact]:
-        """主入口：一次 LLM 调用产出全书 ChapterFact。
+        """主入口：一次 LLM 调用产出整批 ChapterFact。
 
         Args:
-            chapters: 章节列表（必须非空，且预先经 LongContextRouter 判定可走）
+            chapters: 章节列表（必须非空，且预先经 batch_planner 规划在预算内）
+            dictionary: 全书实体字典（分批模式注入 top N 规范名；整本一次可不传）
+            prior_summary: 前批章节摘要（分批模式注入；第一批 / 整本一次为空）
 
         Returns:
             list[ChapterFact]，按 chapter_number 升序，长度 = len(chapters)
             漏给的章节用空 ChapterFact 填充
 
         Raises:
-            LongContextExtractionError: LLM 调用失败 / 返回非 JSON 等彻底失败
+            LongContextExtractionError: LLM 调用失败 / 返回非 JSON / 输出被截断等彻底失败
         """
         if not chapters:
             return []
 
         full_text = self._build_full_text(chapters)
-        user_prompt = LONG_CONTEXT_EXTRACT_PROMPT.format(full_text=full_text)
+        user_prompt = LONG_CONTEXT_EXTRACT_PROMPT.format(
+            prior_context=self._build_prior_context(prior_summary),
+            dictionary_context=self._build_dictionary_context(dictionary),
+            full_text=full_text,
+        )
 
         try:
             resp = await self.ai_service.generate_text(
@@ -99,11 +109,37 @@ class LongContextExtractor:
             logger.warning("[拆书V3.1-长上下文] LLM 返回空内容")
             raise LongContextExtractionError("long-context LLM returned empty content")
 
+        # 输出被 Max Tokens 截断：json_repair 能补全括号但后半批章节已丢，
+        # 静默接受会让这些章记成 failed；抛错让上层拆半重试更划算
+        finish_reason = resp.get("finish_reason") if isinstance(resp, dict) else None
+        if finish_reason == "length":
+            logger.warning(
+                "[拆书V3.1-长上下文] 输出被截断（finish_reason=length，%d 章 / %d 字符）",
+                len(chapters), len(content),
+            )
+            raise LongContextExtractionError(
+                f"long-context output truncated by max_tokens ({len(chapters)} chapters)"
+            )
+
         return self._parse_response(content, chapters)
 
     # ------------------------------------------------------------------
     # 内部
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_prior_context(prior_summary: Optional[str]) -> str:
+        return f"【前文已发生情节摘要】\n{prior_summary}" if prior_summary else ""
+
+    @staticmethod
+    def _build_dictionary_context(dictionary: Optional[list[DictionaryEntry]]) -> str:
+        lines = []
+        for entry in (dictionary or [])[: ChapterFactExtractor.DICTIONARY_TOP_N]:
+            if entry.entity_type in ("rejected", "unknown"):
+                continue
+            alias_part = f" (别名：{', '.join(entry.aliases)})" if entry.aliases else ""
+            lines.append(f"- {entry.name} [{entry.entity_type}]{alias_part}")
+        return "【全书已知实体（请优先复用这些规范名）】\n" + "\n".join(lines) if lines else ""
 
     def _build_full_text(self, chapters: list[Chapter]) -> str:
         """用边界标记拼接所有章节正文。"""

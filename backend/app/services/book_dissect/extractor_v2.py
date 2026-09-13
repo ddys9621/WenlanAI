@@ -4,12 +4,21 @@
     splitting    0-3   章节切分（V1 已完成）
     scanning     3-8   实体扫描
     dictionary   8-15  LLM 字典分类
-    extracting   15-80 逐章 LLM 抽取（最长阶段）
+    extracting   15-80 分批 LLM 抽取（最长阶段）
     aggregating  80-92 全书聚合
     synthesizing 92-99 网文产物 LLM
     done         100   收尾
 
-进度更新策略：每完成 N 章 / 每个聚合步骤就 commit 一次，让前端轮询能看到细粒度进度。
+抽取阶段统一为"每批 N 章一次请求"（batch_planner.plan_batches 规划）：
+    single   每批 1 章 → ChapterFactExtractor（逐章 + 长章分段），即原 chunked 路径
+    batched  每批多章 → LongContextExtractor + 字典 / 前批摘要注入
+    one_shot 全书一批 → LongContextExtractor，跳过字典分类（从结果反推）
+批失败（LLM 报错 / 非 JSON / 输出截断）自动对半拆分重试，拆到单章走 single 路径。
+
+进度更新策略：每完成一批 / 每个聚合步骤就 commit 一次，让前端轮询能看到细粒度进度；
+同时通过 generation_trace（ai_jobs 绑定的 ContextVar）上报 progress / stage 事件，
+通用 AI 任务弹窗 / 托盘实时显示"正在抽取第 3/10 批（第 121-180 章）"这类文案。
+流水线失败以异常抛出（ExtractionAborted / 原异常），ai_jobs 据此把任务标 error 而非 done。
 
 后台任务异常处理：单章失败不阻断后续章节；最终统计 chapters_extracted vs chapters_failed。
 """
@@ -21,7 +30,7 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import NoReturn, Optional
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -37,6 +46,12 @@ from app.models.reference_pack import ReferencePack
 from app.services.ai_service import AIService
 from app.services.book_dissect.alias_resolver import AliasResolver
 from app.services.book_dissect.archetype_generator import ArchetypeGenerator
+from app.services.book_dissect.batch_planner import (
+    BatchPlan,
+    plan_batches,
+    select_target_indices,
+    split_batch,
+)
 from app.services.book_dissect.bridge_detector import BridgeDetector  # V4.1
 from app.services.book_dissect.bridge_pattern_aggregator import (  # V4.1
     BridgePatternAggregator,
@@ -59,7 +74,6 @@ from app.services.book_dissect.long_context_extractor import (
     LongContextExtractionError,
     LongContextExtractor,
 )
-from app.services.book_dissect.long_context_router import LongContextRouter
 from app.services.book_dissect.methodology_generator import MethodologyGenerator
 from app.services.book_dissect.pattern_generators import build_pattern_dimensions
 from app.services.book_dissect.relation_aggregator import RelationAggregator
@@ -79,8 +93,14 @@ from app.services.book_dissect.v2_types import (
     EntityProfile,
     V2Phase,
 )
+from app.services.generation_trace import begin_stage, trace_progress
 
 logger = logging.getLogger(__name__)
+
+
+class ExtractionAborted(RuntimeError):
+    """流水线自行判定无法继续（全文丢失 / 切出 0 章 / 未选出章节）：DB 已落 failed，
+    抛出让 ai_jobs 把任务标为失败，而不是"完成"。"""
 
 
 # 进度切片
@@ -90,7 +110,14 @@ _PROGRESS_DICT_END = 15
 _PROGRESS_EXTRACT_END = 80
 _PROGRESS_AGGREGATE_BEFORE_VERIFY = 88   # V3.1：聚合主体完成
 _PROGRESS_AGGREGATE_END = 92             # 含 verification pass
+_PROGRESS_SYNTHESIZE_BRIDGES = 96        # 6 个维度 generator 完成，进入桥段识别
 _PROGRESS_SYNTHESIZE_END = 99
+
+
+def _set_progress(task: BookDissectTask, progress: int, message: str) -> None:
+    """DB 进度与 AI 任务弹窗进度同步推进（trace 未绑定时后者 no-op）。"""
+    task.progress = progress
+    trace_progress(message, progress)
 
 
 async def _create_task_session(user_id: str) -> AsyncSession:
@@ -122,36 +149,43 @@ async def _load_chapters_from_disk(
     return chapters
 
 
+def _sync_chapter_meta(task: BookDissectTask, chapters: list[Chapter]) -> None:
+    """运行时重切结果与上传时不一致（切分规则升级 / LLM 兜底重切）→ 以运行时为准更新任务元信息。
+
+    否则页面会出现"章节数 581 / 章节抽取 0/2111"这种对不上的数字，启动前的分批预估也会按旧章数算。
+    字段格式与 api.book_dissect._meta_from_chapter 一致。
+    """
+    if len(chapters) == (task.chapter_count or 0):
+        return
+    logger.warning(
+        "[拆书V2] task=%s 运行时切分 %d 章 ≠ 上传时 %d 章，按运行时结果更新 chapter_count / chapters_meta",
+        task.id, len(chapters), task.chapter_count or 0,
+    )
+    task.chapter_count = len(chapters)
+    task.total_words = sum(ch.word_count for ch in chapters)
+    task.chapters_meta = json.dumps(
+        [
+            {
+                "number": ch.chapter_number, "title": ch.title, "raw_title": ch.raw_title,
+                "word_count": ch.word_count, "kind": ch.kind,
+            }
+            for ch in chapters
+        ],
+        ensure_ascii=False,
+    )
+
+
 def _select_target_chapters(
     chapters: list[Chapter],
     sampling_mode: str,
     sampling_param: int,
+    chapter_limit: int = 0,
 ) -> list[Chapter]:
-    """采样：根据 task.sampling_mode 决定要抽取的章节子集。"""
-    if not chapters:
-        return []
-    if sampling_mode == "every_n":
-        n = max(1, sampling_param or 1)
-        return chapters[::n]
-    if sampling_mode == "key_only":
-        # 简化：取前 5% + 中段 5% + 末段 5%
-        total = len(chapters)
-        k = max(1, total // 20)
-        head = chapters[:k]
-        mid_start = max(0, total // 2 - k // 2)
-        mid = chapters[mid_start:mid_start + k]
-        tail = chapters[-k:]
-        # 去重保序
-        seen: set[int] = set()
-        out: list[Chapter] = []
-        for ch in head + mid + tail:
-            if ch.chapter_number in seen:
-                continue
-            seen.add(ch.chapter_number)
-            out.append(ch)
-        return out
-    # 默认 all
-    return list(chapters)
+    """先按 chapter_limit 截取前 N 章，再按 task.sampling_mode 采样出要抽取的子集。"""
+    indices = select_target_indices(
+        len(chapters), sampling_mode, sampling_param, chapter_limit=chapter_limit,
+    )
+    return [chapters[i] for i in indices]
 
 
 async def run_extraction_v2_background(
@@ -171,11 +205,14 @@ async def run_extraction_v2_background(
 
         task.status = "running"
         task.stage = V2Phase.SPLITTING.value
+        task.extraction_phase = V2Phase.SPLITTING.value
         task.progress = 0
         task.started_at = datetime.now()
         task.error_message = None
         task.version = 2
         await db_session.commit()
+        trace_progress(f"正在切分章节（约 {task.total_words or 0:,} 字）…", 0)
+        split_stage = begin_stage("splitting", "章节切分")
 
         # 1. 加载章节（V3.1.4：传入 ai_service 启用 LLM 切分兜底）
         try:
@@ -185,127 +222,60 @@ async def run_extraction_v2_background(
             )
         except FileNotFoundError:
             await _mark_failed(db_session, task, "全文文件丢失，请重新上传")
-            return
         if not chapters:
             await _mark_failed(db_session, task, "重新切分得到 0 章")
-            return
+        _sync_chapter_meta(task, chapters)
 
-        # 采样
+        # 采样 + 截取前 N 章
         target_chapters = _select_target_chapters(
-            chapters, task.sampling_mode or "all", task.sampling_param or 1
+            chapters,
+            task.sampling_mode or "all",
+            task.sampling_param or 1,
+            chapter_limit=task.chapter_limit or 0,
         )
+        if not target_chapters:
+            await _mark_failed(db_session, task, "按当前范围 / 采样设置未选出任何章节")
         task.chapters_total = len(target_chapters)
         task.chapters_extracted = 0
         task.chapters_failed = 0
 
-        # ====== V3.1: 路由判定 ======
-        # extraction_engine: auto / chunked / long_context
-        # 设计文档：agent-docs/features/book_dissect_v31_quality_optimization.md §4
-        engine_mode = (getattr(task, "extraction_engine", None) or "auto").lower()
-        router = LongContextRouter()
-        decision = router.decide(target_chapters, model=getattr(ai_service, "default_model", None))
-        logger.info(
-            "[拆书V3.1] task=%s engine=%s decision: use_lc=%s reason=%s tokens=%d ctx=%d",
-            task_id, engine_mode, decision.use_long_context, decision.reason,
-            decision.estimated_tokens, decision.context_window,
+        # ====== 分批规划 ======
+        # extraction_engine: auto(按模型上下文 / Max Tokens 自动分批) / chunked(逐章) / long_context(整本一批)
+        # chapters_per_request: 用户指定单批章数（0 = 自动）
+        engine_mode = (task.extraction_engine or "auto").lower()
+        plan = plan_batches(
+            [len(ch.content or "") for ch in target_chapters],
+            model=getattr(ai_service, "default_model", None),
+            max_tokens=getattr(ai_service, "default_max_tokens", None),
+            extraction_engine=engine_mode,
+            chapters_per_request=task.chapters_per_request or 0,
         )
+        logger.info(
+            "[拆书-分批] task=%s engine=%s mode=%s chapters=%d batches=%d cap=%d "
+            "ctx=%d(known=%s) input_budget=%d max_tokens=%d warnings=%s",
+            task_id, engine_mode, plan.mode, plan.target_count, plan.batch_count,
+            plan.chapters_per_request, plan.context_window, plan.context_known,
+            plan.input_budget_tokens, plan.output_budget_tokens, plan.warnings,
+        )
+        split_stage.done(章节=len(chapters), 目标章节=len(target_chapters), 批次=plan.batch_count)
+        # 章数 / 元信息 / 目标章数先落库，页面轮询立刻能看到"章节抽取 0/N"且 N 与章节数一致
+        await db_session.commit()
 
-        # 强制长上下文但不满足条件 → 快速失败
-        if engine_mode == "long_context" and not decision.use_long_context:
-            await _mark_failed(
-                db_session, task,
-                f"强制长上下文模式但条件不满足：{decision.reason}",
-            )
-            return
-
-        # 最终判定：user 强制 / auto 路由
-        if engine_mode == "chunked":
-            use_long_context = False
-        elif engine_mode == "long_context":
-            use_long_context = True   # 上面已检查过 decision
-        else:  # auto
-            use_long_context = decision.use_long_context
-
-        if use_long_context:
-            # ====== 长上下文路径 ======
-            task.progress = _PROGRESS_SCANNING_START
-            task.stage = V2Phase.EXTRACTING.value
-            task.extraction_phase = "long_context_extraction"
-            await db_session.commit()
-
-            # 清旧表（与逐章路径一致的干净状态）
-            await db_session.execute(delete(BookDissectChapterFact).where(
-                BookDissectChapterFact.task_id == task_id
-            ))
-            await db_session.execute(delete(BookDissectDictionary).where(
-                BookDissectDictionary.task_id == task_id
-            ))
-            await db_session.commit()
-
-            # 调一次 LLM 抽取整本
-            try:
-                lc_extractor = LongContextExtractor(ai_service=ai_service)
-                extracted_facts = await lc_extractor.extract_all(target_chapters)
-            except LongContextExtractionError as exc:
-                await _mark_failed(
-                    db_session, task,
-                    f"长上下文抽取失败：{exc}",
-                )
-                return
-
-            # V3.1 长上下文路径修复（F1）：
-            # 长上下文模式跳过了 V2 字典分类阶段（省 1 次 LLM），但 EntityAggregator
-            # 依赖字典提供 entity_type 信息。从 ChapterFact 反推一个简单字典，避免
-            # type_by_name 为空导致所有实体走 fallback 默认值，造成数据质量降级。
-            dictionary: list[DictionaryEntry] = _build_dictionary_from_facts(extracted_facts)
-            logger.info(
-                "[V3.1-长上下文] task=%s 从 ChapterFact 反推字典 entries=%d",
-                task_id, len(dictionary),
-            )
-
-            # 写章节事实表
-            for fact in extracted_facts:
-                ok = bool(
-                    fact.summary or fact.characters or fact.events or fact.locations
-                )
-                db_session.add(BookDissectChapterFact(
-                    task_id=task_id,
-                    chapter_number=fact.chapter_number,
-                    chapter_title=fact.chapter_title or "",
-                    fact_json=_serialize_chapter_fact(fact),
-                    summary=fact.summary,
-                    extraction_status="success" if ok else "failed",
-                    extraction_error=None if ok else "long_context_missed",
-                    segment_count=1,
-                    extracted_at=datetime.now(),
-                ))
-                if ok:
-                    task.chapters_extracted += 1
-                else:
-                    task.chapters_failed += 1
-
-            task.progress = _PROGRESS_EXTRACT_END
-            await db_session.commit()
-            logger.info(
-                "[拆书V3.1] task=%s long_context done extracted=%d/%d failed=%d",
-                task_id, task.chapters_extracted, task.chapters_total, task.chapters_failed,
-            )
-        else:
-            # ====== 逐章路径（现有逻辑）======
-            extracted_facts, dictionary = await _run_chunked_extraction(
-                db_session=db_session,
-                task=task,
-                task_id=task_id,
-                target_chapters=target_chapters,
-                ai_service=ai_service,
-            )
-
-        # ====== V3.1 路由结束，后续两条路径都走到同一聚合入口 ======
+        extracted_facts, dictionary = await _run_batched_extraction(
+            db_session=db_session,
+            task=task,
+            task_id=task_id,
+            target_chapters=target_chapters,
+            plan=plan,
+            ai_service=ai_service,
+        )
 
         # 5. 聚合
         task.stage = V2Phase.AGGREGATING.value
         task.extraction_phase = V2Phase.AGGREGATING.value
         await db_session.commit()
+        trace_progress("全书聚合：合并实体 / 关系 / 事件时间线…", task.progress)
+        agg_stage = begin_stage("aggregating", "全书聚合")
 
         alias_resolver = AliasResolver()
         alias_map = alias_resolver.resolve(dictionary, extracted_facts)
@@ -325,6 +295,8 @@ async def run_extraction_v2_background(
                     "[拆书V3.1] task=%s detected %d conflicts, calling LLM verification",
                     task_id, len(conflicts),
                 )
+                trace_progress(f"实体信息冲突仲裁：{len(conflicts)} 处交给模型裁定…", task.progress)
+                agg_stage.note(冲突仲裁=len(conflicts))
                 verifier = VerificationPass(ai_service=ai_service)
                 resolutions = await verifier.resolve(conflicts)
                 if resolutions:
@@ -333,7 +305,7 @@ async def run_extraction_v2_background(
                         "[拆书V3.1] task=%s applied %d resolutions",
                         task_id, len(resolutions),
                     )
-            task.progress = _PROGRESS_AGGREGATE_BEFORE_VERIFY
+            _set_progress(task, _PROGRESS_AGGREGATE_BEFORE_VERIFY, "全书聚合：整理关系与事件时间线…")
             await db_session.commit()
         except Exception as exc:
             # 仲裁失败不阻塞主流水线，记录后继续
@@ -356,8 +328,12 @@ async def run_extraction_v2_background(
         await _write_entities(db_session, task_id, entities, parent_map)
         await _write_relations(db_session, task_id, relations)
         await _write_events(db_session, task_id, timeline)
-        task.progress = _PROGRESS_AGGREGATE_END
+        _set_progress(
+            task, _PROGRESS_AGGREGATE_END,
+            f"聚合完成：{len(entities)} 个实体 · {len(relations)} 条关系 · {len(timeline)} 个事件",
+        )
         await db_session.commit()
+        agg_stage.done(实体=len(entities), 关系=len(relations), 事件=len(timeline))
 
         # 6. V3 仿写参考包：并行调 5 个核心 generator + 1 个 synopsis (V3.2 复活)
         #
@@ -370,6 +346,8 @@ async def run_extraction_v2_background(
         task.stage = V2Phase.SYNTHESIZING.value
         task.extraction_phase = V2Phase.SYNTHESIZING.value
         await db_session.commit()
+        trace_progress("生成参考包：手法 / 文风 / 结构 / 角色原型 / 世界观 / 类型骨架 6 个维度并行生成…", task.progress)
+        synth_stage = begin_stage("synthesizing", "生成参考包维度")
 
         stats = {
             "chapter_count": task.chapter_count,
@@ -412,6 +390,9 @@ async def run_extraction_v2_background(
                 generated_dims.append(key)
             else:
                 pack_payload[key] = None
+        synth_stage.done(成功=len(generated_dims), 失败=len(dim_keys) - len(generated_dims))
+        _set_progress(task, _PROGRESS_SYNTHESIZE_BRIDGES, f"参考包维度生成完成 {len(generated_dims)}/{len(dim_keys)}，开始识别桥段…")
+        await db_session.commit()
 
         # V3.2-P2：仅是纯聚合计算 entities/relations/events 三维度（不调 LLM）
         # 从 V2 表读已抽好的实体/关系/事件原始数据，输出分布信号为不含具体名字的抽象特征
@@ -444,6 +425,7 @@ async def run_extraction_v2_background(
         # 输出：bridges_json / character_archive_json 两个 V4.1 维度
         # 失败策略：聚合失败 → 该维度为 None，不阻塞主流程
         # ============================================================
+        bridge_stage = begin_stage("bridges", "桥段识别与聚合")
         try:
             # V4.2 重构：传入 ai_service 启用 LLM 主驱动模式
             # detect_bridges 已改为 async；LLM 失败会自动回退到 rule 模式
@@ -477,11 +459,13 @@ async def run_extraction_v2_background(
                 )
             else:
                 pack_payload["bridges"] = None
+            bridge_stage.done(桥段=len(bridges))
         except Exception as _bridge_err:  # pragma: no cover
             logger.warning(
                 "[V4.2-bridges] task=%s 聚合失败（已跳过）：%s", task_id, _bridge_err,
             )
             pack_payload["bridges"] = None
+            bridge_stage.skip(f"识别失败已跳过：{_bridge_err}"[:120])
 
         try:
             arch_builder = CharacterArchiveBuilder()
@@ -525,6 +509,9 @@ async def run_extraction_v2_background(
             pack_payload["character_archive"] = None
 
         # 7. 写入 ReferencePack
+        _set_progress(task, _PROGRESS_SYNTHESIZE_END, "写入参考包并预压缩各维度…")
+        await db_session.commit()
+        pack_stage = begin_stage("pack", "写入参考包")
         pack_id = await _write_reference_pack(
             db_session=db_session,
             task=task,
@@ -585,6 +572,10 @@ async def run_extraction_v2_background(
         task.extraction_phase = V2Phase.DONE.value
         task.completed_at = datetime.now()
         await db_session.commit()
+        pack_stage.done(
+            章节=f"{task.chapters_extracted}/{task.chapters_total}",
+            实体=len(entities), 维度=len(generated_dims),
+        )
 
         logger.info(
             "[拆书V3] 完成 task=%s chapters=%d/%d entities=%d "
@@ -595,21 +586,32 @@ async def run_extraction_v2_background(
             pack_id, generated_dims,
         )
 
+    except asyncio.CancelledError:
+        # 用户手动停止（AIJobManager.cancel）：落库为 cancelled，前端轮询才能停下并允许重新抽取。
+        # 取消可能打在 flush / commit 中途，先 rollback 让会话回到干净状态；已 commit 的批次事实保留。
+        logger.info("[拆书V2] 任务被手动停止 task=%s", task_id)
+        if db_session is not None:
+            try:
+                await db_session.rollback()
+                await _mark_terminal(db_session, task_id, status="cancelled", message=CANCELLED_MESSAGE)
+            except Exception as inner:
+                logger.error("[拆书V2] 写停止状态时出错 task=%s err=%s", task_id, inner)
+        raise
+    except ExtractionAborted:
+        # 前置校验失败：_mark_failed 已落库，原样抛给 ai_jobs 标 error（不再覆盖 error_message）
+        raise
     except Exception as exc:
         logger.error("[拆书V2] 未预期异常 task=%s err=%s", task_id, exc, exc_info=True)
         if db_session is not None:
             try:
-                refresh = await db_session.execute(
-                    select(BookDissectTask).where(BookDissectTask.id == task_id)
+                await _mark_terminal(
+                    db_session, task_id,
+                    status="failed", message=f"{type(exc).__name__}: {exc}"[:500],
                 )
-                task = refresh.scalar_one_or_none()
-                if task:
-                    task.status = "failed"
-                    task.error_message = f"{type(exc).__name__}: {exc}"[:500]
-                    task.completed_at = datetime.now()
-                    await db_session.commit()
             except Exception as inner:
                 logger.error("[拆书V2] 写失败状态时再次出错 %s", inner)
+        # 抛给 ai_jobs：弹窗 / 托盘显示失败，而不是"完成"
+        raise
     finally:
         if db_session is not None:
             await db_session.close()
@@ -619,6 +621,8 @@ async def run_extraction_v2_background(
 # 辅助
 # ---------------------------------------------------------------------------
 
+CANCELLED_MESSAGE = "已手动停止抽取；已完成批次的章节事实已保留，可重新抽取"
+
 
 async def _fetch_task(db_session: AsyncSession, task_id: str) -> Optional[BookDissectTask]:
     result = await db_session.execute(
@@ -627,9 +631,24 @@ async def _fetch_task(db_session: AsyncSession, task_id: str) -> Optional[BookDi
     return result.scalar_one_or_none()
 
 
-async def _mark_failed(db_session: AsyncSession, task: BookDissectTask, msg: str) -> None:
+async def _mark_failed(db_session: AsyncSession, task: BookDissectTask, msg: str) -> NoReturn:
+    """流水线前置校验不通过：落库 failed 后抛 ExtractionAborted 终止（ai_jobs 据此把任务标为失败）。"""
     task.status = "failed"
     task.error_message = msg
+    task.completed_at = datetime.now()
+    await db_session.commit()
+    raise ExtractionAborted(msg)
+
+
+async def _mark_terminal(
+    db_session: AsyncSession, task_id: str, *, status: str, message: str,
+) -> None:
+    """按 task_id 重新查询后写终态（异常 / 取消路径上原 task 对象可能已过期或未绑定）。"""
+    task = await _fetch_task(db_session, task_id)
+    if task is None:
+        return
+    task.status = status
+    task.error_message = message
     task.completed_at = datetime.now()
     await db_session.commit()
 
@@ -921,53 +940,66 @@ async def _write_reference_pack(
 
 
 # ---------------------------------------------------------------------------
-# V3.1: 逐章路径（封装原 V2 流水线的 scanning / dictionary / extracting 三步）
+# 分批抽取（scanning / dictionary / extracting 三步；single / batched / one_shot 共用）
 # ---------------------------------------------------------------------------
 
+# 各分批模式写入 task.extraction_phase 的值（前端 PHASE_LABELS 据此显示）
+_PHASE_BY_MODE = {
+    "single": V2Phase.EXTRACTING.value,
+    "batched": "batched_extraction",
+    "one_shot": "long_context_extraction",
+}
 
-async def _run_chunked_extraction(
+# 进度文案里的分批模式名
+_MODE_LABELS = {"single": "逐章", "batched": "分批", "one_shot": "整本一次"}
+
+
+def _batch_range_label(batch: list[Chapter]) -> str:
+    """进度文案用的章节范围：「第 12 章」/「第 12-71 章」。"""
+    first, last = batch[0].chapter_number, batch[-1].chapter_number
+    return f"第 {first} 章" if first == last else f"第 {first}-{last} 章"
+
+
+def _fact_has_content(fact: ChapterFact) -> bool:
+    return bool(fact.summary or fact.characters or fact.events or fact.locations)
+
+
+def _empty_fact(ch: Chapter) -> ChapterFact:
+    return ChapterFact(chapter_number=ch.chapter_number, chapter_title=ch.title or "")
+
+
+async def _build_dictionary_via_llm(
     *,
     db_session: AsyncSession,
     task: BookDissectTask,
     task_id: str,
     target_chapters: list[Chapter],
     ai_service: AIService,
-) -> tuple[list[ChapterFact], list[DictionaryEntry]]:
-    """逐章抽取路径（与原 V2 主流水线 §174-278 行为一致）。
-
-    步骤：
-      1. EntityScanner（纯正则扫描候选实体）
-      2. DictionaryClassifier（LLM 分类）→ 写 dictionary 表
-      3. 逐章 ChapterFactExtractor + FactValidator → 写 chapter_fact 表
-
-    Returns:
-        (extracted_facts, dictionary)
-    """
-    # 2. EntityScanner
-    task.progress = _PROGRESS_SCANNING_START
+) -> list[DictionaryEntry]:
+    """EntityScanner（纯正则）→ DictionaryClassifier（1 次 LLM）→ 写 dictionary 表。"""
+    _set_progress(task, _PROGRESS_SCANNING_START, f"实体扫描：正则预扫 {len(target_chapters)} 章正文中的人名 / 地名 / 组织…")
     task.stage = V2Phase.SCANNING.value
     task.extraction_phase = V2Phase.SCANNING.value
     await db_session.commit()
+    scan_stage = begin_stage("scanning", "实体扫描")
 
     scanner = EntityScanner()
     full_text = "\n\n".join(ch.content for ch in target_chapters)
     chapter_titles = [ch.raw_title for ch in target_chapters]
     candidates = scanner.scan(full_text, chapter_titles=chapter_titles)
     logger.info("[拆书V2] task=%s scan candidates=%d", task_id, len(candidates))
-    task.progress = _PROGRESS_SCANNING_END
+    scan_stage.done(候选=len(candidates))
+    _set_progress(task, _PROGRESS_SCANNING_END, f"字典分类：模型归类 {len(candidates)} 个候选实体（1 次请求）…")
     task.stage = V2Phase.DICTIONARY.value
     task.extraction_phase = V2Phase.DICTIONARY.value
     await db_session.commit()
+    dict_stage = begin_stage("dictionary", "字典分类")
 
-    # 3. DictionaryClassifier
     classifier = DictionaryClassifier(ai_service=ai_service)
     dictionary = await classifier.classify(candidates)
     logger.info("[拆书V2] task=%s dictionary=%d", task_id, len(dictionary))
+    dict_stage.done(词条=len(dictionary))
 
-    # 写库（先清旧，再插新）
-    await db_session.execute(delete(BookDissectDictionary).where(
-        BookDissectDictionary.task_id == task_id
-    ))
     for entry in dictionary:
         db_session.add(BookDissectDictionary(
             task_id=task_id,
@@ -979,79 +1011,220 @@ async def _run_chunked_extraction(
             sample_context=entry.sample_context,
             confidence=entry.confidence,
         ))
-    task.progress = _PROGRESS_DICT_END
-    task.stage = V2Phase.EXTRACTING.value
-    task.extraction_phase = V2Phase.EXTRACTING.value
     await db_session.commit()
+    return dictionary
 
-    # 4. 逐章抽取
-    extractor = ChapterFactExtractor(ai_service=ai_service)
-    summary_builder = SummaryBuilder()
-    validator = FactValidator()
 
-    extracted_facts: list[ChapterFact] = []
-    # 清旧 chapter facts
-    await db_session.execute(delete(BookDissectChapterFact).where(
-        BookDissectChapterFact.task_id == task_id
-    ))
-    await db_session.commit()
+async def _extract_batch_with_fallback(
+    batch: list[Chapter],
+    *,
+    single_extractor: ChapterFactExtractor,
+    batch_extractor: LongContextExtractor,
+    dictionary: list[DictionaryEntry],
+    prior_summary: str,
+    task_id: str,
+    progress: int = 0,
+) -> list[tuple[Chapter, ChapterFact, Optional[str]]]:
+    """抽取一批章节，返回与 batch 同序的 (chapter, fact, error)；error 为 None 表示成功。
 
-    for idx, ch in enumerate(target_chapters):
-        prior_summary = summary_builder.build(extracted_facts)
+    - 单章：ChapterFactExtractor（长章自动分段 + 切半重试），失败即该章失败
+    - 多章：LongContextExtractor 一次抽整批
+        · 整批失败（LLM 报错 / 非 JSON / 输出截断）→ 对半拆分递归
+        · LLM 漏给 / 给空的章节 → 收集为子批递归（全漏视为整批失败）
+      每次递归批大小严格缩小，最终落到单章路径，保证终止。
+    progress 只用于把拆分重试的提示带上当前进度百分比送进 AI 任务弹窗。
+    """
+    if len(batch) == 1:
+        ch = batch[0]
         try:
-            fact = await extractor.extract(
+            fact = await single_extractor.extract(
                 chapter_number=ch.chapter_number,
                 chapter_title=ch.title or ch.raw_title or "",
                 chapter_text=ch.content or "",
                 dictionary=dictionary,
-                prior_summary=prior_summary,
+                prior_summary=prior_summary or None,
             )
-            # 形态学过滤
-            fact = validator.validate(fact, dictionary=dictionary)
-            extracted_facts.append(fact)
-            task.chapters_extracted += 1
-            status = "success"
-            error_message = None
+            return [(ch, fact, None)]
         except ChapterExtractionError as exc:
-            task.chapters_failed += 1
-            fact = ChapterFact(
-                chapter_number=ch.chapter_number,
-                chapter_title=ch.title or "",
-            )
-            status = "failed"
-            error_message = str(exc)[:500]
+            return [(ch, _empty_fact(ch), str(exc)[:500])]
         except Exception as exc:  # 兜底
             logger.error("[拆书V2] 章节抽取意外异常 task=%s ch=%s err=%s",
                          task_id, ch.chapter_number, exc, exc_info=True)
-            task.chapters_failed += 1
-            fact = ChapterFact(
+            return [(ch, _empty_fact(ch), f"{type(exc).__name__}: {exc}"[:500])]
+
+    async def _recurse(sub_batches: list[list[Chapter]]):
+        out: list[tuple[Chapter, ChapterFact, Optional[str]]] = []
+        for sub in sub_batches:
+            out.extend(await _extract_batch_with_fallback(
+                sub,
+                single_extractor=single_extractor,
+                batch_extractor=batch_extractor,
+                dictionary=dictionary,
+                prior_summary=prior_summary,
+                task_id=task_id,
+                progress=progress,
+            ))
+        return out
+
+    def _halves(chs: list[Chapter]) -> list[list[Chapter]]:
+        return [[chs[i] for i in half] for half in split_batch(list(range(len(chs))))]
+
+    try:
+        facts = await batch_extractor.extract_all(
+            batch, dictionary=dictionary, prior_summary=prior_summary or None,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[拆书-分批] task=%s 批次（第%d-%d章，%d 章）失败：%s → 对半拆分重试",
+            task_id, batch[0].chapter_number, batch[-1].chapter_number, len(batch), exc,
+            exc_info=not isinstance(exc, LongContextExtractionError),
+        )
+        trace_progress(
+            f"{_batch_range_label(batch)} 整批抽取失败（{str(exc)[:60]}），拆成两半重试…",
+            progress,
+        )
+        return await _recurse(_halves(batch))
+
+    by_num = {f.chapter_number: f for f in facts}
+    results: list[tuple[Chapter, ChapterFact, Optional[str]]] = []
+    missed: list[Chapter] = []
+    for ch in batch:
+        f = by_num.get(ch.chapter_number)
+        if f is not None and _fact_has_content(f):
+            results.append((ch, f, None))
+        else:
+            missed.append(ch)
+
+    if missed:
+        logger.warning(
+            "[拆书-分批] task=%s 批次（%d 章）LLM 漏给 %d 章：%s → 子批重试",
+            task_id, len(batch), len(missed), [c.chapter_number for c in missed][:10],
+        )
+        trace_progress(
+            f"{_batch_range_label(batch)} 模型漏给了 {len(missed)} 章，组成子批补抽…",
+            progress,
+        )
+        # 全漏 = 整批无效，直接拆半；部分漏 = 漏的章节组成子批（子批再全漏会继续拆）
+        results.extend(await _recurse(
+            _halves(missed) if len(missed) == len(batch) else [missed]
+        ))
+        order = {ch.chapter_number: i for i, ch in enumerate(batch)}
+        results.sort(key=lambda r: order[r[0].chapter_number])
+    return results
+
+
+async def _run_batched_extraction(
+    *,
+    db_session: AsyncSession,
+    task: BookDissectTask,
+    task_id: str,
+    target_chapters: list[Chapter],
+    plan: BatchPlan,
+    ai_service: AIService,
+) -> tuple[list[ChapterFact], list[DictionaryEntry]]:
+    """按 plan.batches 分批抽取，写 chapter_fact 表，每批 commit 一次进度。
+
+    字典策略：多批时先跑 EntityScanner + DictionaryClassifier（1 次 LLM），字典 + 前批摘要
+    注入每批 prompt 保证跨批规范名一致；整本一批时跳过（省 1 次 LLM），事后从 ChapterFact
+    反推字典（V3.1 F1 修复：EntityAggregator 依赖字典提供 entity_type）。
+
+    Returns:
+        (extracted_facts, dictionary)
+    """
+    # 清旧表，保证重抽是干净状态
+    await db_session.execute(delete(BookDissectChapterFact).where(
+        BookDissectChapterFact.task_id == task_id
+    ))
+    await db_session.execute(delete(BookDissectDictionary).where(
+        BookDissectDictionary.task_id == task_id
+    ))
+    await db_session.commit()
+
+    use_dictionary = plan.batch_count > 1
+    dictionary: list[DictionaryEntry] = []
+    if use_dictionary:
+        dictionary = await _build_dictionary_via_llm(
+            db_session=db_session, task=task, task_id=task_id,
+            target_chapters=target_chapters, ai_service=ai_service,
+        )
+
+    total_batches = plan.batch_count
+    _set_progress(
+        task, _PROGRESS_DICT_END,
+        f"开始抽取：{task.chapters_total} 章分 {total_batches} 批请求（{_MODE_LABELS.get(plan.mode, plan.mode)}）",
+    )
+    task.stage = V2Phase.EXTRACTING.value
+    task.extraction_phase = _PHASE_BY_MODE.get(plan.mode, V2Phase.EXTRACTING.value)
+    await db_session.commit()
+    extract_stage = begin_stage("extracting", f"章节抽取（{total_batches} 批）")
+
+    single_extractor = ChapterFactExtractor(ai_service=ai_service)
+    batch_extractor = LongContextExtractor(ai_service=ai_service)
+    summary_builder = SummaryBuilder()
+    validator = FactValidator()
+
+    extracted_facts: list[ChapterFact] = []
+    for b_idx, indices in enumerate(plan.batches):
+        batch = [target_chapters[i] for i in indices]
+        trace_progress(
+            f"正在抽取第 {b_idx + 1}/{total_batches} 批（{_batch_range_label(batch)}）· "
+            f"已完成 {task.chapters_extracted}/{task.chapters_total} 章",
+            task.progress,
+        )
+        prior_summary = summary_builder.build(extracted_facts)
+        results = await _extract_batch_with_fallback(
+            batch,
+            single_extractor=single_extractor,
+            batch_extractor=batch_extractor,
+            dictionary=dictionary,
+            prior_summary=prior_summary,
+            task_id=task_id,
+            progress=task.progress or 0,
+        )
+
+        for ch, fact, error_message in results:
+            if error_message is None:
+                # 形态学过滤
+                fact = validator.validate(fact, dictionary=dictionary)
+                extracted_facts.append(fact)
+                task.chapters_extracted += 1
+            else:
+                task.chapters_failed += 1
+            db_session.add(BookDissectChapterFact(
+                task_id=task_id,
                 chapter_number=ch.chapter_number,
                 chapter_title=ch.title or "",
-            )
-            status = "failed"
-            error_message = f"{type(exc).__name__}: {exc}"[:500]
+                fact_json=_serialize_chapter_fact(fact),
+                summary=fact.summary,
+                extraction_status="success" if error_message is None else "failed",
+                extraction_error=error_message,
+                segment_count=1,
+                extracted_at=datetime.now(),
+            ))
 
-        # 写章节事实
-        db_session.add(BookDissectChapterFact(
-            task_id=task_id,
-            chapter_number=ch.chapter_number,
-            chapter_title=ch.title or "",
-            fact_json=_serialize_chapter_fact(fact),
-            summary=fact.summary,
-            extraction_status=status,
-            extraction_error=error_message,
-            segment_count=1,
-            extracted_at=datetime.now(),
-        ))
-
-        # 进度更新（每章或每 5% 提交一次）
-        ratio = (idx + 1) / max(1, len(target_chapters))
-        task.progress = int(
-            _PROGRESS_DICT_END
-            + ratio * (_PROGRESS_EXTRACT_END - _PROGRESS_DICT_END)
+        ratio = (b_idx + 1) / max(1, total_batches)
+        failed_note = f"，{task.chapters_failed} 章失败" if task.chapters_failed else ""
+        _set_progress(
+            task,
+            int(_PROGRESS_DICT_END + ratio * (_PROGRESS_EXTRACT_END - _PROGRESS_DICT_END)),
+            f"已完成 {b_idx + 1}/{total_batches} 批 · {task.chapters_extracted}/{task.chapters_total} 章{failed_note}",
         )
-        # 每 5 章 commit 一次（避免每章都 commit 影响 IO）
-        if (idx + 1) % 5 == 0 or idx + 1 == len(target_chapters):
+        # 多章批每批 commit；逐章模式每 5 章 commit 一次（避免每章都 commit 影响 IO）
+        if len(indices) > 1 or (b_idx + 1) % 5 == 0 or b_idx + 1 == total_batches:
             await db_session.commit()
 
+    extract_stage.done(成功=task.chapters_extracted, 失败=task.chapters_failed)
+
+    if not use_dictionary:
+        dictionary = _build_dictionary_from_facts(extracted_facts)
+        logger.info(
+            "[V3.1-长上下文] task=%s 从 ChapterFact 反推字典 entries=%d",
+            task_id, len(dictionary),
+        )
+
+    logger.info(
+        "[拆书-分批] task=%s mode=%s done batches=%d extracted=%d/%d failed=%d",
+        task_id, plan.mode, plan.batch_count,
+        task.chapters_extracted, task.chapters_total, task.chapters_failed,
+    )
     return extracted_facts, dictionary

@@ -49,11 +49,14 @@ const TAB_LABELS: Array<[V2Tab, string]> = [
 ]
 
 const PHASE_LABELS: Record<string, string> = {
+  split_done: '已切分，待抽取',
+  queued: '排队中',
   splitting: '章节切分',
   scanning: '实体扫描',
   dictionary: '字典分类',
   extracting: '逐章抽取',
-  long_context_extraction: '长上下文一次抽取（V3.1）', // 后端长上下文路径写入此值
+  batched_extraction: '分批抽取（每批多章）', // 后端 batched 模式写入此值
+  long_context_extraction: '整本一次抽取', // 后端 one_shot 模式写入此值
   aggregating: '全书聚合',
   synthesizing: '生成概览',
   done: '完成',

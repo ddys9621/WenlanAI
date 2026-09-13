@@ -120,8 +120,12 @@ test_api.py
 
 # 测试代码与内部文档不入库（仅保留 README 与小白使用说明）
 backend/tests/
+backend/_tmp_verify/
 backend/pytest.ini
 agent-docs/
+
+# 本地测试用的小说文本（仓库根目录下的 txt）
+/*.txt
 
 # 大文件 - 模型和依赖
 backend/embedding/

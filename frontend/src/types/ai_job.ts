@@ -179,6 +179,7 @@ const AI_JOB_KIND_LABELS: Record<string, string> = {
   chapter_analyze: '章节分析',
   scene_generate: '场景生成',
   chapter_imitate: '一键仿写',
+  book_dissect: '拆书抽取',
   wizard_world_building: '向导·世界构建',
   wizard_characters: '向导·角色',
   wizard_outline: '向导·故事大纲',

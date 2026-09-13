@@ -1163,7 +1163,7 @@ export interface BookDissectChapterMeta {
 
 // V1 采样式 schema（DissectResult / DissectProjectSchema 等）已随 V1 逻辑一并移除。
 
-export type BookDissectStatus = 'pending' | 'running' | 'completed' | 'failed';
+export type BookDissectStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
 export type BookDissectStage =
   | 'split_done'
   | 'queued'
@@ -1197,9 +1197,43 @@ export interface BookDissectTask {
   chapters_failed?: number;
   sampling_mode?: string;
   sampling_param?: number;
+  extraction_engine?: BookDissectExtractionEngine;
+  /** 每次 LLM 请求抽取的章节数；0 = 自动规划 */
+  chapters_per_request?: number;
+  /** 只抽取前 N 章；0 = 全部 */
+  chapter_limit?: number;
+  /** 正在运行的抽取对应的通用 AI 任务 id（接入弹窗 / 托盘）；未运行为 null */
+  job_id?: string | null;
   created_at: string;
   started_at?: string | null;
   completed_at?: string | null;
+}
+
+export type BookDissectExtractionEngine = 'auto' | 'chunked' | 'long_context';
+
+export interface BookDissectExtractionOptions {
+  sampling_mode?: string;
+  sampling_param?: number;
+  extraction_engine?: BookDissectExtractionEngine;
+  chapters_per_request?: number;
+  chapter_limit?: number;
+}
+
+/** 启动前的分批预估（POST /book-dissect/{id}/extraction-plan） */
+export interface BookDissectExtractionPlan {
+  chapter_count: number;
+  target_chapters: number;
+  batch_count: number;
+  mode: 'single' | 'batched' | 'one_shot';
+  chapters_per_request: number;
+  max_chapters_by_output: number;
+  model: string;
+  context_window: number;
+  max_tokens: number;
+  dictionary_calls: number;
+  post_calls: number;
+  estimated_llm_calls: number;
+  warnings: string[];
 }
 
 export interface BookDissectUploadResponse {

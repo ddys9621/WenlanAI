@@ -16,7 +16,7 @@ class BookDissectTask(Base):
     """
     拆书任务表
 
-    状态流转: pending -> running -> completed/failed
+    状态流转: pending -> running -> completed/failed/cancelled（cancelled = 用户手动停止，可重新抽取）
     阶段切片（V2）: splitting -> scanning -> dictionary -> extracting -> aggregating -> synthesizing -> done
     """
     __tablename__ = "book_dissect_tasks"
@@ -26,7 +26,7 @@ class BookDissectTask(Base):
 
     # 任务状态
     status = Column(String(20), nullable=False, default='pending',
-                    comment="任务状态: pending/running/completed/failed")
+                    comment="任务状态: pending/running/completed/failed/cancelled")
     progress = Column(Integer, default=0, comment="进度 0-100")
     stage = Column(String(50), nullable=True,
                    comment="当前阶段：splitting/scanning/dictionary/extracting/aggregating/synthesizing/done")
@@ -61,7 +61,13 @@ class BookDissectTask(Base):
 
     # V3.1 字段
     extraction_engine = Column(String(20), default="auto",
-                               comment="V3.1 抽取引擎：auto(自动路由)/chunked(强制逐章)/long_context(强制一次性)")
+                               comment="V3.1 抽取引擎：auto(按上下文自动分批)/chunked(逐章)/long_context(整本一批)")
+
+    # 分批抽取字段
+    chapters_per_request = Column(Integer, default=0,
+                                  comment="每次 LLM 请求抽取的章节数；0 = 按模型上下文 / Max Tokens 自动规划")
+    chapter_limit = Column(Integer, default=0,
+                           comment="只抽取前 N 章（在采样之前截取）；0 = 全部章节")
 
     # 时间戳
     created_at = Column(DateTime, server_default=func.now(), comment="创建时间")

@@ -88,6 +88,8 @@ import type {
   PaginationResponse,
   ChapterAnalysisResponse,
   BookDissectTask,
+  BookDissectExtractionOptions,
+  BookDissectExtractionPlan,
   BookDissectUploadResponse,
   BookDissectV2Overview,
   BookDissectV2ChapterSummary,
@@ -1298,19 +1300,23 @@ export const bookDissectApi = {
   /** 列出当前用户所有拆书任务（按创建时间倒序） */
   listTasks: () => api.get<unknown, BookDissectTask[]>('/book-dissect'),
 
-  /** 启动 LLM 抽取（V2 引擎：逐章抽取 + 全书聚合）。 */
-  startExtraction: (
-    taskId: string,
-    params?: {
-      sampling_mode?: string
-      sampling_param?: number
-      extraction_engine?: 'auto' | 'chunked' | 'long_context'
-    },
-  ) =>
+  /** 启动 LLM 抽取（分批抽取 + 全书聚合）。 */
+  startExtraction: (taskId: string, params?: BookDissectExtractionOptions) =>
     api.post<unknown, BookDissectTask>(
       `/book-dissect/${taskId}/start-extraction`,
       params ?? { sampling_mode: 'all', sampling_param: 1 },
     ),
+
+  /** 启动前预估分批方案与 LLM 调用次数（不调 LLM），与 startExtraction 同一份参数 */
+  previewExtractionPlan: (taskId: string, params?: BookDissectExtractionOptions) =>
+    api.post<unknown, BookDissectExtractionPlan>(
+      `/book-dissect/${taskId}/extraction-plan`,
+      params ?? { sampling_mode: 'all', sampling_param: 1 },
+    ),
+
+  /** 手动停止运行中的抽取（已完成批次的章节事实保留，可重新抽取） */
+  cancelExtraction: (taskId: string) =>
+    api.post<unknown, BookDissectTask>(`/book-dissect/${taskId}/cancel`),
 
   /** 删除任务并清理磁盘文件 */
   deleteTask: (taskId: string) =>

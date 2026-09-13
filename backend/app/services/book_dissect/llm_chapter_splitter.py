@@ -310,9 +310,13 @@ def _split_by_llm_regex(text: str, pattern: str) -> Optional[list[Chapter]]:
             ))
 
     for i, m in enumerate(matches):
-        # 匹配到的文本作为标题
-        title = text[m.start(): m.end()].strip()[:80] or f"第{i+1}段"
-        content_start = m.end()
+        # LLM 给的 pattern 通常只匹配「第N章」这个前缀：标题取到行尾，正文从下一行开始，
+        # 否则标题名会漏进正文；相邻的重复标题行（"347.第345章xx" 紧跟 "第345章xx"）也会因正文为空被合并掉
+        line_end = text.find("\n", m.end())
+        if line_end == -1 or line_end - m.start() > 120:
+            line_end = m.end()
+        title = text[m.start(): line_end].strip()[:80] or f"第{i+1}段"
+        content_start = line_end
         content_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         content = text[content_start:content_end].strip()
         if not content:

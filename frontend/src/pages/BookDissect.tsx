@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
+  Activity,
   AlertTriangle,
   BookOpen,
   CheckCircle2,
@@ -9,29 +10,36 @@ import {
   Loader2,
   Play,
   Sparkles,
+  StopCircle,
   Trash2,
   Upload,
   Wand2,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { bookDissectApi, referencePackApi } from '@/services/api'
+import { useAIJobsStore, useRunningAIJobs } from '@/store/aiJobsStore'
+import type { AIJobSummary } from '@/types/ai_job'
 import type {
+  BookDissectExtractionOptions,
   BookDissectStage,
   BookDissectStatus,
   BookDissectTask,
 } from '@/types'
+import { BookDissectExtractionModal } from '@/components/BookDissectExtractionModal'
 import { BookDissectV2View } from './BookDissectV2View'
 
 const ACCEPT_TYPES = '.txt,.md,.markdown'
 const MAX_BYTES = 10 * 1024 * 1024
 const POLL_INTERVAL_MS = 3000
+/** 后端 ai_jobs 里拆书抽取任务的 kind（meta.task_id 对应拆书任务 id） */
+const DISSECT_JOB_KINDS = ['book_dissect']
 
 const STAGE_LABELS: Record<string, string> = {
   // V2 阶段
   splitting: '章节切分',
   scanning: '实体扫描',
   dictionary: '字典分类',
-  extracting: '逐章抽取',
+  extracting: '章节抽取',
   aggregating: '全书聚合',
   synthesizing: '生成概览',
   // 通用
@@ -67,6 +75,8 @@ function statusBadgeClass(status: BookDissectStatus): string {
       return 'bg-blue-500/15 text-blue-300 ring-1 ring-blue-500/30'
     case 'failed':
       return 'bg-rose-500/15 text-rose-300 ring-1 ring-rose-500/30'
+    case 'cancelled':
+      return 'bg-amber-500/15 text-amber-300 ring-1 ring-amber-500/30'
     default:
       return 'bg-white/5 text-content-secondary ring-1 ring-white/10'
   }
@@ -77,14 +87,26 @@ function stageLabel(stage?: BookDissectStage | null): string {
   return STAGE_LABELS[stage] ?? stage
 }
 
+/** 状态徽标文案：手动停止显示「已停止」，其余沿用阶段名 */
+function statusText(task: BookDissectTask): string {
+  if (task.status === 'cancelled') return '已停止'
+  return stageLabel(task.stage) || task.status
+}
+
 export default function BookDissect() {
   const [tasks, setTasks] = useState<BookDissectTask[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [extracting, setExtracting] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
+  const [extractionModalOpen, setExtractionModalOpen] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const pollTimerRef = useRef<number | null>(null)
+  // 抽取跑在通用 AI 后台任务里：启动后接入弹窗 / 托盘；刷新后由 AIJobHost.syncFromServer 找回运行中的任务
+  const attachJob = useAIJobsStore((s) => s.attach)
+  const openJobModal = useAIJobsStore((s) => s.openModal)
+  const runningDissectJobs = useRunningAIJobs(null, DISSECT_JOB_KINDS)
 
   // ============================================================
   // 数据加载
@@ -132,6 +154,12 @@ export default function BookDissect() {
   )
   const selectedTaskId = selectedTask?.id
   const selectedTaskStatus = selectedTask?.status
+  // 当前任务对应的后台 AI 任务（弹窗最小化后从这里「查看任务」重新打开）
+  const selectedJob = useMemo(
+    () => runningDissectJobs.find((j) => j.meta?.task_id === selectedTaskId) ?? null,
+    [runningDissectJobs, selectedTaskId],
+  )
+  const selectedJobId = selectedJob?.id ?? null
 
   useEffect(() => {
     if (!selectedTaskId || selectedTaskStatus !== 'running') {
@@ -152,6 +180,12 @@ export default function BookDissect() {
       }
     }
   }, [selectedTaskId, selectedTaskStatus, fetchOne])
+
+  // 后台任务到终态（完成 / 失败 / 停止）立刻刷新任务，不等下一次轮询
+  useEffect(() => {
+    if (!selectedJobId || !selectedTaskId) return
+    return useAIJobsStore.getState().onSettled(selectedJobId, () => void fetchOne(selectedTaskId))
+  }, [selectedJobId, selectedTaskId, fetchOne])
 
   // ============================================================
   // 上传
@@ -186,23 +220,25 @@ export default function BookDissect() {
   // 启动抽取 / 删除
   // ============================================================
 
-  const handleStartExtraction = async () => {
+  const handleStartExtraction = async (options: BookDissectExtractionOptions) => {
     if (!selectedTask) return
-    const chCount = selectedTask.chapter_count || 0
-    const estimate = `约 ${1 + chCount + 1} 次 LLM 调用（1 字典分类 + ${chCount} 章节抽取 + 1 概览）`
-    const isRerun = selectedTask.stage === 'done'
-    const rerunHint = isRerun ? '\n\n⚠️ 本任务已抽取过：重新抽取会覆盖现有抽取数据并更新参考包。' : ''
-    if (!confirm(`将使用 V2 引擎逐章抽取 + 全书聚合。${estimate}${rerunHint}\n\n是否继续？`)) {
-      return
-    }
     try {
       setExtracting(true)
-      const t = await bookDissectApi.startExtraction(selectedTask.id, {
-        sampling_mode: 'all',
-        sampling_param: 1,
-      })
+      const t = await bookDissectApi.startExtraction(selectedTask.id, options)
       setTasks((prev) => prev.map((x) => (x.id === t.id ? t : x)))
-      toast.success('已排队 V2 抽取…')
+      setExtractionModalOpen(false)
+      // 接入通用 AI 任务弹窗：实时进度 / 模型调用 / 阶段，可最小化到托盘、可停止
+      if (t.job_id) {
+        try {
+          await attachJob(t.job_id)
+          openJobModal(t.job_id)
+          return
+        } catch {
+          /* 快照拉取失败：退回页面轮询显示进度 */
+        }
+      }
+      const scope = options.chapter_limit ? `前 ${options.chapter_limit} 章` : '全书'
+      toast.success(`已排队抽取（${scope}）…`)
     } catch {
       /* api 拦截器已 toast */
     } finally {
@@ -210,8 +246,26 @@ export default function BookDissect() {
     }
   }
 
+  const handleCancelExtraction = async () => {
+    if (!selectedTask || selectedTask.status !== 'running') return
+    const done = selectedTask.chapters_extracted ?? 0
+    const hint = done > 0 ? `已抽取的 ${done} 章事实会保留，` : ''
+    if (!confirm(`确定停止「${selectedTask.file_name ?? selectedTask.id}」的抽取？${hint}之后可重新抽取。`)) return
+    try {
+      setCancelling(true)
+      const t = await bookDissectApi.cancelExtraction(selectedTask.id)
+      setTasks((prev) => prev.map((x) => (x.id === t.id ? t : x)))
+      toast.success('已停止抽取')
+    } catch {
+      /* api 拦截器已 toast */
+    } finally {
+      setCancelling(false)
+    }
+  }
+
   const handleDelete = async (task: BookDissectTask) => {
-    if (!confirm(`确定删除「${task.file_name ?? task.id}」？`)) return
+    const runningHint = task.status === 'running' ? '（正在抽取，会先停止）' : ''
+    if (!confirm(`确定删除「${task.file_name ?? task.id}」${runningHint}？`)) return
     try {
       await bookDissectApi.deleteTask(task.id)
       setTasks((prev) => prev.filter((x) => x.id !== task.id))
@@ -285,11 +339,25 @@ export default function BookDissect() {
 
         <TaskDetail
           task={selectedTask}
+          job={selectedJob}
           extracting={extracting}
-          onStartExtraction={handleStartExtraction}
+          cancelling={cancelling}
+          onStartExtraction={() => setExtractionModalOpen(true)}
+          onCancelExtraction={handleCancelExtraction}
+          onOpenJob={() => selectedJobId && openJobModal(selectedJobId)}
           onDelete={handleDelete}
         />
       </div>
+
+      {selectedTask && (
+        <BookDissectExtractionModal
+          open={extractionModalOpen}
+          task={selectedTask}
+          submitting={extracting}
+          onClose={() => setExtractionModalOpen(false)}
+          onStart={handleStartExtraction}
+        />
+      )}
     </div>
   )
 }
@@ -366,7 +434,8 @@ function TaskList({ tasks, loading, selectedId, onSelect, onDelete }: TaskListPr
                     {t.status === 'running' && <Loader2 className="h-3 w-3 animate-spin" />}
                     {t.status === 'completed' && <CheckCircle2 className="h-3 w-3" />}
                     {t.status === 'failed' && <AlertTriangle className="h-3 w-3" />}
-                    {stageLabel(t.stage) || t.status}
+                    {t.status === 'cancelled' && <StopCircle className="h-3 w-3" />}
+                    {statusText(t)}
                   </span>
                   <button
                     type="button"
@@ -403,15 +472,24 @@ function TaskList({ tasks, loading, selectedId, onSelect, onDelete }: TaskListPr
 
 interface TaskDetailProps {
   task: BookDissectTask | null
+  /** 本任务正在运行的后台 AI 任务摘要（实时进度文案；null = 未运行 / 尚未同步到） */
+  job: AIJobSummary | null
   extracting: boolean
+  cancelling: boolean
   onStartExtraction: () => void
+  onCancelExtraction: () => void
+  onOpenJob: () => void
   onDelete: (task: BookDissectTask) => void
 }
 
 function TaskDetail({
   task,
+  job,
   extracting,
+  cancelling,
   onStartExtraction,
+  onCancelExtraction,
+  onOpenJob,
   onDelete,
 }: TaskDetailProps) {
   // 注意：所有 hooks 必须在任何 early-return 之前（task 可能为 null）
@@ -458,9 +536,13 @@ function TaskDetail({
     <div className="space-y-4 rounded-card border border-white/5 bg-card p-5">
       <DetailHeader
         task={task}
+        job={job}
         canStart={canStart}
         extracting={extracting}
+        cancelling={cancelling}
         onStartExtraction={onStartExtraction}
+        onCancelExtraction={onCancelExtraction}
+        onOpenJob={onOpenJob}
         onDelete={() => onDelete(task)}
       />
 
@@ -502,7 +584,16 @@ function TaskDetail({
         </div>
       )}
 
-      {task.error_message && (
+      {task.error_message && task.status === 'cancelled' && (
+        <div className="flex items-start gap-2 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+          <StopCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          <div className="min-w-0">
+            <p className="font-medium">已手动停止</p>
+            <p className="mt-0.5 break-all text-xs text-amber-300/80">{task.error_message}</p>
+          </div>
+        </div>
+      )}
+      {task.error_message && task.status !== 'cancelled' && (
         <div className="flex items-start gap-2 rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
           <div className="min-w-0">
@@ -519,7 +610,7 @@ function TaskDetail({
           taskId={task.id}
           status={task.status}
           progress={task.progress ?? 0}
-          extractionPhase={task.extraction_phase ?? null}
+          extractionPhase={task.extraction_phase ?? task.stage ?? null}
           chaptersTotal={task.chapters_total ?? 0}
           chaptersExtracted={task.chapters_extracted ?? 0}
           chaptersFailed={task.chapters_failed ?? 0}
@@ -535,19 +626,31 @@ function TaskDetail({
 
 interface DetailHeaderProps {
   task: BookDissectTask
+  job: AIJobSummary | null
   canStart: boolean
   extracting: boolean
+  cancelling: boolean
   onStartExtraction: () => void
+  onCancelExtraction: () => void
+  onOpenJob: () => void
   onDelete: () => void
 }
 
 function DetailHeader({
   task,
+  job,
   canStart,
   extracting,
+  cancelling,
   onStartExtraction,
+  onCancelExtraction,
+  onOpenJob,
   onDelete,
 }: DetailHeaderProps) {
+  const isRunning = task.status === 'running'
+  // 后台任务的实时进度（SSE）比 3 秒一次的轮询更细；拿不到时退回 DB 进度
+  const progress = job?.progress?.pct ?? task.progress
+  const progressMessage = job?.progress?.message
   return (
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div className="min-w-0 flex-1 space-y-1">
@@ -559,31 +662,59 @@ function DetailHeader({
             {task.status === 'running' && <Loader2 className="h-3 w-3 animate-spin" />}
             {task.status === 'completed' && <CheckCircle2 className="h-3 w-3" />}
             {task.status === 'failed' && <AlertTriangle className="h-3 w-3" />}
-            {stageLabel(task.stage) || task.status}
+            {task.status === 'cancelled' && <StopCircle className="h-3 w-3" />}
+            {statusText(task)}
           </span>
-          {task.status === 'running' && (
-            <span className="text-content-secondary">{task.progress}%</span>
+          {isRunning && (
+            <span className="text-content-secondary">{progress}%</span>
           )}
         </div>
-        {task.status === 'running' && (
+        {isRunning && (
           <div className="mt-1 h-1.5 w-full max-w-md overflow-hidden rounded-full bg-white/5">
             <div
               className="h-full bg-brand transition-all"
-              style={{ width: `${Math.min(100, Math.max(0, task.progress))}%` }}
+              style={{ width: `${Math.min(100, Math.max(0, progress))}%` }}
             />
           </div>
         )}
+        {isRunning && job && (
+          <p className="max-w-md truncate text-xs text-content-secondary" title={progressMessage}>
+            {progressMessage || '正在准备…'}
+          </p>
+        )}
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          onClick={onStartExtraction}
-          disabled={!canStart || extracting}
-          className="inline-flex items-center gap-1.5 rounded-btn bg-brand px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-brand-600 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {extracting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
-          {task.status === 'running' ? '抽取中…' : task.stage === 'done' ? '重新抽取' : '启动抽取'}
-        </button>
+        {isRunning && job && (
+          <button
+            type="button"
+            onClick={onOpenJob}
+            className="inline-flex items-center gap-1.5 rounded-btn border border-brand/40 bg-brand/10 px-3 py-1.5 text-xs font-medium text-brand transition-colors hover:bg-brand/20"
+          >
+            <Activity className="h-3.5 w-3.5" />
+            查看任务
+          </button>
+        )}
+        {isRunning ? (
+          <button
+            type="button"
+            onClick={onCancelExtraction}
+            disabled={cancelling}
+            className="inline-flex items-center gap-1.5 rounded-btn border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs font-medium text-amber-300 transition-colors hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {cancelling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <StopCircle className="h-3.5 w-3.5" />}
+            {cancelling ? '停止中…' : '停止抽取'}
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={onStartExtraction}
+            disabled={!canStart || extracting}
+            className="inline-flex items-center gap-1.5 rounded-btn bg-brand px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-brand-600 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {extracting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+            {task.stage === 'done' || task.status === 'cancelled' ? '重新抽取' : '启动抽取'}
+          </button>
+        )}
         <button
           type="button"
           onClick={onDelete}

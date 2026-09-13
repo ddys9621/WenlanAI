@@ -34,7 +34,7 @@ class BookDissectTaskResponse(BaseModel):
     """拆书任务的完整状态响应"""
     id: str
     user_id: str
-    status: str = Field(..., description="pending/running/completed/failed")
+    status: str = Field(..., description="pending/running/completed/failed/cancelled")
     progress: int = Field(0, description="0-100")
     stage: Optional[str] = Field(None, description="当前阶段")
     error_message: Optional[str] = None
@@ -60,6 +60,12 @@ class BookDissectTaskResponse(BaseModel):
     extraction_engine: str = Field(
         default="auto",
         description="V3.1 抽取引擎：auto/chunked/long_context",
+    )
+    chapters_per_request: int = Field(default=0, description="每次 LLM 请求抽取的章节数；0 = 自动规划")
+    chapter_limit: int = Field(default=0, description="只抽取前 N 章；0 = 全部")
+    job_id: Optional[str] = Field(
+        default=None,
+        description="正在运行的抽取对应的 ai_jobs 任务 id（前端据此接入通用 AI 任务弹窗 / 托盘）；未运行为 null",
     )
 
     created_at: datetime
@@ -111,8 +117,35 @@ class V2StartExtractionRequest(BaseModel):
     sampling_param: int = Field(default=1, description="例如 every_n 模式下的 N")
     extraction_engine: str = Field(
         default="auto",
-        description="V3.1 抽取引擎：auto(自动路由)/chunked(强制逐章)/long_context(强制一次性)",
+        description="抽取引擎：auto(按模型上下文自动分批)/chunked(逐章)/long_context(整本一批)",
     )
+    chapters_per_request: int = Field(
+        default=0, ge=0,
+        description="每次 LLM 请求抽取的章节数；0 = 按模型上下文 / Max Tokens 自动规划",
+    )
+    chapter_limit: int = Field(
+        default=0, ge=0,
+        description="只抽取前 N 章（先截取再采样）；0 = 全部章节",
+    )
+
+
+class ExtractionPlanResponse(BaseModel):
+    """启动抽取前的分批预估（不调 LLM，按 chapters_meta 字数估算）"""
+    chapter_count: int = Field(..., description="全书章节数")
+    target_chapters: int = Field(..., description="按 chapter_limit + 采样选出的章节数")
+    batch_count: int = Field(..., description="抽取阶段的 LLM 请求次数（未计失败重试）")
+    mode: str = Field(..., description="single(逐章) / batched(分批) / one_shot(整本一批)")
+    chapters_per_request: int = Field(..., description="实际生效的单批章数上限")
+    max_chapters_by_output: int = Field(..., description="按 Max Tokens 估算单批最多可稳定输出的章数")
+    model: str = Field(default="", description="当前模型名")
+    context_window: int = Field(default=0, description="模型上下文窗口（0 = 未知，已按保守值规划）")
+    max_tokens: int = Field(default=0, description="用户 Max Tokens 设置")
+    dictionary_calls: int = Field(..., description="字典分类 LLM 调用次数（多批时 1，整本一批时 0）")
+    post_calls: int = Field(..., description="抽取后固定的 LLM 调用数（5 手法维度 + synopsis + 冲突仲裁）")
+    estimated_llm_calls: int = Field(
+        ..., description="预计 LLM 调用总数下限 = batch_count + dictionary_calls + post_calls（不含失败重试与桥段识别的动态调用）",
+    )
+    warnings: List[str] = Field(default_factory=list)
 
 
 class V2DictionaryEntrySchema(BaseModel):
