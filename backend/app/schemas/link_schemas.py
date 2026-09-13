@@ -1,21 +1,6 @@
-"""关联关系相关的 Pydantic 模型"""
+"""关联关系相关的 Pydantic 模型（章纲 ↔ 剧情线手工关联 + 章纲侧的关联视图）。"""
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
-
-
-# ============================================
-# 剧情线关联请求模型
-# ============================================
-
-class LinkChapterOutlinesRequest(BaseModel):
-    """剧情线关联章纲请求"""
-    chapter_outline_ids: List[str] = Field(..., description="章纲ID列表", min_length=1)
-    role: str = Field("main", description="角色类型: main(主线)/sub(支线)/character(角色线)")
-
-
-class LinkPlotCardsToLineRequest(BaseModel):
-    """剧情线关联剧情卡片请求"""
-    plot_card_ids: List[str] = Field(..., description="剧情卡片ID列表", min_length=1)
 
 
 class UnlinkRequest(BaseModel):
@@ -23,57 +8,11 @@ class UnlinkRequest(BaseModel):
     ids: List[str] = Field(..., description="要取消关联的ID列表", min_length=1)
 
 
-# ============================================
-# 章纲关联请求模型
-# ============================================
-
 class LinkPlotLinesToChapterRequest(BaseModel):
     """章纲关联剧情线请求"""
     plot_line_ids: List[str] = Field(..., description="剧情线ID列表", min_length=1)
     role: str = Field("main", description="角色类型: main(主线)/sub(支线)/character(角色线)")
 
-
-class LinkPlotCardsToChapterRequest(BaseModel):
-    """章纲关联剧情卡片请求"""
-    plot_card_ids: List[str] = Field(..., description="剧情卡片ID列表", min_length=1)
-    usage_type: str = Field("reference", description="使用方式: reference(参考)/used(已使用)/planned(计划使用)")
-    usage_notes: Optional[str] = Field(None, description="使用说明")
-
-
-# ============================================
-# 章纲-剧情线关联
-# ============================================
-
-
-# ============================================
-# 剧情卡片-剧情线关联
-# ============================================
-
-
-class PlotCardPlotLineLinkBatch(BaseModel):
-    """批量关联剧情卡片-剧情线请求"""
-    plot_line_ids: List[str] = Field(..., description="剧情线ID列表")
-
-
-# ============================================
-# 剧情卡片-章纲关联
-# ============================================
-
-class PlotCardChapterOutlineLinkCreate(BaseModel):
-    """创建剧情卡片-章纲关联请求"""
-    chapter_outline_id: str = Field(..., description="章纲ID")
-    usage_type: str = Field("reference", description="使用方式: reference(参考)/used(已使用)/planned(计划使用)")
-    usage_notes: Optional[str] = Field(None, description="使用说明")
-
-
-class PlotCardChapterOutlineLinkBatch(BaseModel):
-    """批量关联剧情卡片-章纲请求"""
-    links: List[PlotCardChapterOutlineLinkCreate] = Field(..., description="关联列表")
-
-
-# ============================================
-# 扩展响应模型（包含关联信息）
-# ============================================
 
 class PlotLineWithLinks(BaseModel):
     """剧情线及其关联信息"""
@@ -90,18 +29,6 @@ class PlotLineWithLinks(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class ChapterOutlineWithLinks(BaseModel):
-    """章纲及其关联信息"""
-    id: str
-    chapter_number: int
-    title: str
-    summary: Optional[str]
-    plot_line_count: int = Field(..., description="关联的剧情线数量")
-    card_count: int = Field(..., description="关联的剧情卡片数量")
-
-    model_config = ConfigDict(from_attributes=True)
-
-
 class PlotCardWithLinks(BaseModel):
     """剧情卡片及其关联信息"""
     id: str
@@ -112,8 +39,3 @@ class PlotCardWithLinks(BaseModel):
     chapter_count: int = Field(..., description="关联的章纲数量")
 
     model_config = ConfigDict(from_attributes=True)
-
-
-# ============================================
-# 时间线覆盖度相关模型
-# ============================================

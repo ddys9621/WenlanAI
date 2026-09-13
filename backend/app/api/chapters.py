@@ -41,7 +41,6 @@ from app.services.memory_service import memory_service
 from app.services.narrative_state_service import narrative_state_service
 from app.logger import get_logger
 from app.api.settings import get_user_ai_service
-from app.config import settings as config_settings
 from app.utils.character_names import build_name_index
 from app.utils.data_consistency import sync_organization_member_count
 from app.utils.text_utils import count_words
@@ -1979,117 +1978,6 @@ async def generate_chapter_content_stream(
     except AIJobConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     return job_sse_response(job)
-
-
-
-@router.get("/{chapter_id}/analysis/status", summary="查询章节分析任务状态")
-async def get_analysis_task_status(
-    chapter_id: str,
-    request: Request,
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    查询指定章节的最新分析任务状态
-    
-    自动恢复机制：
-    - 如果任务状态为running且超过配置阈值未完成，自动标记为failed
-    - 如果任务状态为pending且超过配置阈值未启动，自动标记为failed
-    
-    返回:
-    - has_task: 是否存在分析任务
-    - task_id: 任务ID（如果存在）
-    - status: pending/running/completed/failed/none（如果不存在则为none）
-    - progress: 0-100
-    - error_message: 错误信息(如果失败)
-    - auto_recovered: 是否被自动恢复
-    - created_at: 创建时间
-    - completed_at: 完成时间
-    
-    注意：当章节不存在或无权访问时返回404，当没有分析任务时返回has_task=false
-    """
-    from datetime import timedelta
-    
-    # 先获取章节以验证存在性和权限
-    chapter_result = await db.execute(
-        select(Chapter).where(Chapter.id == chapter_id)
-    )
-    chapter = chapter_result.scalar_one_or_none()
-    
-    if not chapter:
-        raise HTTPException(status_code=404, detail="章节不存在")
-    
-    # 验证用户权限
-    user_id = getattr(request.state, 'user_id', None)
-    await verify_project_access(chapter.project_id, user_id, db)
-    
-    # 获取该章节最新的分析任务
-    result = await db.execute(
-        select(AnalysisTask)
-        .where(AnalysisTask.chapter_id == chapter_id)
-        .order_by(AnalysisTask.created_at.desc())
-        .limit(1)
-    )
-    task = result.scalar_one_or_none()
-    
-    if not task:
-        # 返回无任务状态，而不是抛出404错误
-        return {
-            "has_task": False,
-            "chapter_id": chapter_id,
-            "status": "none",
-            "progress": 0,
-            "error_message": None,
-            "auto_recovered": False,
-            "task_id": None,
-            "created_at": None,
-            "started_at": None,
-            "completed_at": None
-        }
-    
-    auto_recovered = False
-    current_time = datetime.now()
-    running_timeout = timedelta(seconds=max(config_settings.analysis_task_running_timeout_seconds, 60))
-    pending_timeout = timedelta(seconds=max(config_settings.analysis_task_pending_timeout_seconds, 30))
-    
-    # 自动恢复卡住的任务
-    if task.status == 'running':
-        # 如果任务在running状态超过阈值，标记为失败
-        if task.started_at and (current_time - task.started_at) > running_timeout:
-            task.status = 'failed'
-            timeout_minutes = max(config_settings.analysis_task_running_timeout_seconds // 60, 1)
-            task.error_message = f'任务超时（超过{timeout_minutes}分钟未完成，已自动恢复）'
-            task.completed_at = current_time
-            task.progress = 0
-            auto_recovered = True
-            await db.commit()
-            await db.refresh(task)
-            logger.warning(f"🔄 自动恢复卡住的任务: {task.id}, 章节: {chapter_id}")
-    
-    elif task.status == 'pending':
-        # 如果任务在pending状态超过阈值仍未开始，标记为失败
-        if task.created_at and (current_time - task.created_at) > pending_timeout:
-            task.status = 'failed'
-            timeout_minutes = max(config_settings.analysis_task_pending_timeout_seconds // 60, 1)
-            task.error_message = f'任务启动超时（超过{timeout_minutes}分钟未启动，已自动恢复）'
-            task.completed_at = current_time
-            task.progress = 0
-            auto_recovered = True
-            await db.commit()
-            await db.refresh(task)
-            logger.warning(f"🔄 自动恢复未启动的任务: {task.id}, 章节: {chapter_id}")
-    
-    return {
-        "has_task": True,
-        "task_id": task.id,
-        "chapter_id": task.chapter_id,
-        "status": task.status,
-        "progress": task.progress,
-        "error_message": task.error_message,
-        "auto_recovered": auto_recovered,
-        "created_at": task.created_at.isoformat() if task.created_at else None,
-        "started_at": task.started_at.isoformat() if task.started_at else None,
-        "completed_at": task.completed_at.isoformat() if task.completed_at else None
-    }
 
 
 @router.get("/{chapter_id}/analysis", summary="获取章节分析结果")

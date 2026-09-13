@@ -85,10 +85,6 @@ class Settings(BaseSettings):
     default_reasoning_effort: str = "medium"  # none|minimal|low|medium|high|xhigh|max
     default_thinking_budget_tokens: Optional[int] = None  # Anthropic：空=按档位自动换算
 
-    # 章节分析任务超时配置
-    analysis_task_running_timeout_seconds: int = 300  # running 超过 5 分钟才视为卡死
-    analysis_task_pending_timeout_seconds: int = 120  # pending 超过 2 分钟仍未启动则视为异常
-
     # 章节字数控制配置
     # 软目标区间：生成的章节字数应尽量落在 [target * (1 - soft_range), target * (1 + soft_range)] 内
     # 此参数仅用于生成 Prompt 中的字数范围提示，不会截断输出

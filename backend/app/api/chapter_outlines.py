@@ -3,7 +3,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, delete, func, distinct
 from typing import List, Optional
-from pydantic import BaseModel
 import json
 
 from app.database import get_db
@@ -21,7 +20,7 @@ from app.schemas.chapter_outline import (
 )
 from app.schemas.link_schemas import (
     PlotLineWithLinks, PlotCardWithLinks,
-    LinkPlotLinesToChapterRequest, LinkPlotCardsToChapterRequest, UnlinkRequest
+    LinkPlotLinesToChapterRequest, UnlinkRequest
 )
 
 router = APIRouter(prefix="/chapter-outlines", tags=["章纲"])
@@ -763,147 +762,3 @@ async def unlink_plot_lines_from_chapter_outline(
         "removed_count": result.rowcount
     }
 
-
-@router.post("/{outline_id}/link-plot-cards")
-async def link_plot_cards_to_chapter_outline(
-    outline_id: str,
-    request: LinkPlotCardsToChapterRequest,
-    db: AsyncSession = Depends(get_db)
-):
-    """将剧情卡片关联到章纲"""
-    
-    # 检查章纲是否存在
-    outline_result = await db.execute(select(ChapterOutline).where(ChapterOutline.id == outline_id))
-    outline = outline_result.scalar_one_or_none()
-    
-    if not outline:
-        raise HTTPException(status_code=404, detail=f"章纲不存在: {outline_id}")
-    
-    # 验证剧情卡片存在且属于同一项目（跨项目校验）
-    cards_result = await db.execute(
-        select(PlotCard).where(
-            PlotCard.id.in_(request.plot_card_ids),
-            PlotCard.project_id == outline.project_id  # 添加项目归属校验
-        )
-    )
-    existing_cards = {card.id: card for card in cards_result.scalars().all()}
-    
-    # 检查是否有无效的ID
-    invalid_ids = set(request.plot_card_ids) - set(existing_cards.keys())
-    if invalid_ids:
-        raise HTTPException(
-            status_code=400,
-            detail=f"以下剧情卡片不存在或不属于该项目: {', '.join(list(invalid_ids)[:5])}"
-        )
-    
-    # 创建关联
-    created_count = 0
-    skipped_count = 0
-    
-    for card_id in request.plot_card_ids:
-        # 检查是否已存在关联
-        existing_link = await db.execute(
-            select(PlotCardChapterOutlineLink).where(
-                PlotCardChapterOutlineLink.plot_card_id == card_id,
-                PlotCardChapterOutlineLink.chapter_outline_id == outline_id
-            )
-        )
-        
-        if existing_link.scalar_one_or_none():
-            skipped_count += 1
-            continue  # 跳过已存在的关联
-        
-        # 创建新关联
-        link = PlotCardChapterOutlineLink(
-            plot_card_id=card_id,
-            chapter_outline_id=outline_id,
-            usage_type=request.usage_type,
-            usage_notes=request.usage_notes
-        )
-        db.add(link)
-        created_count += 1
-    
-    await db.commit()
-    
-    return {
-        "message": f"成功关联 {created_count} 个剧情卡片到章纲",
-        "created_count": created_count,
-        "skipped_count": skipped_count
-    }
-
-
-@router.delete("/{outline_id}/unlink-plot-cards")
-async def unlink_plot_cards_from_chapter_outline(
-    outline_id: str,
-    request: UnlinkRequest,
-    db: AsyncSession = Depends(get_db)
-):
-    """取消剧情卡片与章纲的关联"""
-    
-    # 检查章纲是否存在
-    outline_result = await db.execute(select(ChapterOutline).where(ChapterOutline.id == outline_id))
-    outline = outline_result.scalar_one_or_none()
-    
-    if not outline:
-        raise HTTPException(status_code=404, detail=f"章纲不存在: {outline_id}")
-    
-    # 删除关联
-    result = await db.execute(
-        delete(PlotCardChapterOutlineLink).where(
-            PlotCardChapterOutlineLink.chapter_outline_id == outline_id,
-            PlotCardChapterOutlineLink.plot_card_id.in_(request.ids)
-        )
-    )
-    
-    await db.commit()
-    
-    return {
-        "message": f"成功取消 {result.rowcount} 个剧情卡片的关联",
-        "removed_count": result.rowcount
-    }
-
-
-class UpdatePlotCardUsageRequest(BaseModel):
-    usage_type: str
-    usage_notes: Optional[str] = None
-
-
-@router.put("/{outline_id}/plot-cards/{card_id}/usage")
-async def update_plot_card_usage(
-    outline_id: str,
-    card_id: str,
-    usage_data: UpdatePlotCardUsageRequest,
-    db: AsyncSession = Depends(get_db)
-):
-    """更新剧情卡片在章纲中的使用状态"""
-    
-    # 检查关联是否存在
-    link_result = await db.execute(
-        select(PlotCardChapterOutlineLink).where(
-            PlotCardChapterOutlineLink.chapter_outline_id == outline_id,
-            PlotCardChapterOutlineLink.plot_card_id == card_id
-        )
-    )
-    link = link_result.scalar_one_or_none()
-    
-    if not link:
-        raise HTTPException(status_code=404, detail="剧情卡片与章纲的关联不存在")
-    
-    # 更新使用状态
-    await db.execute(
-        update(PlotCardChapterOutlineLink)
-        .where(
-            PlotCardChapterOutlineLink.chapter_outline_id == outline_id,
-            PlotCardChapterOutlineLink.plot_card_id == card_id
-        )
-        .values(usage_type=usage_data.usage_type, usage_notes=usage_data.usage_notes)
-    )
-    
-    await db.commit()
-
-    return {"message": "剧情卡片使用状态更新成功"}
-
-
-# ============================================
-# 时间线覆盖度编辑 API
-# ============================================
