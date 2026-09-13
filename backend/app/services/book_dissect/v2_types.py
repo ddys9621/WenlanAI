@@ -45,24 +45,6 @@ class EntityType(str, Enum):
     REJECTED = "rejected"
 
 
-class EventType(str, Enum):
-    """事件类型枚举。"""
-
-    MEET = "meet"
-    DEPART = "depart"
-    FIGHT = "fight"
-    BREAKTHROUGH = "breakthrough"
-    DEATH = "death"
-    BIRTH = "birth"
-    MARRY = "marry"
-    JOIN_ORG = "join_org"
-    LEAVE_ORG = "leave_org"
-    DISCOVER = "discover"
-    OBTAIN = "obtain"
-    LOSE = "lose"
-    OTHER = "other"
-
-
 class Importance(str, Enum):
     HIGH = "high"
     MEDIUM = "medium"
@@ -76,12 +58,6 @@ class RelationCategory(str, Enum):
     SOCIAL = "social"
     HOSTILE = "hostile"
     OTHER = "other"
-
-
-class LocationRole(str, Enum):
-    SETTING = "setting"
-    REFERENCED = "referenced"
-    BOUNDARY = "boundary"
 
 
 class CandidateSource(str, Enum):
@@ -159,14 +135,14 @@ class LocationFact:
     type: Optional[str] = None              # 城市 / 山 / 洞府 / ...
     parent: Optional[str] = None
     peers: list[str] = field(default_factory=list)
-    role: Optional[str] = None              # LocationRole 字符串
+    role: Optional[str] = None              # setting / referenced / boundary
     description: Optional[str] = None
     evidence: Optional[str] = None
 
 
 @dataclass
 class EventFact:
-    event_type: str                         # EventType 字符串
+    event_type: str                         # meet / depart / fight / breakthrough / death / … / other（LLM 原始输出）
     title: str
     description: Optional[str] = None
     actors: list[str] = field(default_factory=list)

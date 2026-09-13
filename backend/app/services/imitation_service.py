@@ -10,7 +10,7 @@
 
 对外 API（向下兼容）：
 - ``ImitationService.resolve_packs / resolve_dimensions / resolve_strength``：代理给 injector
-- ``ImitationService.assemble_prompt`` / ``stream_imitation``：仿写主入口
+- ``ImitationService.assemble_prompt``：仿写主入口（流式生成由 api/imitation.make_imitation_runner 走通用后台任务）
 - 本模块顶层 ``StrengthProfile`` / ``_ResolvedPack`` 仍可 import（re-export 自 injector）
 
 参见：
@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -607,51 +607,6 @@ class ImitationService:
             "[长期记忆与叙事状态（硬约束：已死角色不得复活；能力/位置/关系/未回收伏笔以此为准）]\n"
             + joined
         )
-
-    async def stream_imitation(
-        self,
-        db: AsyncSession,
-        project_id: str,
-        *,
-        user_intent: str,
-        target_chapter_id: Optional[str],
-        pack_ids: Optional[List[str]],
-        dimensions: Optional[List[str]],
-        strength: Optional[str],
-        target_word_count: int,
-        style_id: Optional[int] = None,
-        user_id: Optional[str] = None,
-        provider: Optional[str] = None,
-        model: Optional[str] = None,
-    ) -> AsyncGenerator[str, None]:
-        """流式生成：直接 yield 文本片段（API 层包成 SSE）。"""
-        bundle = await self.assemble_prompt(
-            db,
-            project_id,
-            user_intent=user_intent,
-            target_chapter_id=target_chapter_id,
-            pack_ids=pack_ids,
-            dimensions=dimensions,
-            strength=strength,
-            target_word_count=target_word_count,
-            style_id=style_id,
-            user_id=user_id,
-        )
-        logger.info(
-            "[V3-R5] 仿写开始 project=%s strength=%s dims=%s ctx=%d ref=%d",
-            project_id,
-            bundle["strength"],
-            bundle["used_dimensions"],
-            bundle["project_context_chars"],
-            bundle["reference_chars"],
-        )
-        async for chunk in self.ai_service.generate_text_stream(
-            prompt=bundle["user_prompt"],
-            system_prompt=bundle["system_prompt"],
-            provider=provider,
-            model=model,
-        ):
-            yield chunk
 
 
 # ============================================================

@@ -11,8 +11,8 @@
 历史背景：
 - 本模块从 ``imitation_service.py`` 中抽出（V3 R5 一键仿写）。原模块依旧持有"项目状态 +
   作者意图"等仿写专用逻辑，同时通过实例委托复用本模块的资料组装能力。
-- ``imitation_service`` 的对外 API（``ImitationService.resolve_*`` / ``assemble_prompt`` /
-  ``stream_imitation``）保持 100% 兼容，下游 R3-R7 各场景按需直接调用本模块。
+- ``imitation_service`` 的对外 API（``ImitationService.resolve_*`` / ``assemble_prompt``）
+  保持 100% 兼容，下游 R3-R7 各场景按需直接调用本模块。
 
 设计文档：@/agent-docs/features/dissect_to_creation_pipeline.md §4
 """
