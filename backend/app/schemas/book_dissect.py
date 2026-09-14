@@ -142,7 +142,9 @@ class ExtractionPlanResponse(BaseModel):
     context_window: int = Field(default=0, description="模型上下文窗口（0 = 未知，已按保守值规划）")
     max_tokens: int = Field(default=0, description="用户 Max Tokens 设置")
     dictionary_calls: int = Field(..., description="字典分类 LLM 调用次数；V5 流水线不做字典分类，恒为 0（保留字段兼容前端）")
-    post_calls: int = Field(..., description="拆书卡之后的 LLM 调用估算：情节单元（≈章数/8）+ 阶段划分 + 骨架 / 人物谱 / 手册 + 文风定性与例句")
+    post_calls: int = Field(..., description="拆书卡之后的 LLM 调用估算：情节单元 + 阶段划分 + 骨架 / 人物谱 / 手册 + 文风定性与例句")
+    arc_calls: int = Field(default=0, description="其中情节单元识别的轮数 = ceil(目标章数 / arc_window)")
+    arc_window: int = Field(default=0, description="情节单元识别每轮喂的拆书卡数（按模型上下文 / Max Tokens 规划，8-60）")
     estimated_llm_calls: int = Field(
         ..., description="预计 LLM 调用总数下限 = batch_count + post_calls（不含批失败拆半重试与 JSON 二次修复）",
     )

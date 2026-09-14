@@ -23,7 +23,9 @@ from app.models.book_dissect_story_arc import BookDissectStoryArc
 from app.models.book_dissect_task import BookDissectTask
 from app.models.reference_pack import ReferencePack
 from app.services.ai_service import AIService
-from app.services.book_dissect.batch_planner import BatchPlan, plan_batches, select_target_indices, split_batch
+from app.services.book_dissect.batch_planner import (
+    BatchPlan, plan_arc_window, plan_batches, select_target_indices, split_batch,
+)
 from app.services.book_dissect.chapter_card_extractor import ChapterCardExtractionError, ChapterCardExtractor
 from app.services.book_dissect.chapter_splitter import Chapter
 from app.services.book_dissect.dissect_stats import build_bridges_payload, build_structure_stats
@@ -314,7 +316,11 @@ async def _run_card_extraction(
 async def _run_arc_building(db: AsyncSession, task: BookDissectTask, cards: list[ChapterCard], ai_service: AIService) -> list[StoryArc]:
     task.stage = task.extraction_phase = "arcs"
     await db.commit()
-    stage = begin_stage("arcs", "情节单元识别")
+    arc_plan = plan_arc_window(
+        len(cards), model=getattr(ai_service, "default_model", None), max_tokens=getattr(ai_service, "default_max_tokens", None),
+    )
+    stage = begin_stage("arcs", f"情节单元识别（每轮 {arc_plan.window_new} 章，约 {arc_plan.window_count(len(cards))} 轮）")
+    trace_progress(f"识别情节单元：每轮喂 {arc_plan.window_new} 张拆书卡，约 {arc_plan.window_count(len(cards))} 轮", task.progress)
     last_chapter = cards[-1].chapter_number
 
     def _on_window(n_arcs: int, s: int, e: int) -> None:
@@ -322,7 +328,7 @@ async def _run_arc_building(db: AsyncSession, task: BookDissectTask, cards: list
         _set_progress(task, int(_P_CARDS_END + ratio * (_P_ARCS_END - _P_CARDS_END)),
                       f"识别情节单元：已到第 {e} 章，累计 {n_arcs} 个单元")
 
-    arcs = await StoryArcBuilder(ai_service).build(cards, on_window=_on_window)
+    arcs = await StoryArcBuilder(ai_service, window_new=arc_plan.window_new).build(cards, on_window=_on_window)
     for a in arcs:
         db.add(BookDissectStoryArc(
             task_id=task.id, arc_index=a.arc_index, start_chapter=a.start_chapter, end_chapter=a.end_chapter,

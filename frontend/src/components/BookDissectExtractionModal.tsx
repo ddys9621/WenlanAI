@@ -278,9 +278,12 @@ function PlanSummary({ plan, loading }: { plan: BookDissectExtractionPlan | null
         · 预计 <span className="font-semibold text-brand">≥ {plan.estimated_llm_calls}</span> 次 LLM 调用
       </p>
       <p className="text-content-tertiary">
-        抽取 {plan.batch_count} 次
+        拆书卡 {plan.batch_count} 次
         {plan.dictionary_calls > 0 && ` + 字典分类 ${plan.dictionary_calls} 次`}
-        {` + 聚合产物 ${plan.post_calls} 次`}；桥段识别与失败重试另计。模型 {plan.model || '未设置'}（{ctxLabel}，Max Tokens {plan.max_tokens || '未知'}）。
+        {plan.arc_calls > 0
+          ? ` + 情节单元 ${plan.arc_calls} 次（每轮约 ${plan.arc_window} 章）+ 骨架 / 人物谱 / 文风 ${plan.post_calls - plan.arc_calls} 次`
+          : ` + 聚合产物 ${plan.post_calls} 次`}
+        ；失败重试另计。模型 {plan.model || '未设置'}（{ctxLabel}，Max Tokens {plan.max_tokens || '未知'}）。
       </p>
       {plan.warnings.map((w) => (
         <p key={w} className="flex items-start gap-1.5 text-amber-700">

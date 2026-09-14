@@ -37,6 +37,20 @@ BATCH_CONTEXT_OVERHEAD_TOKENS = 3_000
 # 单批章节数硬上限：再大 LLM 输出对齐（章号 / 顺序）出错率明显上升
 MAX_CHAPTERS_PER_BATCH_HARD_CAP = 60
 
+# ---- 情节单元识别（S2）的滚动窗口：喂的是压缩拆书卡，不是正文 ----
+# 每张压缩卡（章纲 ≤400 字 + 标签 / 钩子 / 爽点 / 主角变化，英文 key）约 350 tokens
+EST_INPUT_TOKENS_PER_CARD = 350
+# 每个单元的 JSON（十几个叙述字段）约 450 tokens；单元平均 4 章 → 折算每章约 110 tokens 输出
+EST_OUTPUT_TOKENS_PER_ARC = 450
+AVG_CHAPTERS_PER_ARC = 4
+# 输出预算只用 80%：窗口里还有上轮 carry 过来的卡，单元数会比 window_new / 4 略多
+ARC_OUTPUT_SAFETY_RATIO = 0.8
+# 系统提示 + 模板 + 词表 + 输出示例
+ARC_PROMPT_OVERHEAD_TOKENS = 2_000
+# 窗口下限 = 原固定值（小模型 / 低 Max Tokens 时退回老行为）；上限：一轮要对齐几十个单元的边界，再大出错率上升、单次输出过长
+ARC_WINDOW_MIN = 8
+ARC_WINDOW_HARD_CAP = 60
+
 
 @dataclass
 class BatchPlan:
@@ -219,3 +233,46 @@ def split_batch(indices: list[int]) -> list[list[int]]:
         return [indices]
     mid = len(indices) // 2
     return [indices[:mid], indices[mid:]]
+
+
+@dataclass
+class ArcWindowPlan:
+    """情节单元识别的滚动窗口规划：每轮新进多少张拆书卡。"""
+
+    window_new: int                    # 每轮新进卡数（已夹在 ARC_WINDOW_MIN..ARC_WINDOW_HARD_CAP）
+    max_by_input: int                  # 输入预算允许的卡数
+    max_by_output: int                 # 输出预算允许的卡数（Max Tokens 未知时 = 硬上限）
+    model: str
+    context_window: int                # 0 表示模型未知（已用 fallback 规划）
+    context_known: bool
+    output_budget_tokens: int
+
+    def window_count(self, card_count: int) -> int:
+        """按卡数估算需要几轮 LLM（不含失败减半重试 / carry 造成的额外轮次）。"""
+        return -(-max(0, card_count) // self.window_new)
+
+
+def plan_arc_window(card_count: int, *, model: Optional[str], max_tokens: Optional[int]) -> ArcWindowPlan:
+    """按模型上下文 / Max Tokens 决定情节单元识别每轮喂多少张拆书卡。
+
+    输入侧：上下文 × SAFE_INPUT_RATIO 扣掉提示词开销，按每卡 EST_INPUT_TOKENS_PER_CARD 折算；
+    输出侧：Max Tokens × 安全系数 能容纳几个单元 JSON，再乘平均单元长度换算成卡数。
+    两者取小，再夹在 [ARC_WINDOW_MIN, ARC_WINDOW_HARD_CAP]；上下文未知按 32k 兜底。
+    """
+    model_str = (model or "").strip()
+    ctx_known = _lookup_context_window(model_str)
+    ctx = ctx_known or DEFAULT_CONTEXT_WINDOW_FALLBACK
+    output_budget = int(max_tokens or 0)
+    input_budget = max(1_000, int(ctx * SAFE_INPUT_RATIO) - ARC_PROMPT_OVERHEAD_TOKENS)
+    max_by_input = max(1, input_budget // EST_INPUT_TOKENS_PER_CARD)
+    if output_budget > 0:
+        arcs_fit = int(output_budget * ARC_OUTPUT_SAFETY_RATIO) // EST_OUTPUT_TOKENS_PER_ARC
+        max_by_output = max(1, arcs_fit * AVG_CHAPTERS_PER_ARC)
+    else:
+        max_by_output = ARC_WINDOW_HARD_CAP
+    window_new = min(max(min(max_by_input, max_by_output), ARC_WINDOW_MIN), ARC_WINDOW_HARD_CAP)
+    return ArcWindowPlan(
+        window_new=window_new, max_by_input=max_by_input, max_by_output=max_by_output,
+        model=model_str, context_window=ctx_known, context_known=bool(ctx_known),
+        output_budget_tokens=output_budget,
+    )

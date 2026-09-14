@@ -44,7 +44,7 @@ from app.schemas.book_dissect import (
 )
 from app.services.ai_jobs import AIJob, AIJobConflictError, ai_jobs
 from app.services.ai_service import AIService
-from app.services.book_dissect.batch_planner import plan_batches, select_target_indices
+from app.services.book_dissect.batch_planner import plan_arc_window, plan_batches, select_target_indices
 from app.services.book_dissect.chapter_splitter import split_bytes
 from app.services.book_dissect.extractor_v5 import (
     CANCELLED_MESSAGE,
@@ -464,18 +464,22 @@ def _normalize_extraction_options(
 
 
 # V5 拆书卡之后的 LLM 调用估算（与 extractor_v5 各阶段对应）：
-#   情节单元 ≈ 目标章数 / 8（滚动窗口每轮新进 8 张卡）
+#   情节单元 ≈ 目标章数 / 每轮窗口卡数（plan_arc_window 按模型上下文 / Max Tokens 规划，8-60 张）
 #   阶段划分 ≈ 单元数 / 40（单元平均约 4 章 → 每 160 章一块）
 #   骨架 / 人物功能谱 / 写法手册 3 次 + 文风定性 1 次 + 例句 3 章各 1 次
 _V5_FIXED_POST_CALLS = 7
 
 
-def _estimate_post_extraction_calls(target_chapters: int) -> int:
+def _estimate_post_extraction_calls(
+    target_chapters: int, *, model: Optional[str], max_tokens: Optional[int],
+) -> tuple[int, int, int]:
+    """返回 (拆书卡之后总调用数, 其中情节单元轮数, 情节单元每轮卡数)。"""
+    arc_plan = plan_arc_window(target_chapters, model=model, max_tokens=max_tokens)
     if target_chapters <= 0:
-        return 0
-    arc_calls = -(-target_chapters // 8)
+        return 0, 0, arc_plan.window_new
+    arc_calls = arc_plan.window_count(target_chapters)
     stage_calls = max(1, -(-target_chapters // 160))
-    return arc_calls + stage_calls + _V5_FIXED_POST_CALLS
+    return arc_calls + stage_calls + _V5_FIXED_POST_CALLS, arc_calls, arc_plan.window_new
 
 
 @router.post("/{task_id}/extraction-plan", response_model=ExtractionPlanResponse)
@@ -506,7 +510,11 @@ async def preview_extraction_plan(
         extraction_engine=opts["extraction_engine"],
         chapters_per_request=opts["chapters_per_request"],
     )
-    post_calls = _estimate_post_extraction_calls(plan.target_count)
+    post_calls, arc_calls, arc_window = _estimate_post_extraction_calls(
+        plan.target_count,
+        model=getattr(ai_service, "default_model", None),
+        max_tokens=getattr(ai_service, "default_max_tokens", None),
+    )
     return ExtractionPlanResponse(
         chapter_count=chapter_count,
         target_chapters=plan.target_count,
@@ -519,6 +527,8 @@ async def preview_extraction_plan(
         max_tokens=plan.output_budget_tokens,
         dictionary_calls=0,  # V5 不再做实体扫描 / 字典分类
         post_calls=post_calls,
+        arc_calls=arc_calls,
+        arc_window=arc_window,
         estimated_llm_calls=plan.batch_count + post_calls,
         warnings=plan.warnings,
     )

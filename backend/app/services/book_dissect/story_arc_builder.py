@@ -1,10 +1,13 @@
 """拆书 V5 S2：滚动窗口喂拆书卡（不喂正文），识别自然闭合的情节单元。
 
-- 每轮新进 window_new 张卡 + 上轮未闭合的卡；单元 ≤ max_arc_len 章
+- 窗口从第一张未消费的卡开始取 window_new 张（由 batch_planner.plan_arc_window 按模型上下文 / Max Tokens 规划，
+  大模型一轮几十张；未闭合的尾部自然留在下一窗口开头）；单元 ≤ max_arc_len 章
 - 连续性按「窗口内位置」判定（采样模式章号不连续也能用）：必须从窗口首卡开始、首尾相接
-- 非最终窗口：LLM 不给单元 → 全窗口 carry 到下一轮；窗口已达上限仍不给 → 规则兜底切一段
-- 最终窗口：尾部强制收束（LLM 不给则兜底）
-- 单轮 LLM 异常按「没给单元」处理，不中断全书
+- 失败（LLM 异常 / 输出截断 / 未接受任何单元）：
+  - 大窗口（> max_arc_len）：多半是输出过长被截断或 JSON 坏掉，窗口减半重试（下限 max_arc_len），不硬凑兜底
+  - 小窗口、非最终：模型说尚未闭合 → 扩窗继续（最多扩到 max_arc_len）
+  - 小窗口已到 max_arc_len 或最终窗口：规则兜底切一段
+- 成功一轮后窗口恢复为 window_new；单轮失败不中断全书
 """
 from __future__ import annotations
 
@@ -35,26 +38,28 @@ class StoryArcBuilder:
     async def build(self, cards: Sequence[ChapterCard], on_window: Optional[OnWindow] = None) -> list[StoryArc]:
         ordered = sorted((c for c in cards if c.has_content()), key=lambda c: c.chapter_number)
         arcs: list[StoryArc] = []
-        carry: list[ChapterCard] = []
-        cursor = 0
-        while cursor < len(ordered) or carry:
-            new = ordered[cursor: cursor + self.window_new]
-            cursor += len(new)
-            window = carry + new
-            is_final = cursor >= len(ordered)
+        pos = 0
+        size = self.window_new
+        while pos < len(ordered):
+            window = ordered[pos: pos + size]
+            is_final = pos + len(window) >= len(ordered)
             accepted = self._accept(await self._ask(window, is_final), window)
             if not accepted:
-                if is_final or len(window) >= self.max_arc_len:
-                    accepted = [self._fallback(window[: self.max_arc_len])]
-                else:
-                    carry = window
+                if len(window) > self.max_arc_len:
+                    size = max(self.max_arc_len, len(window) // 2)
+                    logger.info("%s 窗口 %d-%d（%d 张）未识别出单元，减半到 %d 张重试",
+                                _LOG, window[0].chapter_number, window[-1].chapter_number, len(window), size)
                     continue
+                if not is_final and len(window) < self.max_arc_len:
+                    size = min(self.max_arc_len, len(window) + self.window_new)
+                    continue
+                accepted = [self._fallback(window[: self.max_arc_len])]
             for arc in accepted:
                 arc.arc_index = len(arcs) + 1
                 arcs.append(arc)
             consumed_end = accepted[-1].end_chapter
-            pos = next(i for i, c in enumerate(window) if c.chapter_number == consumed_end)
-            carry = window[pos + 1:]
+            pos += next(i for i, c in enumerate(window) if c.chapter_number == consumed_end) + 1
+            size = self.window_new
             if on_window:
                 on_window(len(arcs), window[0].chapter_number, window[-1].chapter_number)
         return arcs
@@ -75,7 +80,11 @@ class StoryArcBuilder:
             logger.warning("%s 窗口 %d-%d LLM 失败: %s", _LOG, window[0].chapter_number, window[-1].chapter_number, exc)
             return None
         content = (resp or {}).get("content") if isinstance(resp, dict) else None
-        if not content or (isinstance(resp, dict) and resp.get("finish_reason") == "length"):
+        if isinstance(resp, dict) and resp.get("finish_reason") == "length":
+            logger.warning("%s 窗口 %d-%d（%d 张）输出被 Max Tokens 截断", _LOG,
+                           window[0].chapter_number, window[-1].chapter_number, len(window))
+            return None
+        if not content:
             return None
         data = safe_parse_json(content, default=None, expected_type="object", log_prefix=_LOG)
         return data if isinstance(data, dict) else None

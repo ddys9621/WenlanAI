@@ -1232,7 +1232,12 @@ export interface BookDissectExtractionPlan {
   context_window: number;
   max_tokens: number;
   dictionary_calls: number;
+  /** 拆书卡之后的调用估算：情节单元 + 阶段划分 + 骨架 / 人物谱 / 手册 + 文风定性与例句 */
   post_calls: number;
+  /** 其中情节单元识别的轮数 = ceil(目标章数 / arc_window) */
+  arc_calls: number;
+  /** 情节单元识别每轮喂的拆书卡数（按模型上下文 / Max Tokens 规划，8-60） */
+  arc_window: number;
   estimated_llm_calls: number;
   warnings: string[];
 }
