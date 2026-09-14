@@ -381,7 +381,10 @@ def _make_dissect_builder(dimension: str) -> Callable[[AsyncSession, Any], Await
             return ""
         from app.services.reference_pack.dimension_compressor import compress_dimension
         try:
-            return compress_dimension(json_text, dimension, strength) or ""
+            return compress_dimension(
+                json_text, dimension, strength,
+                pipeline_version=int(getattr(pack, "pipeline_version", None) or 2),
+            ) or ""
         except Exception as exc:  # pragma: no cover - 防御性
             logger.warning(
                 "compressor 失败 dim=%s strength=%s err=%s", dimension, strength, exc

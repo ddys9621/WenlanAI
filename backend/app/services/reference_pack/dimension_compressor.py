@@ -95,8 +95,12 @@ HUMANIZE_KEY = {
 }
 
 
+# V5 有专用算法的维度；methodology 形状与 V3 相同，V5 包也走通用算法
+V5_SPECIALIZED_DIMENSIONS = ("bridges", "synopsis", "style", "character_archive", "structure")
+
+
 def compress_dimension(
-    json_text: Optional[str], dimension: str, level: str
+    json_text: Optional[str], dimension: str, level: str, *, pipeline_version: int = 2,
 ) -> str:
     """三档压缩单个维度。
 
@@ -104,6 +108,7 @@ def compress_dimension(
         json_text: ReferencePack.<dim>_json 字段原值（JSON 字符串或 None）
         dimension: 维度名（必须在 COMPRESSIBLE_DIMENSIONS 中）
         level: 'light' | 'medium' | 'deep'
+        pipeline_version: 参考包流水线版本；≥5 且维度有专用算法时走 v5_compressor，否则通用算法
 
     Returns:
         压缩后的可读文本（≤ LEVEL_CHAR_BUDGET[level] 字符）。
@@ -121,6 +126,10 @@ def compress_dimension(
         return _truncate_plain(str(json_text), LEVEL_CHAR_BUDGET[level])
     if not data:
         return ""
+
+    if pipeline_version >= 5 and dimension in V5_SPECIALIZED_DIMENSIONS and isinstance(data, dict):
+        from app.services.reference_pack.v5_compressor import compress_v5
+        return compress_v5(dimension, data, level)
 
     # style 维度特殊：通常是单个 dict 含 prompt_content（无子模式层级）
     if dimension == "style":
@@ -356,12 +365,13 @@ def compress_pack_to_db(pack: Any) -> dict[str, str]:
         await db.commit()
     """
     result: dict[str, str] = {}
+    pipeline_version = int(getattr(pack, "pipeline_version", None) or 2)
     for dim in COMPRESSIBLE_DIMENSIONS:
         json_text = getattr(pack, f"{dim}_json", None)
         if not json_text:
             continue
         for level in ("light", "medium", "deep"):
-            text = compress_dimension(json_text, dim, level)
+            text = compress_dimension(json_text, dim, level, pipeline_version=pipeline_version)
             if text:
                 result[f"{dim}_{level}"] = text
     return result
