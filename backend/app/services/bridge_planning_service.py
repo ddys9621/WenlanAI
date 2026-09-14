@@ -1018,7 +1018,10 @@ class BridgePlanningService:
             recorded = None
         template = resolve_template(getattr(project, "genre", None), explicit_key=recorded)
 
-        ctx = AssemblyContext(scene="chapter_outline", model_name=effective_model, project_id=bridge.project_id)
+        ctx = AssemblyContext(
+            scene="chapter_outline", model_name=effective_model, project_id=bridge.project_id,
+            bridge_context={"title": bridge.title, "goal": bridge.goal, "showoff_point": bridge.showoff_point},
+        )
         prompt = await self.assembler.assemble(db, ctx)
         beat_block = await _load_beat_context_for_bridge(db, bridge)
         prev_block = await prev_bridge_last_chapter_block(db, bridge.project_id, bridge.bridge_number)

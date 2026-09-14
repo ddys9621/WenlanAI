@@ -404,37 +404,98 @@ build_dissect_bridges = _make_dissect_builder("bridges")
 build_dissect_char_arch = _make_dissect_builder("character_archive")
 
 
-async def build_dissect_corpus(db: AsyncSession, ctx: Any) -> str:
-    """corpus 走 BM25 动态检索（不读预压缩）。
+_CORPUS_CHARS_PER_ITEM = {"light": 200, "medium": 320, "deep": 450}
 
-    Phase 1 骨架：先返回空。
-    完整版（V4.4 K6 P2 Contextual Retrieval）会调 HybridCorpusRetriever。
+
+async def build_dissect_corpus(db: AsyncSession, ctx: Any) -> str:
+    """corpus：BM25 检索项目挂载参考包的拆书卡（章节级动态，不缓存）。
+
+    锚文本按上下文取（章纲 → 剧情卡 → 桥段目标 / 爽点 → 用户输入 → 书名 + 主题）；
+    top_k 查 CORPUS_TOPK；bridge_position 对应的功能标签命中加 30% 分数。
     """
-    return ""
+    from app.services.book_dissect.chapter_card_retriever import (
+        BRIDGE_POSITION_TAGS,
+        ChapterCardRetriever,
+        format_card_hits,
+    )
+    from app.services.reference_pack.policy_tables import get_corpus_top_k
+
+    top_k = get_corpus_top_k(ctx.scene, ctx.model_name)
+    if top_k <= 0:
+        return ""
+    packs = [p for p in await _get_attached_packs(db, ctx.project_id) if p.task_id]
+    if not packs:
+        return ""
+    query = await _corpus_anchor_text(db, ctx)
+    if not query:
+        return ""
+    hits = await ChapterCardRetriever().retrieve(
+        db, task_ids=[p.task_id for p in packs], query=query, top_k=top_k,
+        boost_tags=BRIDGE_POSITION_TAGS.get(getattr(ctx, "bridge_position", None) or "", ()),
+    )
+    if not hits:
+        return ""
+    strength = _get_strength_for(ctx, "corpus")
+    return format_card_hits(
+        hits,
+        title_map={p.task_id: p.source_book_title or "原书" for p in packs},
+        chars_per_item=_CORPUS_CHARS_PER_ITEM.get(strength, 320),
+        header="以下为原书相关拆书卡（与本次内容最相关的章），仅作节奏 / 结构参考，禁止照抄原书人名与情节：",
+    )
+
+
+async def _corpus_anchor_text(db: AsyncSession, ctx: Any) -> str:
+    """corpus 检索锚文本：越贴近本次要写的内容越靠前。"""
+    parts: list[str] = []
+    if getattr(ctx, "chapter_outline_id", None):
+        from app.models.chapter_outline import ChapterOutline
+
+        co = (await db.execute(select(ChapterOutline).where(ChapterOutline.id == ctx.chapter_outline_id))).scalar_one_or_none()
+        if co:
+            parts = [co.title, co.plot_points, co.key_events]
+    if not any(parts) and getattr(ctx, "plot_card_id", None):
+        from app.models.plot_card import PlotCard
+
+        card = (await db.execute(select(PlotCard).where(PlotCard.id == ctx.plot_card_id))).scalar_one_or_none()
+        if card:
+            parts = [card.title, card.content]
+    if not any(parts):
+        bc = getattr(ctx, "bridge_context", None) or {}
+        parts = [bc.get("title"), bc.get("goal"), bc.get("showoff_point")]
+    if not any(parts):
+        parts = [getattr(ctx, "user_input", None)]
+    if not any(parts):
+        parts = [getattr(ctx, "title", None), getattr(ctx, "theme", None), getattr(ctx, "description", None)]
+    return " ".join(str(p).strip() for p in parts if p and str(p).strip())
 
 
 # ============================================================
 # helpers
 # ============================================================
 
-async def _get_first_attached_pack(db: AsyncSession, project_id: str):
-    """SELECT 项目挂载的第一个 ReferencePack（按 attached_at 排序）。"""
+async def _get_attached_packs(db: AsyncSession, project_id: str) -> list:
+    """SELECT 项目挂载的全部 ReferencePack（按 attached_at 排序）。"""
     if not project_id:
-        return None
+        return []
     try:
         from app.models.reference_pack import ReferencePack
         from app.models.project_reference_pack import ProjectReferencePack
     except ImportError:
-        return None
+        return []
 
     result = await db.execute(
         select(ReferencePack)
         .join(ProjectReferencePack, ProjectReferencePack.pack_id == ReferencePack.id)
         .where(ProjectReferencePack.project_id == project_id)
         .order_by(ProjectReferencePack.attached_at)
-        .limit(1)
     )
-    return result.scalar_one_or_none()
+    return list(result.scalars().all())
+
+
+async def _get_first_attached_pack(db: AsyncSession, project_id: str):
+    """SELECT 项目挂载的第一个 ReferencePack（按 attached_at 排序）。"""
+    packs = await _get_attached_packs(db, project_id)
+    return packs[0] if packs else None
 
 
 def _get_strength_for(ctx: Any, dimension: str) -> str:
