@@ -46,11 +46,11 @@ class BookDissectTaskResponse(BaseModel):
     total_words: int = 0
     chapters_meta: Optional[List[ChapterMetaSchema]] = None
 
-    # 引擎版本字段（仍保留以兼容老任务记录；新任务统一为 2）
-    version: int = Field(default=2, description="拆书引擎版本；当前仅使用 V2")
+    # 引擎版本字段：老任务 2（V2-V4 知识图谱抽取，只读）；新任务统一为 5
+    version: int = Field(default=2, description="拆书引擎版本：2 = V2-V4 老引擎；5 = V5 拆书卡 / 情节单元 / 骨架")
     extraction_phase: Optional[str] = Field(
         default=None,
-        description="V2 细粒度阶段：scanning/dictionary/extracting/aggregating/synthesizing",
+        description="细粒度阶段：V5 为 splitting/cards/arcs/skeleton/style/pack/done；V2 老任务为 scanning/dictionary/extracting/aggregating/synthesizing",
     )
     chapters_total: int = Field(default=0, description="V2 计划逐章抽取的章节总数")
     chapters_extracted: int = Field(default=0, description="V2 已成功抽取的章节数")
@@ -234,3 +234,67 @@ class V2OverviewResponse(BaseModel):
     sampling_param: int = 1
     stats: Dict[str, Any] = Field(default_factory=dict)
     synopsis: Optional[Dict[str, Any]] = None
+
+
+# ============================================================
+# V5：拆书卡 / 情节单元
+# ============================================================
+
+
+class ChapterCardListItem(BaseModel):
+    """拆书卡精简行（列表用，不含章纲正文）。"""
+    chapter_number: int
+    title: str = ""
+    function_tags: List[str] = Field(default_factory=list)
+    pace: str = "中"
+    tension: int = 3
+    ending_hook_type: str = "无"
+    payoff_count: int = 0
+    word_count: int = 0
+    extraction_status: str = "success"
+
+
+class ChapterCardDetail(BaseModel):
+    """整张拆书卡（v5_types.ChapterCard 字段 + 抽取状态）。"""
+    model_config = ConfigDict(extra="ignore")
+    chapter_number: int
+    title: str = ""
+    outline: str = ""
+    function_tags: List[str] = Field(default_factory=list)
+    pace: str = "中"
+    tension: int = 3
+    emotion_tone: str = ""
+    ending_hook_type: str = "无"
+    ending_hook_text: str = ""
+    payoff_points: List[str] = Field(default_factory=list)
+    highlights: List[str] = Field(default_factory=list)
+    characters: List[str] = Field(default_factory=list)
+    protagonist_delta: str = "无"
+    new_settings: List[str] = Field(default_factory=list)
+    word_count: int = 0
+    truncated_input: bool = False
+    extraction_status: str = "success"
+    extraction_error: Optional[str] = None
+
+
+class StoryArcSchema(BaseModel):
+    """情节单元（v5_types.StoryArc 字段）。"""
+    model_config = ConfigDict(extra="ignore")
+    arc_index: int
+    start_chapter: int
+    end_chapter: int
+    title: str = ""
+    function: str = ""
+    boundary_reason: str = ""
+    structure: str = ""
+    protagonist_chain: str = ""
+    emotion_curve: str = ""
+    payoff: str = ""
+    payoff_type: str = "无强爽点"
+    golden_finger_usage: str = "无"
+    character_changes: str = ""
+    gains_costs: str = ""
+    foreshadowing: str = ""
+    chapter_roles: Dict[str, str] = Field(default_factory=dict)
+    tension_peak_chapter: Optional[int] = None
+    origin: str = "llm"

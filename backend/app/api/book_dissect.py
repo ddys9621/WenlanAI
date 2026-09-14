@@ -31,14 +31,18 @@ from app.models.book_dissect_dictionary import BookDissectDictionary
 from app.models.book_dissect_entity import BookDissectEntity
 from app.models.book_dissect_event import BookDissectEvent
 from app.models.book_dissect_relation import BookDissectRelation
+from app.models.book_dissect_story_arc import BookDissectStoryArc
 from app.models.book_dissect_task import BookDissectTask
 from app.models.project_reference_pack import ProjectReferencePack
 from app.models.reference_pack import ReferencePack
 from app.schemas.book_dissect import (
     BookDissectTaskResponse,
     BookDissectUploadResponse,
+    ChapterCardDetail,
+    ChapterCardListItem,
     ChapterMetaSchema,
     ExtractionPlanResponse,
+    StoryArcSchema,
     V2ChapterFactDetailSchema,
     V2ChapterFactSummarySchema,
     V2DictionaryEntrySchema,
@@ -803,6 +807,76 @@ async def _ensure_task_owned(
 
 
 # ============================================================
+# V5 浏览：拆书卡 / 情节单元
+# ============================================================
+
+
+def _load_card(row: BookDissectChapterFact) -> dict:
+    try:
+        data = json.loads(row.fact_json or "{}")
+    except json.JSONDecodeError:
+        data = {}
+    return data if isinstance(data, dict) else {}
+
+
+@router.get("/{task_id}/cards", response_model=List[ChapterCardListItem])
+async def v5_list_cards(task_id: str, user: User = Depends(require_login), db: AsyncSession = Depends(get_db)):
+    """拆书卡精简列表（不含章纲正文），按章号升序。"""
+    await _ensure_task_owned(db, task_id, user.user_id)
+    rows = (await db.execute(
+        select(BookDissectChapterFact).where(BookDissectChapterFact.task_id == task_id).order_by(BookDissectChapterFact.chapter_number)
+    )).scalars().all()
+    out: List[ChapterCardListItem] = []
+    for row in rows:
+        card = _load_card(row)
+        out.append(ChapterCardListItem(
+            chapter_number=row.chapter_number, title=card.get("title") or row.chapter_title or "",
+            function_tags=card.get("function_tags") or [], pace=card.get("pace") or "中", tension=int(card.get("tension") or 3),
+            ending_hook_type=card.get("ending_hook_type") or "无", payoff_count=len(card.get("payoff_points") or []),
+            word_count=int(card.get("word_count") or 0), extraction_status=row.extraction_status or "success",
+        ))
+    return out
+
+
+@router.get("/{task_id}/cards/{chapter_number}", response_model=ChapterCardDetail)
+async def v5_get_card(task_id: str, chapter_number: int, user: User = Depends(require_login), db: AsyncSession = Depends(get_db)):
+    """整张拆书卡。"""
+    await _ensure_task_owned(db, task_id, user.user_id)
+    row = (await db.execute(
+        select(BookDissectChapterFact).where(
+            BookDissectChapterFact.task_id == task_id, BookDissectChapterFact.chapter_number == chapter_number,
+        )
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="该章没有拆书卡")
+    card = _load_card(row)
+    card.setdefault("chapter_number", row.chapter_number)
+    return ChapterCardDetail(**card, extraction_status=row.extraction_status or "success", extraction_error=row.extraction_error)
+
+
+@router.get("/{task_id}/arcs", response_model=List[StoryArcSchema])
+async def v5_list_arcs(task_id: str, user: User = Depends(require_login), db: AsyncSession = Depends(get_db)):
+    """情节单元全量列表，按单元编号升序。"""
+    await _ensure_task_owned(db, task_id, user.user_id)
+    rows = (await db.execute(
+        select(BookDissectStoryArc).where(BookDissectStoryArc.task_id == task_id).order_by(BookDissectStoryArc.arc_index)
+    )).scalars().all()
+    out: List[StoryArcSchema] = []
+    for row in rows:
+        try:
+            data = json.loads(row.arc_json or "{}")
+        except json.JSONDecodeError:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        data.setdefault("arc_index", row.arc_index)
+        data.setdefault("start_chapter", row.start_chapter)
+        data.setdefault("end_chapter", row.end_chapter)
+        out.append(StoryArcSchema(**data))
+    return out
+
+
+# ============================================================
 # 删除（清理磁盘文件）
 # ============================================================
 
@@ -861,6 +935,7 @@ async def delete_task(
     await db.execute(delete(BookDissectEntity).where(BookDissectEntity.task_id == task_id))
     await db.execute(delete(BookDissectChapterFact).where(BookDissectChapterFact.task_id == task_id))
     await db.execute(delete(BookDissectDictionary).where(BookDissectDictionary.task_id == task_id))
+    await db.execute(delete(BookDissectStoryArc).where(BookDissectStoryArc.task_id == task_id))  # V5 情节单元
 
     # 3. 任务本体
     await db.delete(task)
