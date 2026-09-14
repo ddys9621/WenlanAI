@@ -986,7 +986,9 @@ async def _build_dictionary_via_llm(
     scanner = EntityScanner()
     full_text = "\n\n".join(ch.content for ch in target_chapters)
     chapter_titles = [ch.raw_title for ch in target_chapters]
-    candidates = scanner.scan(full_text, chapter_titles=chapter_titles)
+    # 纯 CPU 的正则 / n-gram 扫描放到线程里跑：几百万字要好几秒，留在事件循环里会把
+    # 整个服务卡住（SSE 不出事件、轮询无响应，弹窗只能显示"正在连接"）
+    candidates = await asyncio.to_thread(scanner.scan, full_text, chapter_titles=chapter_titles)
     logger.info("[拆书V2] task=%s scan candidates=%d", task_id, len(candidates))
     scan_stage.done(候选=len(candidates))
     _set_progress(task, _PROGRESS_SCANNING_END, f"字典分类：模型归类 {len(candidates)} 个候选实体（1 次请求）…")

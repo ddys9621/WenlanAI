@@ -13,6 +13,7 @@ LLM 推断边界模式，或降级到固定字数切分。
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -153,8 +154,8 @@ async def split_with_llm_fallback(
     Returns:
         list[Chapter]，长度 ≥ 1
     """
-    # 1. 先走现有正则切分
-    chapters = split_into_chapters(raw_text)
+    # 1. 先走现有正则切分（纯 CPU，几百万字的书放线程里跑，不卡事件循环）
+    chapters = await asyncio.to_thread(split_into_chapters, raw_text)
 
     # 2. 判定是否需要 LLM 兜底
     if not needs_llm_fallback(chapters):

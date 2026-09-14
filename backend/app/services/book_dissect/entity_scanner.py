@@ -170,9 +170,11 @@ class EntityScanner:
         # 后处理
         self._filter_stopwords(candidates)
         self._apply_suffix_rules(candidates)
-        self._fill_sample_context(candidates, full_text)
-
-        return self._merge_and_sort(candidates)
+        # 先裁到 top N 再找上下文样本：n-gram 会产生十几万候选，每个都 text.find 一遍全文
+        # 在 300 万字的书上要 60 秒以上（且同步阻塞事件循环），而最终只留 200 个
+        top = self._merge_and_sort(candidates)
+        self._fill_sample_context({c.name: c for c in top}, full_text)
+        return top
 
     # ------------------------------------------------------------------
     # 子扫描器
