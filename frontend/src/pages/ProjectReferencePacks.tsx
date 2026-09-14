@@ -39,20 +39,13 @@ import type {
 } from '@/types/reference_pack';
 
 const DIMENSION_LABEL: Record<ReferenceDimension, string> = {
-  synopsis: '故事梗概', // V3.2 Story Bible 层（粗粒度全局引导）
-  // V3.2-P2 模式三维度（来自 V2 实体/关系/事件聚合，仅给类型分布与节奏信号）
-  entities: '实体分布',
-  relations: '关系频谱',
-  events: '事件节奏',
-  methodology: '写作方法论',
-  style: '文风范本',
-  structure: '章节结构',
-  archetypes: '角色塑造',
-  worldbuilding: '世界观建模',
-  // V4.1 维度：桥段反推 + 角色档案
-  bridges: '桥段范本',
-  character_archive: '角色档案',
-  corpus: '灵感语料',
+  synopsis: '全书骨架',
+  bridges: '桥段库',
+  style: '文风指纹',
+  character_archive: '人物功能谱',
+  methodology: '写法手册',
+  structure: '结构统计',
+  corpus: '拆书卡检索',
 };
 
 const STRENGTH_LABEL: Record<ReferenceStrength, string> = {
@@ -63,24 +56,9 @@ const STRENGTH_LABEL: Record<ReferenceStrength, string> = {
 
 function inferDefaultDimensions(strength: ReferenceStrength): ReferenceDimension[] {
   if (strength === 'light') return ['style'];
-  // V4.1 deep：5 手法 + Story Bible(synopsis) + 模式三维度(entities/relations/events)
-  //         + V4.1 桥段范本(bridges) + V4.1 角色档案(character_archive) + corpus
+  // 与后端 reference_pack._infer_default_dimensions 一致（V5 七维）
   if (strength === 'deep')
-    return [
-      'synopsis',
-      'entities',
-      'relations',
-      'events',
-      'methodology',
-      'style',
-      'structure',
-      'archetypes',
-      'worldbuilding',
-      'bridges',            // V4.1
-      'character_archive',  // V4.1
-      'corpus',
-    ];
-  // V3.2 medium：保留与后端 _wizard_infer_default_dimensions 一致：synopsis + methodology + style + corpus
+    return ['synopsis', 'bridges', 'methodology', 'style', 'structure', 'character_archive', 'corpus'];
   return ['synopsis', 'methodology', 'style', 'corpus'];
 }
 
@@ -482,9 +460,7 @@ function DimensionConfig({
   onStrengthChange: (s: ReferenceStrength) => void;
   onDimensionsChange: (d: ReferenceDimension[]) => void;
 }) {
-  const ALL_DIMS: ReferenceDimension[] = [
-    'methodology', 'style', 'structure', 'archetypes', 'worldbuilding', 'corpus',
-  ];
+  const ALL_DIMS = Object.keys(DIMENSION_LABEL) as ReferenceDimension[];
 
   return (
     <div className="space-y-5">

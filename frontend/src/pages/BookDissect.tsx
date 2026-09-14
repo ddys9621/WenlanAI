@@ -25,8 +25,9 @@ import type {
   BookDissectStatus,
   BookDissectTask,
 } from '@/types'
+import type { ReferencePackDetail } from '@/types/reference_pack'
 import { BookDissectExtractionModal } from '@/components/BookDissectExtractionModal'
-import { BookDissectV2View } from './BookDissectV2View'
+import { BookDissectV5View } from '@/components/book-dissect/BookDissectV5View'
 
 const ACCEPT_TYPES = '.txt,.md,.markdown'
 const MAX_BYTES = 10 * 1024 * 1024
@@ -35,13 +36,13 @@ const POLL_INTERVAL_MS = 3000
 const DISSECT_JOB_KINDS = ['book_dissect']
 
 const STAGE_LABELS: Record<string, string> = {
-  // V2 阶段
+  // V5 流水线阶段
   splitting: '章节切分',
-  scanning: '实体扫描',
-  dictionary: '字典分类',
-  extracting: '章节抽取',
-  aggregating: '全书聚合',
-  synthesizing: '生成概览',
+  cards: '逐章拆书卡',
+  arcs: '划分情节单元',
+  skeleton: '全书骨架 / 写法手册 / 人物功能谱',
+  style: '文风指纹',
+  pack: '生成参考包',
   // 通用
   split_done: '已切分，待抽取',
   queued: '排队中',
@@ -495,29 +496,42 @@ function TaskDetail({
   // 注意：所有 hooks 必须在任何 early-return 之前（task 可能为 null）
   const isReadyForImitation = task?.status === 'completed' && task?.stage === 'done'
   const taskId = task?.id
+  const taskStatus = task?.status
 
-  // CTA 需参考包真实状态：任务完成 ≠ 参考包可用（可能 generating/failed/覆盖率不足被判 failed）
-  const [ctaPackStatus, setCtaPackStatus] = useState<string | null>(null)
+  // 参考包详情：CTA 需真实状态（任务完成 ≠ 参考包可用），V5 视图的维度 tab 也直接读它。
+  // 任务状态变化（running → completed）时重新拉取，抽取中每次 poll 不重复请求。
+  const [pack, setPack] = useState<ReferencePackDetail | null>(null)
+  const [packLoading, setPackLoading] = useState(false)
+  const [packMissing, setPackMissing] = useState(false)
   useEffect(() => {
-    if (!taskId || !isReadyForImitation) {
-      setCtaPackStatus(null)
-      return
-    }
+    setPack(null)
+    setPackMissing(false)
+    if (!taskId || taskStatus === 'pending') return
     let cancelled = false
+    setPackLoading(true)
     referencePackApi
       .list()
-      .then((packs) => {
+      .then(async (packs) => {
+        const summary = (packs ?? []).find((p) => p.task_id === taskId) ?? null
         if (cancelled) return
-        const pack = (packs ?? []).find((p) => p.task_id === taskId) ?? null
-        setCtaPackStatus(pack?.status ?? 'missing')
+        if (!summary) {
+          setPackMissing(true)
+          return
+        }
+        const detail = await referencePackApi.get(summary.id)
+        if (!cancelled) setPack(detail)
       })
       .catch(() => {
-        if (!cancelled) setCtaPackStatus(null)
+        if (!cancelled) setPackMissing(true)
+      })
+      .finally(() => {
+        if (!cancelled) setPackLoading(false)
       })
     return () => {
       cancelled = true
     }
-  }, [isReadyForImitation, taskId])
+  }, [taskId, taskStatus])
+  const ctaPackStatus = pack?.status ?? (packMissing ? 'missing' : null)
 
   if (!task) {
     return (
@@ -606,16 +620,59 @@ function TaskDetail({
       <FileInfoCard task={task} />
 
       {task.status !== 'pending' && (
-        <BookDissectV2View
-          taskId={task.id}
-          status={task.status}
-          progress={task.progress ?? 0}
-          extractionPhase={task.extraction_phase ?? task.stage ?? null}
-          chaptersTotal={task.chapters_total ?? 0}
-          chaptersExtracted={task.chapters_extracted ?? 0}
-          chaptersFailed={task.chapters_failed ?? 0}
-        />
+        <>
+          <ProgressHeader task={task} pack={pack} />
+          <BookDissectV5View
+            key={task.id}
+            taskId={task.id}
+            pack={pack}
+            packLoading={packLoading}
+            initialTab={task.status === 'completed' ? 'skeleton' : 'cards'}
+          />
+        </>
       )}
+    </div>
+  )
+}
+
+// ============================================================
+// 子组件：抽取进度头（阶段 / 进度 / 章节计数 + 参考包入口）
+// ============================================================
+
+function ProgressHeader({ task, pack }: { task: BookDissectTask; pack: ReferencePackDetail | null }) {
+  const progress = Math.max(0, Math.min(100, task.progress ?? 0))
+  const total = task.chapters_total ?? 0
+  const extracted = task.chapters_extracted ?? 0
+  const failed = task.chapters_failed ?? 0
+  return (
+    <div className="space-y-2 rounded-2xl border border-surface-border-light bg-surface-card px-4 py-3">
+      <div className="flex flex-wrap items-center gap-3 text-xs text-content-secondary">
+        <span>
+          <strong className="text-content">阶段：</strong>
+          {task.status === 'cancelled' ? '已停止' : stageLabel(task.extraction_phase ?? task.stage) || '—'}
+        </span>
+        <span>
+          <strong className="text-content">进度：</strong>
+          {progress}%
+        </span>
+        {total > 0 && (
+          <span>
+            <strong className="text-content">拆书卡：</strong>
+            {extracted}/{total}
+            {failed > 0 && <span className="ml-1 text-rose-400">（{failed} 章失败）</span>}
+          </span>
+        )}
+        {task.status === 'running' && <Loader2 className="h-3 w-3 animate-spin text-brand" />}
+        {pack && (
+          <Link to={`/reference-packs/${pack.id}`} className="ml-auto inline-flex items-center gap-1 text-brand hover:underline">
+            <Sparkles className="h-3 w-3" />
+            参考包详情
+          </Link>
+        )}
+      </div>
+      <div className="hh-progress">
+        <div className="hh-progress-bar" style={{ width: `${progress}%` }} />
+      </div>
     </div>
   )
 }

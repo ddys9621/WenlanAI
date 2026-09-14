@@ -1164,15 +1164,16 @@ export interface BookDissectChapterMeta {
 // V1 采样式 schema（DissectResult / DissectProjectSchema 等）已随 V1 逻辑一并移除。
 
 export type BookDissectStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+/** V5 流水线阶段：切章 → 拆书卡 → 情节单元 → 骨架 → 文风 → 参考包 */
 export type BookDissectStage =
   | 'split_done'
   | 'queued'
   | 'splitting'
-  | 'scanning'
-  | 'dictionary'
-  | 'extracting'
-  | 'aggregating'
-  | 'synthesizing'
+  | 'cards'
+  | 'arcs'
+  | 'skeleton'
+  | 'style'
+  | 'pack'
   | 'done'
   | string;
 
@@ -1251,80 +1252,63 @@ export interface BookDissectUploadResponse {
 // 请改用参考包挂载 + 一键仿写路径，详见 @/frontend/src/components/ImitationDialog.tsx。
 
 // ============================================================
-// 拆书 V2 浏览类型
+// 拆书 V5 浏览类型（拆书卡 / 情节单元）
+// 后端 schema：@/backend/app/schemas/book_dissect.py
 // ============================================================
 
-export interface BookDissectV2Overview {
-  task_id: string;
-  version: number;
-  extraction_phase: string | null;
-  chapters_total: number;
-  chapters_extracted: number;
-  chapters_failed: number;
-  sampling_mode: string;
-  sampling_param: number;
-  stats: Record<string, unknown>;
-  synopsis: Record<string, unknown> | null;
+/** 拆书卡精简行（GET /book-dissect/{id}/cards），不含章纲正文 */
+export interface BookDissectChapterCardListItem {
+  chapter_number: number;
+  title: string;
+  function_tags: string[];
+  pace: string;
+  tension: number;
+  ending_hook_type: string;
+  payoff_count: number;
+  word_count: number;
+  extraction_status: string;
 }
 
-export interface BookDissectV2ChapterSummary {
-  id: string;
+/** 整张拆书卡（GET /book-dissect/{id}/cards/{chapter_number}） */
+export interface BookDissectChapterCard {
   chapter_number: number;
-  chapter_title: string | null;
-  summary: string | null;
+  title: string;
+  outline: string;
+  function_tags: string[];
+  pace: string;
+  tension: number;
+  emotion_tone: string;
+  ending_hook_type: string;
+  ending_hook_text: string;
+  payoff_points: string[];
+  highlights: string[];
+  characters: string[];
+  protagonist_delta: string;
+  new_settings: string[];
+  word_count: number;
+  truncated_input: boolean;
   extraction_status: string;
   extraction_error: string | null;
 }
 
-export interface BookDissectV2ChapterDetail extends BookDissectV2ChapterSummary {
-  fact: Record<string, unknown> | null;
-  is_truncated: boolean;
-  segment_count: number;
-}
-
-export interface BookDissectV2DictionaryEntry {
-  id: string;
-  name: string;
-  entity_type: string;
-  aliases: string[];
-  frequency: number;
-  confidence: string;
-  sample_context: string | null;
-  source: string | null;
-}
-
-export interface BookDissectV2Entity {
-  id: string;
-  canonical_name: string;
-  entity_type: string;
-  aliases: string[];
-  profile: Record<string, unknown>;
-  first_chapter: number | null;
-  last_chapter: number | null;
-  appearance_count: number;
-  role_type: string | null;
-  parent_entity_id: string | null;
-}
-
-export interface BookDissectV2Relation {
-  id: string;
-  entity_a_id: string;
-  entity_b_id: string;
-  relation_type: string;
-  relation_category: string | null;
-  occurrence_count: number;
-  first_chapter: number | null;
-  evidence: Array<{ chapter: number; text: string }>;
-}
-
-export interface BookDissectV2Event {
-  id: string;
-  chapter_number: number;
-  event_type: string;
+/** 情节单元（GET /book-dissect/{id}/arcs），与参考包 bridges.typical_arcs 同形 */
+export interface BookDissectStoryArc {
+  arc_index: number;
+  start_chapter: number;
+  end_chapter: number;
   title: string;
-  description: string | null;
-  actors: string[];
-  location: string | null;
-  importance: string;
-  evidence: string | null;
+  function: string;
+  boundary_reason: string;
+  structure: string;
+  protagonist_chain: string;
+  emotion_curve: string;
+  payoff: string;
+  payoff_type: string;
+  golden_finger_usage: string;
+  character_changes: string;
+  gains_costs: string;
+  foreshadowing: string;
+  chapter_roles: Record<string, string>;
+  tension_peak_chapter: number | null;
+  origin: string;
 }

@@ -24,20 +24,13 @@ import type {
 } from '@/types/reference_pack';
 
 const DIMENSION_LABELS: Record<ReferenceDimension, string> = {
-  synopsis: '故事梗概', // V3.2：Story Bible 层（粗粒度全局引导，放最前）
-  // V3.2-P2 模式三维度：仅作类型/类别/节奏的轻量提示
-  entities: '实体分布',
-  relations: '关系频谱',
-  events: '事件节奏',
-  methodology: '方法论',
-  style: '文风',
-  structure: '结构手法',
-  archetypes: '角色塑造',
-  worldbuilding: '世界观',
-  // V4.1 维度：桥段反推 + 角色档案
-  bridges: '桥段范本',
-  character_archive: '角色档案',
-  corpus: '灵感语料',
+  synopsis: '全书骨架',
+  bridges: '桥段库',
+  style: '文风指纹',
+  character_archive: '人物功能谱',
+  methodology: '写法手册',
+  structure: '结构统计',
+  corpus: '拆书卡检索',
 };
 
 const STRENGTH_LABELS: Record<ReferenceStrength, string> = {

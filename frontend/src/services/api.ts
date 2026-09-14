@@ -91,13 +91,9 @@ import type {
   BookDissectExtractionOptions,
   BookDissectExtractionPlan,
   BookDissectUploadResponse,
-  BookDissectV2Overview,
-  BookDissectV2ChapterSummary,
-  BookDissectV2ChapterDetail,
-  BookDissectV2DictionaryEntry,
-  BookDissectV2Entity,
-  BookDissectV2Relation,
-  BookDissectV2Event,
+  BookDissectChapterCardListItem,
+  BookDissectChapterCard,
+  BookDissectStoryArc,
 } from '../types';
 
 type ChapterListApiResponse = Chapter[] | { items?: Chapter[] };
@@ -1326,48 +1322,18 @@ export const bookDissectApi = {
   // 后端端点统一返 410 Gone；改用 imitationApi.preview / imitationApi.streamUrl
   // 配合 referencePackApi.attach 在用户自己项目内做「一键仿写」。
 
-  // ----- V2 浏览 -----
-  v2GetOverview: (taskId: string) =>
-    api.get<unknown, BookDissectV2Overview>(`/book-dissect/${taskId}/v2/overview`),
+  // ----- V5 浏览：拆书卡 / 情节单元 -----
+  /** 全部拆书卡精简行（按章号升序，不含章纲正文） */
+  listCards: (taskId: string) =>
+    api.get<unknown, BookDissectChapterCardListItem[]>(`/book-dissect/${taskId}/cards`),
 
-  v2ListChapters: (taskId: string) =>
-    api.get<unknown, BookDissectV2ChapterSummary[]>(`/book-dissect/${taskId}/v2/chapters`),
+  /** 单章整张拆书卡 */
+  getCard: (taskId: string, chapterNumber: number) =>
+    api.get<unknown, BookDissectChapterCard>(`/book-dissect/${taskId}/cards/${chapterNumber}`),
 
-  v2GetChapterDetail: (taskId: string, chapterNumber: number) =>
-    api.get<unknown, BookDissectV2ChapterDetail>(
-      `/book-dissect/${taskId}/v2/chapters/${chapterNumber}`,
-    ),
-
-  v2ListDictionary: (taskId: string) =>
-    api.get<unknown, BookDissectV2DictionaryEntry[]>(`/book-dissect/${taskId}/v2/dictionary`),
-
-  v2ListEntities: (taskId: string, entityType?: string, slim = false) =>
-    api.get<unknown, BookDissectV2Entity[]>(
-      `/book-dissect/${taskId}/v2/entities`,
-      {
-        params: {
-          ...(entityType ? { entity_type: entityType } : {}),
-          ...(slim ? { slim: true } : {}),
-        },
-      },
-    ),
-
-  v2GetEntity: (taskId: string, entityId: string) =>
-    api.get<unknown, BookDissectV2Entity>(
-      `/book-dissect/${taskId}/v2/entities/${entityId}`,
-    ),
-
-  v2ListRelations: (taskId: string, category?: string) =>
-    api.get<unknown, BookDissectV2Relation[]>(
-      `/book-dissect/${taskId}/v2/relations`,
-      { params: category ? { relation_category: category } : undefined },
-    ),
-
-  v2ListEvents: (taskId: string, importance?: string) =>
-    api.get<unknown, BookDissectV2Event[]>(
-      `/book-dissect/${taskId}/v2/events`,
-      { params: importance ? { importance } : undefined },
-    ),
+  /** 全部情节单元（按 arc_index 升序） */
+  listArcs: (taskId: string) =>
+    api.get<unknown, BookDissectStoryArc[]>(`/book-dissect/${taskId}/arcs`),
 };
 
 
