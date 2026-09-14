@@ -3,7 +3,7 @@
 - POST /api/book-dissect/upload  上传 txt/md → 切分 → 返回 task_id + 章节预览（不接 LLM）
 - GET  /api/book-dissect/{task_id}  查询任务状态
 - POST /api/book-dissect/{task_id}/extraction-plan  启动前预估分批 / 调用次数（不接 LLM）
-- POST /api/book-dissect/{task_id}/start-extraction  启动抽取（跑在 AIJobManager 后台任务里，可停止）
+- POST /api/book-dissect/{task_id}/start-extraction  启动抽取（V5：拆书卡 → 情节单元 → 骨架 → 文风；跑在 AIJobManager 后台任务里，可停止）
 - POST /api/book-dissect/{task_id}/cancel  手动停止运行中的抽取
 - DELETE /api/book-dissect/{task_id}  删除任务并清理磁盘（运行中会先停止）
 
@@ -52,9 +52,9 @@ from app.services.ai_jobs import AIJob, AIJobConflictError, ai_jobs
 from app.services.ai_service import AIService
 from app.services.book_dissect.batch_planner import plan_batches, select_target_indices
 from app.services.book_dissect.chapter_splitter import split_bytes
-from app.services.book_dissect.extractor_v2 import (
+from app.services.book_dissect.extractor_v5 import (
     CANCELLED_MESSAGE,
-    run_extraction_v2_background,
+    run_extraction_v5_background,
 )
 from app.user_manager import User
 from app.api.deps import require_login
@@ -317,7 +317,7 @@ async def start_extraction(
     ai_service: AIService = Depends(get_user_ai_service),
     db: AsyncSession = Depends(get_db),
 ):
-    """启动 LLM 抽取（分批抽取 + 全书聚合），跑在 ai_jobs 后台任务里，可随时 /cancel 停止。
+    """启动 LLM 抽取（V5：分批拆书卡 → 情节单元 → 全书骨架 → 文风指纹 → 参考包），跑在 ai_jobs 后台任务里，可随时 /cancel 停止。
 
     Body（可选）：
     - `sampling_mode`: "all" / "every_n" / "key_only"（默认 "all"）
@@ -347,7 +347,7 @@ async def start_extraction(
     task.error_message = None
     task.started_at = datetime.now()
     task.completed_at = None
-    task.version = 2
+    task.version = 5
     task.sampling_mode = opts["sampling_mode"]
     task.sampling_param = opts["sampling_param"]
     task.chapters_total = 0
@@ -363,7 +363,7 @@ async def start_extraction(
     user_id = user.user_id
 
     async def runner(_job: AIJob) -> None:
-        await run_extraction_v2_background(task_id=task_id, user_id=user_id, ai_service=ai_service)
+        await run_extraction_v5_background(task_id=task_id, user_id=user_id, ai_service=ai_service)
 
     try:
         await ai_jobs.start(
@@ -380,7 +380,7 @@ async def start_extraction(
         raise HTTPException(status_code=409, detail=str(exc))
 
     logger.info(
-        "拆书V2：已排队 user=%s task=%s sampling=%s/%d engine=%s per_request=%d limit=%d",
+        "拆书V5：已排队 user=%s task=%s sampling=%s/%d engine=%s per_request=%d limit=%d",
         user_id, task_id, opts["sampling_mode"], opts["sampling_param"],
         opts["extraction_engine"], opts["chapters_per_request"], opts["chapter_limit"],
     )
@@ -464,8 +464,19 @@ def _normalize_extraction_options(
     }
 
 
-# 抽取阶段之后固定的 LLM 调用：5 个手法维度 + synopsis + 冲突仲裁（桥段识别按爽点峰数量动态，不计）
-_POST_EXTRACTION_LLM_CALLS = 7
+# V5 拆书卡之后的 LLM 调用估算（与 extractor_v5 各阶段对应）：
+#   情节单元 ≈ 目标章数 / 8（滚动窗口每轮新进 8 张卡）
+#   阶段划分 ≈ 单元数 / 40（单元平均约 4 章 → 每 160 章一块）
+#   骨架 / 人物功能谱 / 写法手册 3 次 + 文风定性 1 次 + 例句 3 章各 1 次
+_V5_FIXED_POST_CALLS = 7
+
+
+def _estimate_post_extraction_calls(target_chapters: int) -> int:
+    if target_chapters <= 0:
+        return 0
+    arc_calls = -(-target_chapters // 8)
+    stage_calls = max(1, -(-target_chapters // 160))
+    return arc_calls + stage_calls + _V5_FIXED_POST_CALLS
 
 
 @router.post("/{task_id}/extraction-plan", response_model=ExtractionPlanResponse)
@@ -496,7 +507,7 @@ async def preview_extraction_plan(
         extraction_engine=opts["extraction_engine"],
         chapters_per_request=opts["chapters_per_request"],
     )
-    dictionary_calls = 1 if plan.batch_count > 1 else 0
+    post_calls = _estimate_post_extraction_calls(plan.target_count)
     return ExtractionPlanResponse(
         chapter_count=chapter_count,
         target_chapters=plan.target_count,
@@ -507,9 +518,9 @@ async def preview_extraction_plan(
         model=plan.model,
         context_window=plan.context_window,
         max_tokens=plan.output_budget_tokens,
-        dictionary_calls=dictionary_calls,
-        post_calls=_POST_EXTRACTION_LLM_CALLS,
-        estimated_llm_calls=plan.batch_count + dictionary_calls + _POST_EXTRACTION_LLM_CALLS,
+        dictionary_calls=0,  # V5 不再做实体扫描 / 字典分类
+        post_calls=post_calls,
+        estimated_llm_calls=plan.batch_count + post_calls,
         warnings=plan.warnings,
     )
 

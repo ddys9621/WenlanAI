@@ -140,10 +140,10 @@ class ExtractionPlanResponse(BaseModel):
     model: str = Field(default="", description="当前模型名")
     context_window: int = Field(default=0, description="模型上下文窗口（0 = 未知，已按保守值规划）")
     max_tokens: int = Field(default=0, description="用户 Max Tokens 设置")
-    dictionary_calls: int = Field(..., description="字典分类 LLM 调用次数（多批时 1，整本一批时 0）")
-    post_calls: int = Field(..., description="抽取后固定的 LLM 调用数（5 手法维度 + synopsis + 冲突仲裁）")
+    dictionary_calls: int = Field(..., description="字典分类 LLM 调用次数；V5 流水线不做字典分类，恒为 0（保留字段兼容前端）")
+    post_calls: int = Field(..., description="拆书卡之后的 LLM 调用估算：情节单元（≈章数/8）+ 阶段划分 + 骨架 / 人物谱 / 手册 + 文风定性与例句")
     estimated_llm_calls: int = Field(
-        ..., description="预计 LLM 调用总数下限 = batch_count + dictionary_calls + post_calls（不含失败重试与桥段识别的动态调用）",
+        ..., description="预计 LLM 调用总数下限 = batch_count + post_calls（不含批失败拆半重试与 JSON 二次修复）",
     )
     warnings: List[str] = Field(default_factory=list)
 
