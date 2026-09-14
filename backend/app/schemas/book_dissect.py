@@ -7,7 +7,7 @@ V2-V4 的浏览 schema（章节事实 / 字典 / 实体 / 关系 / 事件 / 概�
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Optional, Any, Dict
+from typing import List, Optional, Dict
 
 from pydantic import BaseModel, Field, ConfigDict
 
