@@ -28,8 +28,8 @@ from app.services.book_dissect.long_context_router import (
 # 得到的批次虽小（2-4 章）但仍比逐章省请求
 DEFAULT_CONTEXT_WINDOW_FALLBACK = 32_000
 
-# 每章 ChapterFact JSON 的输出 token 估算（summary + 各结构化字段，英文 key 有额外开销）
-EST_OUTPUT_TOKENS_PER_CHAPTER = 1_500
+# 每章拆书卡 JSON 的输出 token 估算（章纲 300-500 字 + 标签字段，英文 key 有额外开销）
+EST_OUTPUT_TOKENS_PER_CHAPTER = 900
 
 # 分批模式额外注入的字典 / 前文摘要上下文开销（字典 top50 ≈ 1k + 摘要 1500 字 ≈ 2k）
 BATCH_CONTEXT_OVERHEAD_TOKENS = 3_000
