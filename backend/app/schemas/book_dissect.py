@@ -1,7 +1,8 @@
 """拆书功能的 Pydantic 模型
 
-V1 采样式结果 schema（DissectResult / DissectProjectSchema 等）已随 V1 逻辑一同移除。
-存量 V1 任务的 result_json 不再通过详情接口返回，前端只渲染 V2 视图。
+V1 采样式结果 schema（DissectResult / DissectProjectSchema 等）已随 V1 逻辑一同移除；
+V2-V4 的浏览 schema（章节事实 / 字典 / 实体 / 关系 / 事件 / 概览）随实体图谱抽取核心一并移除。
+前端只渲染 V5 视图（拆书卡 / 情节单元 / 参考包），老任务只读展示参考包。
 """
 from __future__ import annotations
 
@@ -107,7 +108,7 @@ class BookDissectUploadResponse(BaseModel):
 
 
 # ============================================================
-# V2 浏览：章节事实 / 实体 / 关系 / 事件 / 字典
+# 启动抽取 / 分批预估
 # ============================================================
 
 
@@ -146,94 +147,6 @@ class ExtractionPlanResponse(BaseModel):
         ..., description="预计 LLM 调用总数下限 = batch_count + post_calls（不含批失败拆半重试与 JSON 二次修复）",
     )
     warnings: List[str] = Field(default_factory=list)
-
-
-class V2DictionaryEntrySchema(BaseModel):
-    id: str
-    name: str
-    entity_type: str
-    aliases: List[str] = Field(default_factory=list)
-    frequency: int = 0
-    confidence: str = "medium"
-    sample_context: Optional[str] = None
-    source: Optional[str] = None
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class V2ChapterFactSummarySchema(BaseModel):
-    """章节列表项（不含完整 fact_json，避免响应过大）"""
-    id: str
-    chapter_number: int
-    chapter_title: Optional[str] = None
-    summary: Optional[str] = None
-    extraction_status: str = "pending"
-    extraction_error: Optional[str] = None
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class V2ChapterFactDetailSchema(V2ChapterFactSummarySchema):
-    """章节详情（含完整 fact_json）"""
-    fact: Optional[Dict[str, Any]] = None
-    is_truncated: bool = False
-    segment_count: int = 1
-
-
-class V2EntitySchema(BaseModel):
-    id: str
-    canonical_name: str
-    entity_type: str
-    aliases: List[str] = Field(default_factory=list)
-    profile: Dict[str, Any] = Field(default_factory=dict)
-    first_chapter: Optional[int] = None
-    last_chapter: Optional[int] = None
-    appearance_count: int = 0
-    role_type: Optional[str] = None
-    parent_entity_id: Optional[str] = None
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class V2RelationSchema(BaseModel):
-    id: str
-    entity_a_id: str
-    entity_b_id: str
-    relation_type: str
-    relation_category: Optional[str] = None
-    occurrence_count: int = 1
-    first_chapter: Optional[int] = None
-    evidence: List[Dict[str, Any]] = Field(default_factory=list)
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class V2EventSchema(BaseModel):
-    id: str
-    chapter_number: int
-    event_type: str
-    title: str
-    description: Optional[str] = None
-    actors: List[str] = Field(default_factory=list)
-    location: Optional[str] = None
-    importance: str = "medium"
-    evidence: Optional[str] = None
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class V2OverviewResponse(BaseModel):
-    """V2 拆书任务概览（任务详情页 dashboard）"""
-    task_id: str
-    version: int
-    extraction_phase: Optional[str] = None
-    chapters_total: int = 0
-    chapters_extracted: int = 0
-    chapters_failed: int = 0
-    sampling_mode: str = "all"
-    sampling_param: int = 1
-    stats: Dict[str, Any] = Field(default_factory=dict)
-    synopsis: Optional[Dict[str, Any]] = None
 
 
 # ============================================================

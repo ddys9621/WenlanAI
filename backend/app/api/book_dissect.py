@@ -19,7 +19,8 @@ from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.settings import get_user_ai_service
@@ -27,10 +28,6 @@ from app.config import DATA_DIR
 from app.database import get_db
 from app.logger import get_logger
 from app.models.book_dissect_chapter_fact import BookDissectChapterFact
-from app.models.book_dissect_dictionary import BookDissectDictionary
-from app.models.book_dissect_entity import BookDissectEntity
-from app.models.book_dissect_event import BookDissectEvent
-from app.models.book_dissect_relation import BookDissectRelation
 from app.models.book_dissect_story_arc import BookDissectStoryArc
 from app.models.book_dissect_task import BookDissectTask
 from app.models.project_reference_pack import ProjectReferencePack
@@ -43,13 +40,6 @@ from app.schemas.book_dissect import (
     ChapterMetaSchema,
     ExtractionPlanResponse,
     StoryArcSchema,
-    V2ChapterFactDetailSchema,
-    V2ChapterFactSummarySchema,
-    V2DictionaryEntrySchema,
-    V2EntitySchema,
-    V2EventSchema,
-    V2OverviewResponse,
-    V2RelationSchema,
     V2StartExtractionRequest,
 )
 from app.services.ai_jobs import AIJob, AIJobConflictError, ai_jobs
@@ -76,6 +66,11 @@ ALLOWED_SUFFIXES = {".txt", ".md", ".markdown"}
 # 上传文件持久化目录（含切分后的全文，供后续 LLM 抽取使用）
 UPLOAD_DIR = DATA_DIR / "book_dissect_uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+# V2-V4 老引擎的实体图谱表（模型已删，老库残表删任务时按名清理）
+LEGACY_EXTRACTION_TABLES = (
+    "book_dissect_relations", "book_dissect_events", "book_dissect_entities", "book_dissect_dictionary",
+)
 
 # 切分预览返回的最大章节数（仅截取前 N 章给前端）
 PREVIEW_LIMIT = 10
@@ -529,268 +524,6 @@ async def preview_extraction_plan(
     )
 
 
-# ============================================================
-# V2 浏览端点
-# ============================================================
-
-
-def _parse_json_list(raw: Optional[str]) -> list:
-    if not raw:
-        return []
-    try:
-        v = json.loads(raw)
-        return v if isinstance(v, list) else []
-    except (json.JSONDecodeError, TypeError):
-        return []
-
-
-def _parse_json_object(raw: Optional[str]) -> dict:
-    if not raw:
-        return {}
-    try:
-        v = json.loads(raw)
-        return v if isinstance(v, dict) else {}
-    except (json.JSONDecodeError, TypeError):
-        return {}
-
-
-@router.get("/{task_id}/v2/overview", response_model=V2OverviewResponse)
-async def v2_get_overview(
-    task_id: str,
-    user: User = Depends(require_login),
-    db: AsyncSession = Depends(get_db),
-):
-    """V2 任务概览（dashboard 顶部数据）。"""
-    task = await _ensure_task_owned(db, task_id, user.user_id)
-    result_json = task.result_json or "{}"
-    try:
-        result = json.loads(result_json)
-    except (json.JSONDecodeError, TypeError):
-        result = {}
-
-    return V2OverviewResponse(
-        task_id=task.id,
-        version=task.version or 2,
-        extraction_phase=task.extraction_phase,
-        chapters_total=task.chapters_total or 0,
-        chapters_extracted=task.chapters_extracted or 0,
-        chapters_failed=task.chapters_failed or 0,
-        sampling_mode=task.sampling_mode or "all",
-        sampling_param=task.sampling_param or 1,
-        stats=result.get("stats") if isinstance(result.get("stats"), dict) else {},
-        synopsis=result.get("synopsis") if isinstance(result.get("synopsis"), dict) else None,
-    )
-
-
-@router.get("/{task_id}/v2/chapters", response_model=List[V2ChapterFactSummarySchema])
-async def v2_list_chapter_facts(
-    task_id: str,
-    user: User = Depends(require_login),
-    db: AsyncSession = Depends(get_db),
-):
-    """V2 章节事实摘要列表。"""
-    await _ensure_task_owned(db, task_id, user.user_id)
-    result = await db.execute(
-        select(BookDissectChapterFact)
-        .where(BookDissectChapterFact.task_id == task_id)
-        .order_by(BookDissectChapterFact.chapter_number)
-    )
-    rows = result.scalars().all()
-    return [
-        V2ChapterFactSummarySchema.model_validate(r) for r in rows
-    ]
-
-
-@router.get("/{task_id}/v2/chapters/{chapter_number}", response_model=V2ChapterFactDetailSchema)
-async def v2_get_chapter_fact(
-    task_id: str,
-    chapter_number: int,
-    user: User = Depends(require_login),
-    db: AsyncSession = Depends(get_db),
-):
-    """V2 章节事实详情。"""
-    await _ensure_task_owned(db, task_id, user.user_id)
-    result = await db.execute(
-        select(BookDissectChapterFact)
-        .where(
-            BookDissectChapterFact.task_id == task_id,
-            BookDissectChapterFact.chapter_number == chapter_number,
-        )
-    )
-    row = result.scalar_one_or_none()
-    if not row:
-        raise HTTPException(status_code=404, detail="章节事实不存在")
-    fact = _parse_json_object(row.fact_json)
-    return V2ChapterFactDetailSchema(
-        id=row.id,
-        chapter_number=row.chapter_number,
-        chapter_title=row.chapter_title,
-        summary=row.summary,
-        extraction_status=row.extraction_status or "pending",
-        extraction_error=row.extraction_error,
-        fact=fact,
-        is_truncated=bool(row.is_truncated),
-        segment_count=row.segment_count or 1,
-    )
-
-
-@router.get("/{task_id}/v2/dictionary", response_model=List[V2DictionaryEntrySchema])
-async def v2_list_dictionary(
-    task_id: str,
-    user: User = Depends(require_login),
-    db: AsyncSession = Depends(get_db),
-):
-    """V2 实体字典。"""
-    await _ensure_task_owned(db, task_id, user.user_id)
-    result = await db.execute(
-        select(BookDissectDictionary)
-        .where(BookDissectDictionary.task_id == task_id)
-        .order_by(BookDissectDictionary.frequency.desc())
-    )
-    rows = result.scalars().all()
-    return [
-        V2DictionaryEntrySchema(
-            id=r.id, name=r.name, entity_type=r.entity_type,
-            aliases=_parse_json_list(r.aliases_json),
-            frequency=r.frequency or 0,
-            confidence=r.confidence or "medium",
-            sample_context=r.sample_context,
-            source=r.source,
-        )
-        for r in rows
-    ]
-
-
-@router.get("/{task_id}/v2/entities", response_model=List[V2EntitySchema])
-async def v2_list_entities(
-    task_id: str,
-    entity_type: Optional[str] = None,
-    slim: bool = False,
-    user: User = Depends(require_login),
-    db: AsyncSession = Depends(get_db),
-):
-    """V2 全书实体（可按类型过滤）。
-
-    slim=True 时不返回体积大的 profile 字段（仅用于列表视图），可显著减少网络传输；
-    需要完整档案时请调用 ``GET /v2/entities/{entity_id}``。
-    """
-    await _ensure_task_owned(db, task_id, user.user_id)
-    stmt = select(BookDissectEntity).where(BookDissectEntity.task_id == task_id)
-    if entity_type:
-        stmt = stmt.where(BookDissectEntity.entity_type == entity_type)
-    stmt = stmt.order_by(BookDissectEntity.appearance_count.desc())
-    result = await db.execute(stmt)
-    rows = result.scalars().all()
-    return [
-        V2EntitySchema(
-            id=r.id,
-            canonical_name=r.canonical_name,
-            entity_type=r.entity_type,
-            aliases=_parse_json_list(r.aliases_json),
-            profile={} if slim else _parse_json_object(r.profile_json),
-            first_chapter=r.first_chapter,
-            last_chapter=r.last_chapter,
-            appearance_count=r.appearance_count or 0,
-            role_type=r.role_type,
-            parent_entity_id=r.parent_entity_id,
-        )
-        for r in rows
-    ]
-
-
-@router.get("/{task_id}/v2/entities/{entity_id}", response_model=V2EntitySchema)
-async def v2_get_entity(
-    task_id: str,
-    entity_id: str,
-    user: User = Depends(require_login),
-    db: AsyncSession = Depends(get_db),
-):
-    """V2 单个实体详情（包含完整 profile）。配合 slim 列表使用。"""
-    await _ensure_task_owned(db, task_id, user.user_id)
-    result = await db.execute(
-        select(BookDissectEntity).where(
-            BookDissectEntity.task_id == task_id,
-            BookDissectEntity.id == entity_id,
-        )
-    )
-    row = result.scalar_one_or_none()
-    if row is None:
-        raise HTTPException(status_code=404, detail="实体不存在")
-    return V2EntitySchema(
-        id=row.id,
-        canonical_name=row.canonical_name,
-        entity_type=row.entity_type,
-        aliases=_parse_json_list(row.aliases_json),
-        profile=_parse_json_object(row.profile_json),
-        first_chapter=row.first_chapter,
-        last_chapter=row.last_chapter,
-        appearance_count=row.appearance_count or 0,
-        role_type=row.role_type,
-        parent_entity_id=row.parent_entity_id,
-    )
-
-
-@router.get("/{task_id}/v2/relations", response_model=List[V2RelationSchema])
-async def v2_list_relations(
-    task_id: str,
-    relation_category: Optional[str] = None,
-    user: User = Depends(require_login),
-    db: AsyncSession = Depends(get_db),
-):
-    """V2 实体关系（可按类别过滤）。"""
-    await _ensure_task_owned(db, task_id, user.user_id)
-    stmt = select(BookDissectRelation).where(BookDissectRelation.task_id == task_id)
-    if relation_category:
-        stmt = stmt.where(BookDissectRelation.relation_category == relation_category)
-    stmt = stmt.order_by(BookDissectRelation.occurrence_count.desc())
-    result = await db.execute(stmt)
-    rows = result.scalars().all()
-    return [
-        V2RelationSchema(
-            id=r.id,
-            entity_a_id=r.entity_a_id,
-            entity_b_id=r.entity_b_id,
-            relation_type=r.relation_type,
-            relation_category=r.relation_category,
-            occurrence_count=r.occurrence_count or 1,
-            first_chapter=r.first_chapter,
-            evidence=_parse_json_list(r.evidence_json),
-        )
-        for r in rows
-    ]
-
-
-@router.get("/{task_id}/v2/events", response_model=List[V2EventSchema])
-async def v2_list_events(
-    task_id: str,
-    importance: Optional[str] = None,
-    user: User = Depends(require_login),
-    db: AsyncSession = Depends(get_db),
-):
-    """V2 事件时间线（可按 importance 过滤）。"""
-    await _ensure_task_owned(db, task_id, user.user_id)
-    stmt = select(BookDissectEvent).where(BookDissectEvent.task_id == task_id)
-    if importance:
-        stmt = stmt.where(BookDissectEvent.importance == importance)
-    stmt = stmt.order_by(BookDissectEvent.chapter_number)
-    result = await db.execute(stmt)
-    rows = result.scalars().all()
-    return [
-        V2EventSchema(
-            id=r.id,
-            chapter_number=r.chapter_number,
-            event_type=r.event_type,
-            title=r.title,
-            description=r.description,
-            actors=_parse_json_list(r.actors_json),
-            location=r.location,
-            importance=r.importance or "medium",
-            evidence=r.evidence,
-        )
-        for r in rows
-    ]
-
-
 async def _ensure_task_owned(
     db: AsyncSession, task_id: str, user_id: str
 ) -> BookDissectTask:
@@ -890,8 +623,10 @@ async def delete_task(
     """删除拆书任务并清理磁盘全文 + 所有派生数据。
 
     SQLite 未启用 PRAGMA foreign_keys=ON，外键 ondelete=CASCADE 不生效，
-    必须显式清理：ReferencePack（及其项目挂载）+ 5 张抽取数据表，
+    必须显式清理：ReferencePack（及其项目挂载）+ 拆书卡 / 情节单元表，
     否则会留下仍可被项目引用的孤儿参考包与孤儿抽取数据。
+    V2-V4 老引擎的 4 张实体图谱表已不再建模，但老库里可能仍有残表与残行，
+    用原生 SQL 顺手清掉；表不存在（新库）时忽略。
     """
     result = await db.execute(
         select(BookDissectTask).where(
@@ -929,13 +664,14 @@ async def delete_task(
         )
         await db.execute(delete(ReferencePack).where(ReferencePack.id == pack_id))
 
-    # 2. 抽取数据表（relation 先于 entity，避免悬挂引用语义混乱）
-    await db.execute(delete(BookDissectRelation).where(BookDissectRelation.task_id == task_id))
-    await db.execute(delete(BookDissectEvent).where(BookDissectEvent.task_id == task_id))
-    await db.execute(delete(BookDissectEntity).where(BookDissectEntity.task_id == task_id))
+    # 2. 抽取数据表：拆书卡 + 情节单元；老引擎残表按名清理
     await db.execute(delete(BookDissectChapterFact).where(BookDissectChapterFact.task_id == task_id))
-    await db.execute(delete(BookDissectDictionary).where(BookDissectDictionary.task_id == task_id))
-    await db.execute(delete(BookDissectStoryArc).where(BookDissectStoryArc.task_id == task_id))  # V5 情节单元
+    await db.execute(delete(BookDissectStoryArc).where(BookDissectStoryArc.task_id == task_id))
+    for table in LEGACY_EXTRACTION_TABLES:
+        try:
+            await db.execute(text(f"DELETE FROM {table} WHERE task_id = :task_id"), {"task_id": task_id})
+        except OperationalError:
+            pass  # 新库没有这张表
 
     # 3. 任务本体
     await db.delete(task)

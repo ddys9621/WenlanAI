@@ -8,10 +8,6 @@ from app.models.analysis_task import AnalysisTask
 from app.models.book_dissect_task import BookDissectTask
 from app.models.book_dissect_chapter_fact import BookDissectChapterFact
 from app.models.book_dissect_story_arc import BookDissectStoryArc
-from app.models.book_dissect_dictionary import BookDissectDictionary
-from app.models.book_dissect_entity import BookDissectEntity
-from app.models.book_dissect_relation import BookDissectRelation
-from app.models.book_dissect_event import BookDissectEvent
 from app.models.reference_pack import ReferencePack
 from app.models.project_reference_pack import ProjectReferencePack
 from app.models.settings import Settings
@@ -53,10 +49,6 @@ __all__ = [
     "BookDissectTask",
     "BookDissectChapterFact",
     "BookDissectStoryArc",
-    "BookDissectDictionary",
-    "BookDissectEntity",
-    "BookDissectRelation",
-    "BookDissectEvent",
     "ReferencePack",
     "ProjectReferencePack",
     "Settings",

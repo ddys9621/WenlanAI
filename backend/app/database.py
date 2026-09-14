@@ -20,10 +20,6 @@ from app.models.analysis_task import AnalysisTask  # noqa: F401
 from app.models.book_dissect_task import BookDissectTask  # noqa: F401
 from app.models.book_dissect_chapter_fact import BookDissectChapterFact  # noqa: F401
 from app.models.book_dissect_story_arc import BookDissectStoryArc  # noqa: F401
-from app.models.book_dissect_dictionary import BookDissectDictionary  # noqa: F401
-from app.models.book_dissect_entity import BookDissectEntity  # noqa: F401
-from app.models.book_dissect_relation import BookDissectRelation  # noqa: F401
-from app.models.book_dissect_event import BookDissectEvent  # noqa: F401
 from app.models.chapter import Chapter  # noqa: F401
 from app.models.chapter_causal_link import ChapterCausalLink  # noqa: F401
 from app.models.chapter_consistency_issue import ChapterConsistencyIssue  # noqa: F401
