@@ -396,8 +396,6 @@ def _make_dissect_builder(dimension: str) -> Callable[[AsyncSession, Any], Await
 
 build_dissect_methodology = _make_dissect_builder("methodology")
 build_dissect_structure = _make_dissect_builder("structure")
-build_dissect_archetypes = _make_dissect_builder("archetypes")
-build_dissect_worldbuilding = _make_dissect_builder("worldbuilding")
 build_dissect_synopsis = _make_dissect_builder("synopsis")
 build_dissect_bridges = _make_dissect_builder("bridges")
 build_dissect_char_arch = _make_dissect_builder("character_archive")
@@ -465,11 +463,9 @@ SLOT_BUILDERS: dict[str, Callable[[AsyncSession, Any], Awaitable[str]]] = {
     "history_normal":         build_history_normal,
     "history_brief":          build_history_brief,
     "memory_topk":            build_memory_topk,
-    # user 段 - 拆书 8 维
+    # user 段 - 拆书 V5 维度（synopsis / methodology / structure / bridges / character_archive / corpus）
     "dissect_methodology":    build_dissect_methodology,
     "dissect_structure":      build_dissect_structure,
-    "dissect_archetypes":     build_dissect_archetypes,
-    "dissect_worldbuilding":  build_dissect_worldbuilding,
     "dissect_synopsis":       build_dissect_synopsis,
     "dissect_corpus":         build_dissect_corpus,
     "dissect_bridges":        build_dissect_bridges,

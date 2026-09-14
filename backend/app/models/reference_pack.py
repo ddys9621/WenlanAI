@@ -203,9 +203,9 @@ class ReferencePack(Base):
     error_message = Column(Text, nullable=True, comment="失败信息（partial/failed 时填充）")
 
     # ---- V4.4 K5 辅助方法：统一访问预压缩字段 ----
+    # V5：archetypes / worldbuilding 停写（列保留），预压缩只做 6 维
     DIMENSIONS_WITH_PRECOMPRESSION = (
-        "methodology", "style", "structure", "archetypes",
-        "worldbuilding", "synopsis", "bridges", "character_archive",
+        "methodology", "style", "structure", "synopsis", "bridges", "character_archive",
     )
     STRENGTH_LEVELS = ("light", "medium", "deep")
 

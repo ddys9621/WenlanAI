@@ -104,6 +104,7 @@ def _summary_from(pack: ReferencePack, attached_count: int) -> ReferencePackSumm
         source_book_title=pack.source_book_title,
         status=pack.status,
         generated_dimensions=dims if isinstance(dims, list) else [],
+        pipeline_version=pack.pipeline_version or 2,
         error_message=pack.error_message,
         attached_project_count=attached_count,
         created_at=pack.created_at,
@@ -112,7 +113,7 @@ def _summary_from(pack: ReferencePack, attached_count: int) -> ReferencePackSumm
 
 
 def _detail_from(pack: ReferencePack, attached_count: int) -> ReferencePackDetail:
-    """ORM → ReferencePackDetail（含 5 核心 tab + V3.2 synopsis + V3.2-P2 模式三维度）。"""
+    """ORM → ReferencePackDetail（V5 六维度；老包同名字段原样下发，前端按 pipeline_version 分流）。"""
     dims = _safe_load_json(pack.generated_dimensions, [])
     return ReferencePackDetail(
         id=pack.id,
@@ -121,23 +122,14 @@ def _detail_from(pack: ReferencePack, attached_count: int) -> ReferencePackDetai
         source_book_title=pack.source_book_title,
         status=pack.status,
         generated_dimensions=dims if isinstance(dims, list) else [],
+        pipeline_version=pack.pipeline_version or 2,
         error_message=pack.error_message,
-        methodology=_safe_load_json(pack.methodology_json, None),
+        synopsis=_safe_load_json(pack.synopsis_json, None),
+        bridges=_safe_load_json(pack.bridges_json, None),
         style=_safe_load_json(pack.style_json, None),
+        character_archive=_safe_load_json(pack.character_archive_json, None),
+        methodology=_safe_load_json(pack.methodology_json, None),
         structure=_safe_load_json(pack.structure_json, None),
-        archetypes=_safe_load_json(pack.archetypes_json, None),
-        worldbuilding=_safe_load_json(pack.worldbuilding_json, None),
-        # V3.2：synopsis_json 列可能不存在（老库未迁移），用 getattr 兜底
-        synopsis=_safe_load_json(getattr(pack, "synopsis_json", None), None),
-        # V3.2-P2：模式三维度同样用 getattr 兜底老库
-        entities=_safe_load_json(getattr(pack, "entities_json", None), None),
-        relations=_safe_load_json(getattr(pack, "relations_json", None), None),
-        events=_safe_load_json(getattr(pack, "events_json", None), None),
-        # V4.1：桥段反推 + 角色档案，老库未跑 V4.1 会是 None
-        bridges=_safe_load_json(getattr(pack, "bridges_json", None), None),
-        character_archive=_safe_load_json(
-            getattr(pack, "character_archive_json", None), None
-        ),
         attached_project_count=attached_count,
         created_at=pack.created_at,
         updated_at=pack.updated_at,
@@ -438,30 +430,15 @@ async def detach_pack(
 
 
 def _infer_default_dimensions(strength: str) -> List[str]:
-    """根据参考强度推断默认维度。
+    """根据参考强度推断默认维度（V5 七维）。
 
-    V4.1：
     - light: 仅文风（保持极简）
-    - medium: + synopsis（Story Bible 全局引导）
-    - deep: + 模式三维度（entities/relations/events）+ 5 手法全开
-            + V4.1 桥段范本(bridges) + V4.1 角色档案(character_archive)
+    - medium: + 全书骨架 + 写法手册 + 拆书卡检索
+    - deep: 七维全开（+ 桥段库 / 人物功能谱 / 结构统计）
     """
     if strength == "light":
         return ["style"]
     if strength == "deep":
-        return [
-            "synopsis",
-            "entities",
-            "relations",
-            "events",
-            "methodology",
-            "style",
-            "structure",
-            "archetypes",
-            "worldbuilding",
-            "bridges",            # V4.1
-            "character_archive",  # V4.1
-            "corpus",
-        ]
+        return ["synopsis", "bridges", "methodology", "style", "structure", "character_archive", "corpus"]
     # medium
     return ["synopsis", "methodology", "style", "corpus"]

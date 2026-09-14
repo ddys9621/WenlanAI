@@ -31,17 +31,15 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-# 8 个支持预压缩的维度（corpus 不预压缩，依赖动态 BM25）
-# V4.1 加入 bridges + character_archive，与 ReferencePack.DIMENSIONS_WITH_PRECOMPRESSION 对齐
+# 6 个支持预压缩的维度（corpus 不预压缩，依赖动态 BM25），与 ReferencePack.DIMENSIONS_WITH_PRECOMPRESSION 对齐
+# V5：archetypes / worldbuilding 随实体图谱抽取一并删除
 COMPRESSIBLE_DIMENSIONS = (
     "methodology",
     "style",
     "structure",
-    "archetypes",
-    "worldbuilding",
     "synopsis",
-    "bridges",            # V4.1：桥段范本（_compress_generic_dim 处理顶层 dict，子级有 list 自动 fallback）
-    "character_archive",  # V4.1：角色档案（同上）
+    "bridges",
+    "character_archive",
 )
 
 # 三档配额（字符数，比 token 大约 1.5 倍）

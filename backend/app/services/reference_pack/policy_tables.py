@@ -128,102 +128,75 @@ def get_model_tier(model_name: str) -> ModelTier:
 # ============================================================
 # 每个 (scene, tier) entry 明确写死每个维度的 strength
 # strength: 'off' / 'light' / 'medium' / 'deep'
+#
+# V5（book_dissect_v5_design.md §5）维度集合收敛为 7 维：
+#   synopsis（全书骨架）/ bridges（桥段库）/ style（文风指纹）/ character_archive（人物功能谱）
+#   / methodology（写法手册）/ structure（结构统计）/ corpus（拆书卡检索）
+# archetypes / worldbuilding / entities / relations / events 随实体图谱抽取一并删除。
+
+V5_DIMENSIONS: tuple[str, ...] = (
+    "synopsis", "bridges", "style", "character_archive", "methodology", "structure", "corpus",
+)
 
 POLICY_TABLE: dict[tuple[str, ModelTier], dict[str, Strength]] = {
 
     # ============ 1. 世界观生成 ============
-    ("world_building", "S"):  {"worldbuilding": "medium", "synopsis": "light"},
-    ("world_building", "M"):  {"worldbuilding": "deep", "synopsis": "medium"},
-    ("world_building", "L"):  {"worldbuilding": "deep", "synopsis": "medium"},
-    ("world_building", "XL"): {"worldbuilding": "deep", "synopsis": "medium"},
+    ("world_building", "S"):  {"synopsis": "medium"},
+    ("world_building", "M"):  {"synopsis": "deep"},
+    ("world_building", "L"):  {"synopsis": "deep"},
+    ("world_building", "XL"): {"synopsis": "deep"},
 
     # ============ 2. 角色生成 ============
-    ("character", "S"):  {"archetypes": "medium", "character_archive": "medium",
-                          "worldbuilding": "light", "synopsis": "light"},
-    ("character", "M"):  {"archetypes": "deep", "character_archive": "deep",
-                          "worldbuilding": "medium", "synopsis": "medium",
-                          "corpus": "light"},
-    ("character", "L"):  {"archetypes": "deep", "character_archive": "deep",
-                          "worldbuilding": "medium", "synopsis": "medium",
-                          "corpus": "light"},
-    ("character", "XL"): {"archetypes": "deep", "character_archive": "deep",
-                          "worldbuilding": "deep", "synopsis": "medium",
-                          "corpus": "medium"},
+    ("character", "S"):  {"character_archive": "medium", "synopsis": "light"},
+    ("character", "M"):  {"character_archive": "deep", "synopsis": "medium", "corpus": "light"},
+    ("character", "L"):  {"character_archive": "deep", "synopsis": "medium", "corpus": "light"},
+    ("character", "XL"): {"character_archive": "deep", "synopsis": "medium", "corpus": "medium"},
 
     # ============ 3. 故事大纲 ============
-    ("story_outline", "S"):  {"methodology": "medium", "synopsis": "medium",
-                              "structure": "light"},
-    ("story_outline", "M"):  {"methodology": "deep", "synopsis": "deep",
-                              "structure": "medium", "archetypes": "medium",
-                              "worldbuilding": "medium", "bridges": "medium"},
-    ("story_outline", "L"):  {"methodology": "deep", "synopsis": "deep",
-                              "structure": "medium", "archetypes": "medium",
-                              "worldbuilding": "medium", "bridges": "medium"},
-    ("story_outline", "XL"): {"methodology": "deep", "synopsis": "deep",
-                              "structure": "deep", "archetypes": "medium",
-                              "worldbuilding": "medium", "bridges": "medium"},
+    ("story_outline", "S"):  {"synopsis": "medium", "methodology": "medium", "structure": "light"},
+    ("story_outline", "M"):  {"synopsis": "deep", "methodology": "deep", "bridges": "medium", "structure": "medium"},
+    ("story_outline", "L"):  {"synopsis": "deep", "methodology": "deep", "bridges": "medium", "structure": "medium"},
+    ("story_outline", "XL"): {"synopsis": "deep", "methodology": "deep", "bridges": "deep", "structure": "deep"},
 
     # ============ 3.5 桥段规划（K2 核心场景）============
-    ("bridge_planning", "S"):  {"bridges": "medium", "synopsis": "light",
-                                "methodology": "light"},
-    ("bridge_planning", "M"):  {"bridges": "deep", "synopsis": "medium",
-                                "methodology": "deep", "structure": "medium",
-                                "character_archive": "medium"},
-    ("bridge_planning", "L"):  {"bridges": "deep", "synopsis": "medium",
-                                "methodology": "deep", "structure": "medium",
-                                "character_archive": "medium"},
-    ("bridge_planning", "XL"): {"bridges": "deep", "synopsis": "deep",
-                                "methodology": "deep", "structure": "deep",
-                                "character_archive": "deep"},
+    ("bridge_planning", "S"):  {"bridges": "medium", "synopsis": "light", "methodology": "light"},
+    ("bridge_planning", "M"):  {"bridges": "deep", "methodology": "deep", "synopsis": "medium",
+                                "structure": "medium", "character_archive": "medium"},
+    ("bridge_planning", "L"):  {"bridges": "deep", "methodology": "deep", "synopsis": "medium",
+                                "structure": "medium", "character_archive": "medium"},
+    ("bridge_planning", "XL"): {"bridges": "deep", "methodology": "deep", "synopsis": "deep",
+                                "structure": "deep", "character_archive": "deep"},
 
     # ============ 4. 章纲（批量）============
-    ("chapter_outline", "S"):  {"methodology": "medium", "structure": "medium",
-                                "synopsis": "light"},
-    ("chapter_outline", "M"):  {"methodology": "deep", "structure": "deep",
-                                "synopsis": "medium", "corpus": "medium",
-                                "bridges": "medium"},
-    ("chapter_outline", "L"):  {"methodology": "deep", "structure": "deep",
-                                "synopsis": "medium", "corpus": "medium",
-                                "bridges": "medium"},
-    ("chapter_outline", "XL"): {"methodology": "deep", "structure": "deep",
-                                "synopsis": "deep", "corpus": "deep",
-                                "bridges": "deep"},
+    ("chapter_outline", "S"):  {"methodology": "medium", "structure": "medium", "synopsis": "light"},
+    ("chapter_outline", "M"):  {"methodology": "deep", "structure": "deep", "bridges": "medium",
+                                "synopsis": "medium", "corpus": "medium"},
+    ("chapter_outline", "L"):  {"methodology": "deep", "structure": "deep", "bridges": "medium",
+                                "synopsis": "medium", "corpus": "medium"},
+    ("chapter_outline", "XL"): {"methodology": "deep", "structure": "deep", "bridges": "deep",
+                                "synopsis": "deep", "corpus": "deep"},
 
     # ============ 5a. 章节正文（每章触发，最高频）============
-    ("chapter_content", "S"):  {"style": "medium", "corpus": "light",
-                                "methodology": "light"},
-    ("chapter_content", "M"):  {"style": "deep", "corpus": "medium",
-                                "methodology": "medium", "structure": "light",
-                                "archetypes": "light", "synopsis": "light",
-                                "bridges": "light", "character_archive": "light"},
-    ("chapter_content", "L"):  {"style": "deep", "corpus": "deep",
-                                "methodology": "medium", "structure": "medium",
-                                "archetypes": "medium", "worldbuilding": "light",
-                                "synopsis": "light", "bridges": "light",
-                                "character_archive": "light"},
-    ("chapter_content", "XL"): {"style": "deep", "corpus": "deep",
-                                "methodology": "deep", "structure": "deep",
-                                "archetypes": "deep", "worldbuilding": "medium",
-                                "synopsis": "medium", "bridges": "medium",
+    ("chapter_content", "S"):  {"style": "medium", "corpus": "light", "methodology": "light"},
+    ("chapter_content", "M"):  {"style": "deep", "corpus": "medium", "methodology": "medium",
+                                "bridges": "light", "structure": "light", "synopsis": "light"},
+    ("chapter_content", "L"):  {"style": "deep", "corpus": "deep", "methodology": "medium",
+                                "bridges": "light", "structure": "medium", "synopsis": "light"},
+    ("chapter_content", "XL"): {"style": "deep", "corpus": "deep", "methodology": "deep",
+                                "bridges": "medium", "structure": "deep", "synopsis": "medium",
                                 "character_archive": "medium"},
 
     # ============ 5b. 场景生成（卡片）============
     ("scene_generation", "S"):  {"style": "medium", "corpus": "light"},
-    ("scene_generation", "M"):  {"style": "deep", "corpus": "medium",
-                                 "archetypes": "light"},
-    ("scene_generation", "L"):  {"style": "deep", "corpus": "deep",
-                                 "structure": "light", "archetypes": "medium"},
-    ("scene_generation", "XL"): {"style": "deep", "corpus": "deep",
-                                 "structure": "medium", "archetypes": "medium"},
+    ("scene_generation", "M"):  {"style": "deep", "corpus": "medium"},
+    ("scene_generation", "L"):  {"style": "deep", "corpus": "deep", "structure": "light"},
+    ("scene_generation", "XL"): {"style": "deep", "corpus": "deep", "structure": "medium"},
 
     # ============ 5c. 章节重生成 ============
     ("chapter_regenerate", "S"):  {"style": "medium", "corpus": "light"},
-    ("chapter_regenerate", "M"):  {"style": "deep", "corpus": "medium",
-                                   "methodology": "medium"},
-    ("chapter_regenerate", "L"):  {"style": "deep", "corpus": "medium",
-                                   "methodology": "medium"},
-    ("chapter_regenerate", "XL"): {"style": "deep", "corpus": "deep",
-                                   "methodology": "deep"},
+    ("chapter_regenerate", "M"):  {"style": "deep", "corpus": "medium", "methodology": "medium"},
+    ("chapter_regenerate", "L"):  {"style": "deep", "corpus": "medium", "methodology": "medium"},
+    ("chapter_regenerate", "XL"): {"style": "deep", "corpus": "deep", "methodology": "deep"},
 }
 
 

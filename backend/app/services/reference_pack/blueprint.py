@@ -147,14 +147,12 @@ SAFETY_RATIO = 0.6
 # ============================================================
 
 DISSECT_LABELS: dict[str, str] = {
-    "methodology":       "【📚 写作方法论参考】",
-    "structure":         "【🏗️ 结构手法参考】",
-    "archetypes":        "【👤 角色塑造手法参考】",
-    "worldbuilding":     "【🌍 世界观建模参考】",
-    "synopsis":          "【📖 全书弧线参考】",
-    "corpus":            "【💡 同题材范本片段】",
-    "bridges":           "【🌉 原书桥段范本】",
-    "character_archive": "【👥 原书角色档案】",
+    "methodology":       "【📚 原书写法手册】",
+    "structure":         "【🏗️ 原书结构统计】",
+    "synopsis":          "【📖 原书全书骨架】",
+    "corpus":            "【💡 原书相关拆书卡】",
+    "bridges":           "【🌉 原书情节单元（桥段库）】",
+    "character_archive": "【👥 原书人物功能谱】",
     # style 走 system 段，标签由 builder 在 system 段内自行打印
 }
 
@@ -284,7 +282,7 @@ def _make_dissect_slot(dim: str, strength: Strength) -> Slot:
                     label=DISSECT_LABELS.get(dim, ""),
                     cacheable=False, cache_tier="chapter")
 
-    # methodology / structure / archetypes / worldbuilding / synopsis = 项目级缓存
+    # methodology / structure / synopsis = 项目级缓存
     return Slot(f"dissect_{dim}", max_tokens, "user",
                 label=DISSECT_LABELS.get(dim, ""),
                 cacheable=True, cache_tier="project")
@@ -294,14 +292,12 @@ def _make_dissect_slot(dim: str, strength: Strength) -> Slot:
 # 注：style 会被 _make_dissect_slot 放到 system 段，但仍需列在这里才会被 _compose_blueprint 处理
 DISSECT_SLOT_ORDER = (
     "style",             # 文风指令 - 由 _make_dissect_slot 放到 system 段
-    "synopsis",          # 全书弧线 - 靠前
+    "synopsis",          # 全书骨架 - 靠前
     "methodology",
     "structure",
-    "archetypes",
-    "worldbuilding",
     "bridges",
     "character_archive",
-    "corpus",            # 范本片段 - 末尾
+    "corpus",            # 拆书卡片段 - 末尾
 )
 
 
