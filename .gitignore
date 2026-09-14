@@ -118,16 +118,16 @@ dmypy.json
 backend/migrate_all_databases.py
 test_api.py
 
-# 测试代码与内部文档不入库（仅保留 README 与小白使用说明）
+# 娴嬭瘯浠ｇ爜涓庡唴閮ㄦ枃妗ｄ笉鍏ュ簱锛堜粎淇濈暀 README 涓庡皬鐧戒娇鐢ㄨ鏄庯級
 backend/tests/
 backend/_tmp_verify/
 backend/pytest.ini
 agent-docs/
 
-# 本地测试用的小说文本（仓库根目录下的 txt）
+# 鏈湴娴嬭瘯鐢ㄧ殑灏忚鏂囨湰锛堜粨搴撴牴鐩綍涓嬬殑 txt锛?
 /*.txt
 
-# 大文件 - 模型和依赖
+# 澶ф枃浠?- 妯″瀷鍜屼緷璧?
 backend/embedding/
 backend/embedding.zip
 *.safetensors
@@ -139,7 +139,7 @@ backend/embedding.zip
 *.onnx
 /models/
 
-# 本地发布产物与本机配置
+# 鏈湴鍙戝竷浜х墿涓庢湰鏈洪厤缃?
 /release/
 /config.ini
 /.ace-tool/
@@ -147,3 +147,5 @@ backend/embedding.zip
 /.ruff_cache/
 /.cache/
 /.history/
+# Devin CLI 本地配置与内部设计草稿
+.devin/
