@@ -95,3 +95,93 @@ ARC_PROMPT = TASK_MARK_ARC + """
 
 【拆书卡窗口】
 {cards_json}"""
+
+
+# ============================================================
+# S3 阶段划分 / 全书骨架 / 人物功能谱 / 写法手册
+# ============================================================
+
+TASK_MARK_STAGE = "【任务：阶段划分】"
+TASK_MARK_SKELETON = "【任务：全书骨架】"
+TASK_MARK_CHARACTERS = "【任务：人物功能谱】"
+TASK_MARK_METHODOLOGY = "【任务：写法手册】"
+
+SYSTEM_SKELETON = """你是资深网文编辑兼写作教练。你只依据给出的结构化材料（情节单元 / 阶段 / 拆书卡 / 统计）做归纳，不编造材料里没有的情节。
+只输出一个 JSON 对象，不要解释、不要 Markdown；字符串里的引号用「」，禁止换行符。"""
+
+STAGE_PROMPT = TASK_MARK_STAGE + """
+下面是一本书按顺序编号的情节单元列表（本块第 {first}-{last} 个，全书共 {total} 个；{is_final_note}）。
+请把它们划分成「阶段」（相当于卷 / 大副本）：每个阶段有一个贯穿的核心矛盾与主角目标，通常 5-15 个单元。
+{open_stage_block}
+规则：
+1. 阶段必须从本块第一个单元开始，首尾相接覆盖到最后一个单元，arc_start / arc_end 用单元编号
+2. 本块不是最终块时，最后一个阶段若尚未收束标 status=open；最终块所有阶段 status=closed
+3. signature_arc 写成名战 / 巅峰战对应的单元编号与一句话
+
+【输出 JSON 模板】
+{{"stages":[{{"title":"阶段名","arc_start":{first},"arc_end":0,"core_conflict":"","protagonist_goal":"","key_upgrades":"实力/地位/资源的关键提升","signature_arc":"#编号 一句话","ending_hook":"阶段末悬念","status":"closed|open"}}]}}
+
+【情节单元】
+{arc_lines}"""
+
+SKELETON_PROMPT = TASK_MARK_SKELETON + """
+根据下列阶段划分、客观统计与开头三章拆书卡，梳理这本书的全书骨架。可以出现原书专有名词（这是给作者看的结构分析，不是仿写产物）。
+
+【阶段划分】
+{stages_json}
+
+【客观统计】
+{stats_brief}
+
+【开头三章拆书卡】
+{opening_cards}
+
+【输出 JSON 模板】
+{{"genre_tag":"题材标签","one_line_premise":"一句话讲清这是什么故事","main_conflict":"贯穿全书的大矛盾 + 主角为何无法回避",
+ "golden_finger":{{"what":"金手指是什么","how_it_works":"怎么运作","evolution":["前期…","中期…","后期…"]}},
+ "stages":[],
+ "top_payoffs":[{{"stage":"所在阶段","arcs":"#编号","buildup":"压抑铺垫","trigger":"爆发/转折机制","reward":"收获与成长"}}],
+ "growth_system":"主角从弱到强的路径：境界/资源/地位里程碑",
+ "power_system":"力量体系/规则梳理（无则「无」）",
+ "long_foreshadowing":[{{"setup":"埋在哪","payoff":"揭在哪","role":"作用"}}],
+ "reading_promise":"卖点 / 读者预期：爽点类型、密度、情绪回报",
+ "opening_strategy":"黄金三章怎么做的：第 1-3 章各干了什么、钩子在哪"}}
+top_payoffs ≤5 条、long_foreshadowing ≤8 条；stages 可原样返回或合并相邻阶段。"""
+
+CHARACTERS_PROMPT = TASK_MARK_CHARACTERS + """
+根据阶段划分、各情节单元的「角色与关系变化」以及角色出场频次，归纳这本书的人物功能谱：不是罗列人物，而是每个人物在结构里承担什么功能、作者怎么用他。
+
+【阶段划分】
+{stages_json}
+
+【角色出场频次（名字｜出场章数｜首末章）】
+{character_freq}
+
+【各单元角色与关系变化】
+{arc_changes}
+
+【输出 JSON 模板】
+{{"protagonist":{{"name":"","persona":"人设三句话","golden_finger":"","flaws_and_pressure":"缺陷与持续压力来源","growth_track":[{{"stage":"阶段名","state":"该阶段末的实力/身份/心态"}}]}},
+ "allies":[{{"name":"","function_role":"导师/兄弟/红颜/工具人/见证者…","arc_span":"第X-Y章","technique":"作者怎么用这个人推剧情或衬主角"}}],
+ "antagonists":[{{"name":"","tier":"小反派/阶段反派/终极反派","conflict_nature":"","escalation":"如何递进","outcome":""}}],
+ "function_slots":[{{"slot":"见证者/压力来源/误导者/秩序维护者/隐藏布局者…","how_used":""}}]}}
+allies ≤8、antagonists ≤6、function_slots ≤6。"""
+
+METHODOLOGY_PROMPT = TASK_MARK_METHODOLOGY + """
+根据下列全书骨架、客观统计与开头三章拆书卡，反推这本书的写法手册。每一条都要有 evidence（引用章号或单元编号），writing_tips 是给作者的可执行建议（80-180 字）。
+
+【全书骨架】
+{skeleton_json}
+
+【客观统计】
+{stats_brief}
+
+【开头三章拆书卡】
+{opening_cards}
+
+【输出 JSON 模板】
+{{"golden_finger_pattern":{{"pattern":"金手指的使用模式","evidence":"","writing_tips":""}},
+ "opening_hook_pattern":{{"pattern":"开篇怎么钩住读者","evidence":"","writing_tips":""}},
+ "facepunch_rhythm":{{"pattern":"压抑→兑现的节奏（几章一压、几章一放）","evidence":"","writing_tips":""}},
+ "power_progression":{{"pattern":"升级颗粒度与触发方式","evidence":"","writing_tips":""}},
+ "highlight_density":{{"pattern":"爽点密度与章末钩子习惯","evidence":"","writing_tips":""}}}}"""
