@@ -32,6 +32,8 @@ TERMINAL_STATUSES = ("done", "error", "cancelled")
 # 终态任务在内存里保留多久（托盘"最近完成" + 晚到的重连），超过即被 gc
 TERMINAL_RETENTION_SECONDS = 600.0
 DEFAULT_CANCEL_MESSAGE = "已停止任务"
+# events(heartbeat=...) 空闲时产出的占位事件：不带 seq、不入日志，仅用于保活
+HEARTBEAT_EVENT: dict[str, Any] = {"type": "heartbeat"}
 
 Runner = Callable[["AIJob"], Awaitable[Any]]
 
@@ -204,7 +206,14 @@ class AIJobManager:
 
     # ---------------- 事件回放 + 续尾 ----------------
 
-    async def events(self, job_id: str, since: int = 0) -> AsyncIterator[dict[str, Any]]:
+    async def events(
+        self, job_id: str, since: int = 0, *, heartbeat: Optional[float] = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """回放 seq > since 的事件并续尾到终态。
+
+        heartbeat：空闲超过该秒数就产出一条 HEARTBEAT_EVENT（不带 seq、不入日志），SSE 层转成注释行，
+        让反向代理 / 浏览器在模型长时间不吐字时也不会把连接当成死连接掐掉。None = 不发。
+        """
         job = self._jobs.get(job_id)
         if job is None:
             yield {"type": "error", "error": "任务不存在或已过期", "code": 404, "seq": 0}
@@ -222,7 +231,13 @@ class AIJobManager:
             if not pending:
                 if terminal:
                     return
-                await waiter.wait()
+                if heartbeat is None:
+                    await waiter.wait()
+                else:
+                    try:
+                        await asyncio.wait_for(waiter.wait(), timeout=heartbeat)
+                    except asyncio.TimeoutError:
+                        yield HEARTBEAT_EVENT
                 continue
             for e in pending:
                 yield e

@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 
 from app.api.deps import require_login
 from app.models.user import User
-from app.services.ai_jobs import AIJob, ai_jobs
+from app.services.ai_jobs import HEARTBEAT_EVENT, AIJob, ai_jobs
 from app.utils.sse_response import SSEResponse, create_sse_response
 
 router = APIRouter(prefix="/ai-jobs", tags=["AI 后台任务"])
@@ -37,12 +37,17 @@ def _owned_job(job_id: str, user_id: str) -> AIJob:
     return job
 
 
+# 空闲多久发一条 SSE 注释行保活（模型思考 / 后台纯计算阶段可能几十秒不出事件；
+# nginx proxy_read_timeout 默认 60s，浏览器侧也能据此判断连接还活着）
+SSE_HEARTBEAT_SECONDS = 15.0
+
+
 async def stream_job_events(job_id: str, *, since: int = 0, announce: bool = False) -> AsyncGenerator[str, None]:
-    """SSE 文本流：announce=True 时先发 start{job_id}（发起端点用），随后回放 + 续尾。"""
+    """SSE 文本流：announce=True 时先发 start{job_id}（发起端点用），随后回放 + 续尾；空闲期发注释行心跳。"""
     if announce:
         yield SSEResponse.format_sse({"type": "start", "job_id": job_id})
-    async for evt in ai_jobs.events(job_id, since=since):
-        yield SSEResponse.format_sse(evt)
+    async for evt in ai_jobs.events(job_id, since=since, heartbeat=SSE_HEARTBEAT_SECONDS):
+        yield await SSEResponse.send_heartbeat() if evt is HEARTBEAT_EVENT else SSEResponse.format_sse(evt)
 
 
 def job_sse_response(job: AIJob) -> StreamingResponse:

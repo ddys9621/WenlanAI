@@ -63,7 +63,10 @@ function AIJobModalBody({
             <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-content-tertiary tabular-nums">
               <span className={cn('px-1.5 py-0.5 font-medium', status.className)}>{status.label}</span>
               <span>已用 {formatElapsed(elapsed)}</span>
-              {job.connection === 'connecting' && <span className="text-amber-600">正在重连…</span>}
+              {job.connection === 'connecting' && (
+                // lastSeq 为 0 说明这条 SSE 还没收到过任何事件：是首次连接（后端可能正忙），不是断线重连
+                <span className="text-amber-600">{job.lastSeq > 0 ? '正在重连…' : '正在连接后端…'}</span>
+              )}
               {job.connection === 'lost' && (
                 <span className="text-amber-600">连接已断开，任务可能仍在后台运行；刷新页面可重连</span>
               )}
