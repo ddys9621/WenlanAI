@@ -185,3 +185,41 @@ METHODOLOGY_PROMPT = TASK_MARK_METHODOLOGY + """
  "facepunch_rhythm":{{"pattern":"压抑→兑现的节奏（几章一压、几章一放）","evidence":"","writing_tips":""}},
  "power_progression":{{"pattern":"升级颗粒度与触发方式","evidence":"","writing_tips":""}},
  "highlight_density":{{"pattern":"爽点密度与章末钩子习惯","evidence":"","writing_tips":""}}}}"""
+
+
+# ============================================================
+# S4 文风定性 / 例句
+# ============================================================
+
+TASK_MARK_STYLE = "【任务：文风定性】"
+TASK_MARK_EXCERPT = "【任务：文风例句】"
+
+SYSTEM_STYLE = """你是资深网文编辑。只依据给出的正文样本与客观统计描述作者笔法，不评价内容好坏。
+只输出一个 JSON 对象，不要解释、不要 Markdown；字符串里的引号用「」，禁止换行符。"""
+
+STYLE_PROMPT = TASK_MARK_STYLE + """
+下面是同一本书若干章的正文样本（各章开头与中段）与全书客观统计。请提炼作者的写作风格，生成一段可直接作为 LLM 写作指令使用的「文风提示词」。
+
+【客观统计】
+{metrics_brief}
+
+【正文样本】
+{samples}
+
+【输出 JSON 模板】
+{{"name":"风格名（≤8 字）","description":"风格一句话描述",
+ "prompt_content":"可直接注入写作 prompt 的文风指令，300-600 字：句式节奏 / 段落长度 / 对话与叙述比例 / 叙述视角与贴近程度 / 描写层次 / 情绪表达方式 / 用词习惯（举 3-5 个原文用词或句式例子）",
+ "traits":["特征短语 4-8 条"],
+ "dialogue_style":"对话风格：标签用法、长短、潜台词",
+ "narration_habits":"叙述习惯：视角、内心独白、镜头感",
+ "avoid_list":["该作者明显不用的写法 2-5 条"]}}"""
+
+EXCERPT_PROMPT = TASK_MARK_EXCERPT + """
+从下面这一章正文里**原样摘出** 2 段最能代表作者笔法的片段，每段 150-300 字，一个字都不能改、不能拼接不相邻的句子。
+本章类型提示：{kind_hint}。kind 从 opening / dialogue / action / payoff / ending_hook / description 里选。
+
+【输出 JSON 模板】
+{{"excerpts":[{{"kind":"payoff","text":"原文片段"}}]}}
+
+【第{chapter_number}章正文】
+{chapter_text}"""
