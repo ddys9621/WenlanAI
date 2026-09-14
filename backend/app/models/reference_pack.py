@@ -26,7 +26,7 @@ V3.2-P2 增量（entities/relations/events 模式三维度）：
 
 import uuid
 
-from sqlalchemy import Column, DateTime, ForeignKey, Index, String, Text
+from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.sql import func
 
 from app.db_base import Base
@@ -181,6 +181,12 @@ class ReferencePack(Base):
     character_archive_light = Column(Text, nullable=True, comment="V4.4 角色档案 light 预压缩 ≤200 token")
     character_archive_medium = Column(Text, nullable=True, comment="V4.4 角色档案 medium 预压缩 ≤600 token")
     character_archive_deep = Column(Text, nullable=True, comment="V4.4 角色档案 deep 预压缩 ≤1500 token")
+
+    # ---- 流水线版本 ----
+    pipeline_version = Column(
+        Integer, nullable=False, default=2, server_default="2",
+        comment="拆书流水线版本：2 = V2-V4 老包（只读，建议重新抽取）；5 = V5 拆书卡 / 情节单元 / 骨架",
+    )
 
     # ---- 生成状态 ----
     status = Column(

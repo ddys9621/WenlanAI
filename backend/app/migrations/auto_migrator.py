@@ -510,6 +510,16 @@ async def ensure_reference_pack_v4_columns(engine: AsyncEngine):
     await _ensure_columns(engine, "reference_packs", REFERENCE_PACK_V4_COLUMNS, "V4 P0-5")
 
 
+REFERENCE_PACK_V5_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("pipeline_version", "INTEGER NOT NULL DEFAULT 2"),
+)
+
+
+async def ensure_book_dissect_v5_columns(engine: AsyncEngine):
+    """拆书 V5：reference_packs.pipeline_version（老包保持 2，新包写 5）。story_arcs 新表由 create_all 建。"""
+    await _ensure_columns(engine, "reference_packs", REFERENCE_PACK_V5_COLUMNS, "拆书 V5")
+
+
 async def ensure_chapter_outline_bridge_columns(engine: AsyncEngine):
     """V4 P2-1：chapter_outlines 的桥段三列（原 v4_phase2 手工脚本；plot_bridges 表由 create_all 建）。"""
     await _ensure_columns(engine, "chapter_outlines", CHAPTER_OUTLINE_BRIDGE_COLUMNS, "V4 P2-1")
@@ -593,6 +603,7 @@ async def run_auto_migrations(engine: AsyncEngine):
         await ensure_book_dissect_batch_columns(engine)  # 拆书分批抽取：每批章数 / 截取前 N 章
         await ensure_reference_pack_v32_columns(engine)  # 拆书 V3.2 synopsis 复活
         await ensure_reference_pack_v4_columns(engine)  # V4 P0-5：维度 JSON + 三档预压缩列
+        await ensure_book_dissect_v5_columns(engine)  # 拆书 V5：pipeline_version
         await ensure_project_generation_prompt_column(engine)
         await ensure_project_bridge_planning_column(engine)  # F3：桥段规划开关（T2.1 前置）
         await ensure_chapter_outline_bridge_columns(engine)  # V4 P2-1：章纲桥段三列

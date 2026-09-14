@@ -7,6 +7,7 @@ from app.models.generation_history import GenerationHistory
 from app.models.analysis_task import AnalysisTask
 from app.models.book_dissect_task import BookDissectTask
 from app.models.book_dissect_chapter_fact import BookDissectChapterFact
+from app.models.book_dissect_story_arc import BookDissectStoryArc
 from app.models.book_dissect_dictionary import BookDissectDictionary
 from app.models.book_dissect_entity import BookDissectEntity
 from app.models.book_dissect_relation import BookDissectRelation
@@ -51,6 +52,7 @@ __all__ = [
     "AnalysisTask",
     "BookDissectTask",
     "BookDissectChapterFact",
+    "BookDissectStoryArc",
     "BookDissectDictionary",
     "BookDissectEntity",
     "BookDissectRelation",
