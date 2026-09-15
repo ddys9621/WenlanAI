@@ -9,6 +9,8 @@
 
 抽取任务注册在 ai_jobs（scope=book_dissect:{task_id}），托盘里也能看到 / 停止；
 任务的持久状态仍以 book_dissect_tasks.status 为准（pending/running/completed/failed/cancelled）。
+ai_jobs 只管本进程：同一 data 目录被多个后端实例共用时，另按 task 持 OS 文件锁（run_lock）判断
+流水线是否真的在跑，start / cancel / delete 遇到别的进程持锁一律 409，不动 DB 状态。
 """
 from __future__ import annotations
 
@@ -50,6 +52,7 @@ from app.services.book_dissect.extractor_v5 import (
     CANCELLED_MESSAGE,
     run_extraction_v5_background,
 )
+from app.services.book_dissect.run_lock import is_run_locked, try_acquire_run_lock
 from app.user_manager import User
 from app.api.deps import require_login
 
@@ -308,6 +311,11 @@ def _job_scope(task_id: str) -> str:
     return f"book_dissect:{task_id}"
 
 
+# 本进程没有 job 但 run_lock 被持有：流水线在另一个后端进程里跑着（同一 data 目录被多个实例共用）。
+# 此时改 DB 状态 / 再启动 / 删除都会让两边互相踩数据（拆书卡表 UNIQUE(task_id, chapter_number) 冲突）。
+OTHER_PROCESS_DETAIL = "任务正在另一个后端进程中抽取（同一数据目录被多个实例共用），请到该实例停止或等待其完成后再操作"
+
+
 @router.post("/{task_id}/start-extraction", response_model=BookDissectTaskResponse)
 async def start_extraction(
     task_id: str,
@@ -339,32 +347,41 @@ async def start_extraction(
 
     opts = _normalize_extraction_options(payload, chapter_count=task.chapter_count or 0)
 
-    # 立即标记 queued，避免前端轮询时短暂看到旧状态
-    task.status = "running"
-    task.stage = "queued"
-    task.progress = 0
-    task.error_message = None
-    task.started_at = datetime.now()
-    task.completed_at = None
-    task.version = 5
-    task.sampling_mode = opts["sampling_mode"]
-    task.sampling_param = opts["sampling_param"]
-    task.chapters_total = 0
-    task.chapters_extracted = 0
-    task.chapters_failed = 0
-    task.extraction_phase = None
-    task.extraction_engine = opts["extraction_engine"]  # V3.1
-    task.chapters_per_request = opts["chapters_per_request"]
-    task.chapter_limit = opts["chapter_limit"]
-    await db.commit()
-    await db.refresh(task)
+    # 跨进程互斥先于改状态：拿不到锁就什么都不动
+    lock = try_acquire_run_lock(task_id)
+    if lock is None:
+        raise HTTPException(status_code=409, detail=OTHER_PROCESS_DETAIL)
 
     user_id = user.user_id
 
     async def runner(_job: AIJob) -> None:
-        await run_extraction_v5_background(task_id=task_id, user_id=user_id, ai_service=ai_service)
+        # 锁随流水线生命周期：正常结束 / 失败 / 取消都在这里释放；进程崩溃由 OS 回收
+        try:
+            await run_extraction_v5_background(task_id=task_id, user_id=user_id, ai_service=ai_service)
+        finally:
+            lock.release()
 
     try:
+        # 立即标记 queued，避免前端轮询时短暂看到旧状态
+        task.status = "running"
+        task.stage = "queued"
+        task.progress = 0
+        task.error_message = None
+        task.started_at = datetime.now()
+        task.completed_at = None
+        task.version = 5
+        task.sampling_mode = opts["sampling_mode"]
+        task.sampling_param = opts["sampling_param"]
+        task.chapters_total = 0
+        task.chapters_extracted = 0
+        task.chapters_failed = 0
+        task.extraction_phase = None
+        task.extraction_engine = opts["extraction_engine"]  # V3.1
+        task.chapters_per_request = opts["chapters_per_request"]
+        task.chapter_limit = opts["chapter_limit"]
+        await db.commit()
+        await db.refresh(task)
+
         await ai_jobs.start(
             kind="book_dissect",
             title=f"拆书抽取：{task.file_name or task_id[:8]}",
@@ -374,9 +391,13 @@ async def start_extraction(
             cancel_message=CANCELLED_MESSAGE,
             meta={"task_id": task_id, **opts},
         )
-    except AIJobConflictError as exc:
-        # 与上面的 current() 预检之间被并发请求抢先：DB 已由对方置 running，本次不再改状态
-        raise HTTPException(status_code=409, detail=str(exc))
+    except BaseException as exc:
+        # 没能把锁交给 runner（commit 失败 / 与并发请求抢 ai_jobs 失败）：这里释放，否则要等进程退出
+        lock.release()
+        if isinstance(exc, AIJobConflictError):
+            # 与上面的 current() 预检之间被并发请求抢先：DB 已由对方置 running，本次不再改状态
+            raise HTTPException(status_code=409, detail=str(exc))
+        raise
 
     logger.info(
         "拆书V5：已排队 user=%s task=%s sampling=%s/%d engine=%s per_request=%d limit=%d",
@@ -396,7 +417,8 @@ async def cancel_extraction(
     """手动停止运行中的抽取。
 
     - 进程内有对应 ai_job：取消它，流水线的 CancelledError 分支把任务落库为 cancelled
-    - 没有（服务重启后残留的 running）：直接落库修复，否则任务永远卡在 running 无法重抽
+    - 没有但 run_lock 被持有：流水线在另一个后端进程里跑，409（改状态只会让人再触发重抽撞库）
+    - 都没有（服务重启后残留的 running）：直接落库修复，否则任务永远卡在 running 无法重抽
     已完成批次的章节事实保留；随后可「重新抽取」。
     """
     task = await _ensure_task_owned(db, task_id, user.user_id)
@@ -407,6 +429,8 @@ async def cancel_extraction(
     if job is not None:
         await ai_jobs.cancel(job.id)
         await db.refresh(task)
+    elif is_run_locked(task_id):
+        raise HTTPException(status_code=409, detail=OTHER_PROCESS_DETAIL)
 
     if task.status == "running":
         # 无进程内任务 / 流水线写终态失败：这里兜底落库
@@ -648,11 +672,13 @@ async def delete_task(
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在或无权访问")
 
-    # 运行中先停掉后台任务，否则流水线会继续对已删的行写数据
+    # 运行中先停掉后台任务，否则流水线会继续对已删的行写数据；跑在别的进程里的停不掉，只能拒绝
     job = ai_jobs.current(_job_scope(task_id))
     if job is not None:
         await ai_jobs.cancel(job.id)
         await db.refresh(task)
+    elif is_run_locked(task_id):
+        raise HTTPException(status_code=409, detail=OTHER_PROCESS_DETAIL)
 
     # 删磁盘文件（即使失败也继续删 DB 记录）
     if task.storage_path:

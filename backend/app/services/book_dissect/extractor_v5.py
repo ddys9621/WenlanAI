@@ -202,9 +202,12 @@ async def run_extraction_v5_background(task_id: str, user_id: str, ai_service: A
         # 前置校验失败：_mark_failed 已落库，原样抛给 ai_jobs 标 error
         raise
     except Exception as exc:
+        # 异常可能出在 flush / commit 中途（如 IntegrityError），session 处于 pending-rollback 状态，
+        # 不先 rollback 就写不进 failed，任务会卡在 running
         logger.error("[拆书V5] 未预期异常 task=%s err=%s", task_id, exc, exc_info=True)
         if db is not None:
             try:
+                await db.rollback()
                 await _mark_terminal(db, task_id, status="failed", message=f"{type(exc).__name__}: {exc}"[:500])
             except Exception as inner:
                 logger.error("[拆书V5] 写失败状态再次出错 %s", inner)

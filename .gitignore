@@ -115,6 +115,8 @@ dmypy.json
 /backend/data/
 /backend/docs/
 /backend/logs/
+# 拆书运行锁文件放在数据库旁边：跑测试时 DATABASE_URL 指向 backend/test.db，锁目录就落在这里
+/backend/locks/
 backend/migrate_all_databases.py
 test_api.py
 
