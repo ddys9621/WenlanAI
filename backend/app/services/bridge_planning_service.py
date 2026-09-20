@@ -1057,6 +1057,16 @@ class BridgePlanningService:
         main_cov_per_chapter = (
             (bridge.beat_coverage_end or 0.0) - (bridge.beat_coverage_start or 0.0)
         ) / CHAPTERS_PER_BRIDGE
+        # 副线账本按剧情线归并：同一支线的多个节点可能落在同一桥段（桥段边界切在相邻节点之间、
+        # 或多个锚定节点挤进一个桥段），而账本表 (chapter_outline_id, plot_line_id) 唯一，
+        # 所以每条线只建一条 link，多个节点合进 beats_covered
+        sub_ledger: dict[str, dict[str, Any]] = {}
+        for t in secondary:
+            if not isinstance(t, dict) or t.get("role", "primary") == "mention":
+                continue
+            cov = (float(t.get("coverage_end", 0)) - float(t.get("coverage_start", 0))) / CHAPTERS_PER_BRIDGE
+            entry = sub_ledger.setdefault(t["plot_line_id"], {"role": t.get("line_type") or "sub", "beats_covered": []})
+            entry["beats_covered"].append({"beat_index": int(t["beat_index"]), "coverage": cov})
 
         positions = ("intro", "build", "payoff", "aftermath")
         created: list[ChapterOutline] = []
@@ -1093,19 +1103,13 @@ class BridgePlanningService:
                     ensure_ascii=False,
                 ),
             ))
-            for order, t in enumerate(secondary, start=1):
-                if not isinstance(t, dict) or t.get("role", "primary") == "mention":
-                    continue
-                cov = (float(t.get("coverage_end", 0)) - float(t.get("coverage_start", 0))) / CHAPTERS_PER_BRIDGE
+            for order, (line_id, entry) in enumerate(sub_ledger.items(), start=1):
                 db.add(ChapterOutlinePlotLineLink(
                     chapter_outline_id=co.id,
-                    plot_line_id=t["plot_line_id"],
-                    role=t.get("line_type") or "sub",
+                    plot_line_id=line_id,
+                    role=entry["role"],
                     order_index=order,
-                    timeline_coverage=json.dumps(
-                        {"beats_covered": [{"beat_index": int(t["beat_index"]), "coverage": cov}]},
-                        ensure_ascii=False,
-                    ),
+                    timeline_coverage=json.dumps({"beats_covered": entry["beats_covered"]}, ensure_ascii=False),
                 ))
 
             scenes = data.get("scenes")
