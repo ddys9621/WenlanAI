@@ -251,7 +251,7 @@ async def generate_character_for_project(
                             continue
                         target_char = (await db.execute(
                             select(Character).where(Character.project_id == request.project_id, Character.name == target_name)
-                        )).scalar_one_or_none()
+                        )).scalars().first()
                         if not target_char:
                             logger.warning("  ⚠️  目标角色不存在：%s", target_name)
                             continue
@@ -262,7 +262,7 @@ async def generate_character_for_project(
                                 CharacterRelationship.character_to_id == target_char.id,
                             )
                         )
-                        if existing_rel.scalar_one_or_none():
+                        if existing_rel.scalars().first():
                             continue
                         relationship = CharacterRelationship(
                             project_id=request.project_id,
@@ -295,7 +295,7 @@ async def generate_character_for_project(
                                 Character.name == org_name,
                                 Character.is_organization == True,  # noqa: E712 - SQLAlchemy 表达式
                             )
-                        )).scalar_one_or_none()
+                        )).scalars().first()
                         if not org_char:
                             logger.warning("  ⚠️  组织不存在：%s", org_name)
                             continue
@@ -312,7 +312,7 @@ async def generate_character_for_project(
                                 OrganizationMember.character_id == character.id,
                             )
                         )
-                        if existing_member.scalar_one_or_none():
+                        if existing_member.scalars().first():
                             continue
                         db.add(OrganizationMember(
                             organization_id=org.id,

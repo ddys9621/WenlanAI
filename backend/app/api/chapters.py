@@ -303,7 +303,7 @@ async def _auto_create_entities(
                 select(OrganizationMember).where(
                     OrganizationMember.organization_id == org.id,
                     OrganizationMember.character_id == char_obj.id,
-                )
+                ).limit(1)
             )
             existing_member = member_result.scalar_one_or_none()
 

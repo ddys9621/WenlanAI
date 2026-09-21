@@ -299,7 +299,7 @@ async def add_organization_member(
             )
         )
     )
-    if existing.scalar_one_or_none():
+    if existing.scalars().first():
         raise HTTPException(status_code=400, detail="该角色已在组织中")
     
     # 创建成员关系

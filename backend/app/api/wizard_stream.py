@@ -1223,7 +1223,7 @@ async def characters_generator(
                                     CharacterRelationship.character_to_id == target_char.id
                                 )
                             )
-                            if existing_rel.scalar_one_or_none():
+                            if existing_rel.scalars().first():
                                 logger.debug(f"  ℹ️  关系已存在：{character.name} -> {target_name}")
                                 continue
                             
@@ -1282,7 +1282,7 @@ async def characters_generator(
                                     OrganizationMember.character_id == character.id
                                 )
                             )
-                            if existing_member.scalar_one_or_none():
+                            if existing_member.scalars().first():
                                 logger.debug(f"  ℹ️  成员关系已存在：{character.name} -> {org_name}")
                                 continue
                             

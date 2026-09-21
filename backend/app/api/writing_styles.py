@@ -192,11 +192,11 @@ async def get_writing_style(
     if not style:
         raise HTTPException(status_code=404, detail="写作风格不存在")
     
-    # 检查是否有项目将其设置为默认风格
+    # 检查是否有项目将其设置为默认风格（全局预设可同时是多个项目的默认，可能命中多行）
     result = await db.execute(
         select(ProjectDefaultStyle).where(ProjectDefaultStyle.style_id == style_id)
     )
-    is_default = result.scalar_one_or_none() is not None
+    is_default = result.scalars().first() is not None
     
     # 返回包含 is_default 字段的字典
     return {
@@ -259,7 +259,7 @@ async def update_writing_style(
     result = await db.execute(
         select(ProjectDefaultStyle).where(ProjectDefaultStyle.style_id == style_id)
     )
-    is_default = result.scalar_one_or_none() is not None
+    is_default = result.scalars().first() is not None
     
     # 返回包含 is_default 字段的字典
     return {
@@ -310,7 +310,7 @@ async def delete_writing_style(
     result = await db.execute(
         select(ProjectDefaultStyle).where(ProjectDefaultStyle.style_id == style_id)
     )
-    default_relation = result.scalar_one_or_none()
+    default_relation = result.scalars().first()
     if default_relation:
         raise HTTPException(
             status_code=400,

@@ -133,19 +133,37 @@ class NarrativeStateService:
         result = await db.execute(select(PlotLine).where(PlotLine.project_id == project_id))
         return {self._normalize_key(item.title): item for item in result.scalars().all() if item.title}
 
+    async def _find_character_by_name(self, db: AsyncSession, project_id: str, name: Optional[str]) -> Optional[Character]:
+        """按名字找角色：走正式名 + 曾用名索引。characters.name 无唯一约束，同名多条时取索引里的第一条，
+        不能用 scalar_one_or_none()（会抛 MultipleResultsFound，直接把整章生成打断）。"""
+        if not name:
+            return None
+        characters = await self._load_character_map(db, project_id)
+        return characters.get(self._normalize_key(name))
+
+    async def _find_relationship(
+        self, db: AsyncSession, project_id: str, from_id: str, to_id: str,
+    ) -> Optional[CharacterRelationship]:
+        """同一对角色间可能有多条关系（手动建关系接口不查重），取最早的一条作为结算 / 回滚目标。"""
+        result = await db.execute(
+            select(CharacterRelationship)
+            .where(
+                CharacterRelationship.project_id == project_id,
+                CharacterRelationship.character_from_id == from_id,
+                CharacterRelationship.character_to_id == to_id,
+            )
+            .order_by(CharacterRelationship.created_at, CharacterRelationship.id)
+        )
+        return result.scalars().first()
+
     async def _rollback_relationship_events(self, db: AsyncSession, chapter_id: str) -> None:
         result = await db.execute(
             select(RelationshipEvent).where(RelationshipEvent.chapter_id == chapter_id)
         )
         for event in result.scalars().all():
-            relationship_result = await db.execute(
-                select(CharacterRelationship).where(
-                    CharacterRelationship.project_id == event.project_id,
-                    CharacterRelationship.character_from_id == event.character_from_id,
-                    CharacterRelationship.character_to_id == event.character_to_id,
-                )
+            relationship = await self._find_relationship(
+                db, event.project_id, event.character_from_id, event.character_to_id
             )
-            relationship = relationship_result.scalar_one_or_none()
             if relationship is None:
                 continue
 
@@ -355,14 +373,7 @@ class NarrativeStateService:
             if delta == 0:
                 continue
 
-            relationship_result = await db.execute(
-                select(CharacterRelationship).where(
-                    CharacterRelationship.project_id == project_id,
-                    CharacterRelationship.character_from_id == from_id,
-                    CharacterRelationship.character_to_id == to_id,
-                )
-            )
-            relationship = relationship_result.scalar_one_or_none()
+            relationship = await self._find_relationship(db, project_id, from_id, to_id)
             created_relationship = 0
 
             if relationship is None:
@@ -517,16 +528,8 @@ class NarrativeStateService:
         current_chapter: int,
         pov_character_name: Optional[str],
     ) -> list[RelationshipEvent]:
-        character_id = None
-        if pov_character_name:
-            char_result = await db.execute(
-                select(Character).where(
-                    Character.project_id == project_id,
-                    Character.name == pov_character_name,
-                )
-            )
-            pov_character = char_result.scalar_one_or_none()
-            character_id = pov_character.id if pov_character else None
+        pov_character = await self._find_character_by_name(db, project_id, pov_character_name)
+        character_id = pov_character.id if pov_character else None
 
         query = select(RelationshipEvent).where(
             RelationshipEvent.project_id == project_id,
@@ -568,16 +571,7 @@ class NarrativeStateService:
         current_chapter: int,
         pov_character_name: Optional[str],
     ) -> list[CharacterKnownInfo]:
-        if not pov_character_name:
-            return []
-
-        result = await db.execute(
-            select(Character).where(
-                Character.project_id == project_id,
-                Character.name == pov_character_name,
-            )
-        )
-        character = result.scalar_one_or_none()
+        character = await self._find_character_by_name(db, project_id, pov_character_name)
         if character is None:
             return []
 

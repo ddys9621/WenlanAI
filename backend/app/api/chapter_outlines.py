@@ -197,7 +197,7 @@ async def create_chapter_outline(outline_data: ChapterOutlineCreate, db: AsyncSe
             ChapterOutline.chapter_number == outline_data.chapter_number
         )
     )
-    if existing_result.scalar_one_or_none():
+    if existing_result.scalars().first():
         raise HTTPException(status_code=400, detail=f"第{outline_data.chapter_number}章章纲已存在")
     
     # 如果没有指定排序序号，自动设置为最大值+1
@@ -294,7 +294,7 @@ async def update_chapter_outline(
                 ChapterOutline.id != outline_id
             )
         )
-        if existing_result.scalar_one_or_none():
+        if existing_result.scalars().first():
             raise HTTPException(status_code=400, detail=f"第{outline_data.chapter_number}章章纲已存在")
     
     # 更新字段
@@ -401,7 +401,7 @@ async def batch_create_chapter_outlines(
                 ChapterOutline.chapter_number == outline_data.chapter_number
             )
         )
-        if existing_result.scalar_one_or_none():
+        if existing_result.scalars().first():
             continue  # 跳过已存在的章节
         
         # 处理 JSON 字段

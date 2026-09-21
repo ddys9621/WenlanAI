@@ -74,7 +74,7 @@ async def create_world_rule(
             WorldRule.key == rule.key
         )
     )
-    if existing.scalar_one_or_none():
+    if existing.scalars().first():
         raise HTTPException(status_code=400, detail=f"规则标识 '{rule.key}' 已存在")
     
     # 创建新规则
@@ -134,7 +134,7 @@ async def update_world_rule(
                 WorldRule.id != rule_id
             )
         )
-        if existing.scalar_one_or_none():
+        if existing.scalars().first():
             raise HTTPException(status_code=400, detail=f"规则标识 '{rule_update.key}' 已存在")
 
     # 更新字段
