@@ -119,10 +119,11 @@ class LlmChapterSplitter:
         )
 
         try:
-            resp = await self.ai_service.generate_text(
+            resp = await self.ai_service.generate_text_stream_collect(
                 prompt=user_prompt,
                 system_prompt=SYSTEM_PROMPT_V31_BOUNDARY,
                 temperature=DEFAULT_TEMPERATURE,
+                context="拆书V3.1-LLM切分",
             )
         except Exception as exc:
             logger.warning("[拆书V3.1-LLM切分] LLM 调用失败: %s", exc)

@@ -2,6 +2,8 @@
 
 一次 LLM 调用产出整批卡；截断 / 非 JSON / 无 cards 字段视为整批失败（抛 ChapterCardExtractionError），
 由编排器拆半重试；LLM 漏给的章不在返回值里，编排器组成子批补抽。
+LLM 走流式累积（generate_text_stream_collect）：整批输出动辄上百秒，非流式请求会被中转网关的
+100s 首字节上限掐断（Cloudflare 524 + HTML 错误页），每次拆半重试都再白等 100s。
 跨批一致性靠两段注入：前批累计出场最多的角色名 + 前几张卡的章纲。
 """
 from __future__ import annotations
@@ -55,8 +57,9 @@ class ChapterCardExtractor:
             full_text=full_text,
         )
         try:
-            resp = await self.ai_service.generate_text(
+            resp = await self.ai_service.generate_text_stream_collect(
                 prompt=prompt, system_prompt=SYSTEM_CARD, temperature=self.DEFAULT_TEMPERATURE,
+                context="拆书V5-拆书卡",
             )
         except Exception as exc:
             raise ChapterCardExtractionError(f"LLM 调用失败: {exc}") from exc

@@ -73,8 +73,9 @@ class StoryArcBuilder:
             cards_json=json.dumps([self._compact(c) for c in window], ensure_ascii=False),
         )
         try:
-            resp = await self.ai_service.generate_text(
+            resp = await self.ai_service.generate_text_stream_collect(
                 prompt=prompt, system_prompt=SYSTEM_ARC, temperature=self.DEFAULT_TEMPERATURE,
+                context="拆书V5-情节单元",
             )
         except Exception as exc:
             logger.warning("%s 窗口 %d-%d LLM 失败: %s", _LOG, window[0].chapter_number, window[-1].chapter_number, exc)

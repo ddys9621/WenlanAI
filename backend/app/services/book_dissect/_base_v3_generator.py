@@ -62,12 +62,13 @@ class BaseV3Generator:
             logger.error("%s ai_service 未初始化，跳过 LLM 调用", label)
             return None
 
-        # ---------- 1. 调 LLM ----------
+        # ---------- 1. 调 LLM（流式累积：长 JSON 输出非流式会被中转网关 100s 超时掐断）----------
         try:
-            resp = await ai_service.generate_text(
+            resp = await ai_service.generate_text_stream_collect(
                 prompt=prompt,
                 system_prompt=system_prompt,
                 temperature=temperature,
+                context=label.strip("[]"),
             )
         except Exception as exc:
             logger.error("%s LLM 调用失败: %s", label, exc)

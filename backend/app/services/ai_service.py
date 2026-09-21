@@ -1,6 +1,8 @@
 """AI服务封装 - 统一的OpenAI和Claude接口"""
 import asyncio
 import contextlib
+import html
+import re
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -119,7 +121,10 @@ RETRIABLE_HTTPX_ERRORS: tuple = (
     httpx.PoolTimeout,             # 连接池超时
     httpx.ConnectError,            # DNS / TCP 连接失败
 )
-RETRIABLE_STATUS_CODES: set[int] = {429, 500, 502, 503, 504}
+RETRIABLE_STATUS_CODES: set[int] = {
+    429, 500, 502, 503, 504,
+    520, 521, 522, 523, 524,  # Cloudflare 网关侧错误（源站超时 / 不可达），语义同 502/504
+}
 DEFAULT_MAX_RETRIES: int = 3
 DEFAULT_BASE_DELAY: float = 1.0
 
@@ -283,6 +288,26 @@ def _normalize_provider(provider: Optional[str]) -> Optional[str]:
         return p
     logger.info(f"[AIService] provider='{provider}' 按 OpenAI 兼容协议处理")
     return "openai"
+
+
+_HTML_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _http_error_detail(response: httpx.Response, limit: int = 300) -> str:
+    """把网关错误响应体压成一行可读摘要，供日志与异常消息使用。
+
+    中转站常挂在 Cloudflare 后面：源站 100s 内没回响应头就返 524（还有 520-523）+ 整页 HTML 错误页。
+    原样拼进异常会让进度条 / 弹窗里出现 "<!DOCTYPE html> <!--[if lt IE 7]>…"，因此 HTML 只留
+    <title>（如 "x666.me | 524: A timeout occurred"），没有 title 就去标签；其余（JSON 错误体）
+    只折叠空白并截断。
+    """
+    text = (response.text or "").strip()
+    if text.startswith("<") or "html" in response.headers.get("content-type", "").lower():
+        m = _HTML_TITLE_RE.search(text)
+        text = html.unescape(m.group(1) if m else _HTML_TAG_RE.sub(" ", text))
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 def _is_max_tokens_unsupported_error(body_text: str) -> bool:
@@ -986,9 +1011,10 @@ class AIService:
                 raise ValueError(f"AI返回了空内容（finish_reason: {finish_reason}）")
             
         except httpx.HTTPStatusError as e:
+            detail = _http_error_detail(e.response)
             logger.error(f"❌ OpenAI API调用失败 (HTTP {e.response.status_code})")
-            logger.error(f"  - 错误信息: {e.response.text}")
-            raise Exception(f"API返回错误 ({e.response.status_code}): {e.response.text}")
+            logger.error(f"  - 错误信息: {detail}")
+            raise Exception(f"API返回错误 ({e.response.status_code}): {detail}")
         except Exception as e:
             logger.error(f"❌ OpenAI API调用失败: {str(e)}")
             raise
@@ -1225,9 +1251,10 @@ class AIService:
         except httpx.HTTPStatusError as e:
             logger.error(f"❌ OpenAI流式API调用失败 (HTTP {e.response.status_code})")
             try:
-                body_preview = await e.response.aread()
+                await e.response.aread()
+                body_preview = _http_error_detail(e.response)
             except Exception:
-                body_preview = b"(unable to read body)"
+                body_preview = "(unable to read body)"
             logger.error(f"  - 错误信息: {body_preview}")
             raise
         except Exception as e:
