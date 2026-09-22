@@ -37,6 +37,19 @@ logger = get_logger(__name__)
 #   由 JSON 类业务层自行判定"截断即失败"
 # - 用 ContextVar 而非实例属性：模块级单例 ai_service 会被多个请求并发共用；
 #   async generator 与调用方共享同一 context，流结束后调用方即可读取
+# ----------------------------------------------------------------
+# 事故 2（2026-09，剧情线生成）：grok-4.7 经中转网关流式返回，零正文且
+# finish_reason=None，日志只剩"返回了空内容，请检查 API 配置"，一次未重试。
+# 模型正常结束（哪怕正文为空）一定带 finish_reason；None 只可能是流在完成前被
+# 上游/网关掐断（grok-4.x 思考期间几乎不吐 reasoning_content，连接静默易触发
+# 网关空闲超时），或网关以 HTTP 200 开流却在流里塞了 data: {"error": …}，而旧
+# 实现把这两种都当成"空内容"吞掉了真实原因。
+# - data: {"error": …} 事件 / HTTP 200 + 纯 JSON 错误体 → 抛 AIUpstreamStreamError，
+#   消息原样带上网关给的真实原因
+# - AIStreamError.retriable：finish_reason=None 的零正文、网关瞬时错误（5xx/429/
+#   无状态码）视为可重试，_stream_with_retry 在 0 chunk 时与 httpx 瞬时错误同等
+#   backoff 重开；推理耗尽 max_tokens（length）、4xx 等确定性失败不重试
+# - SSE 规范允许 data: 冒号后不带空格，部分网关就是这么发的，解析不能依赖那个空格
 # ============================================================
 
 _last_stream_finish_reason: ContextVar[Optional[str]] = ContextVar(
@@ -60,7 +73,18 @@ class StreamEvent:
     finish_reason: Optional[str] = None
 
 
-class AIEmptyResponseError(ValueError):
+class AIStreamError(ValueError):
+    """HTTP 200 开流成功，但流本身不可用（零正文 / 网关夹带 error）。
+
+    retriable=True 表示上游异常终止或网关瞬时错误，_stream_with_retry 在尚未输出任何
+    chunk 时会像对待 httpx 瞬时错误一样 backoff 重开；False（推理耗尽 max_tokens、
+    鉴权 / 参数错等确定性失败）立即抛出。
+    """
+
+    retriable: bool = False
+
+
+class AIEmptyResponseError(AIStreamError):
     """流式响应结束时没有任何正文（content）。
 
     Attributes:
@@ -73,11 +97,40 @@ class AIEmptyResponseError(ValueError):
         self.finish_reason = finish_reason
         self.reasoning_chars = reasoning_chars
 
+    @property
+    def retriable(self) -> bool:  # type: ignore[override]
+        # 正常结束（含空输出）一定带 finish_reason；None = 流在完成前被掐断，重开一次多半就好
+        return self.finish_reason is None
+
+
+class AIUpstreamStreamError(AIStreamError):
+    """网关以 HTTP 200 开流，却在流里（data: {"error": …}）或直接以 JSON 错误体返回了上游错误。
+
+    Attributes:
+        status_code: 从 error.code / status 中识别出的 HTTP 状态码；识别不出为 None
+    """
+
+    def __init__(self, message: str, *, status_code: Optional[int], retriable: bool):
+        super().__init__(message)
+        self.status_code = status_code
+        self.retriable = retriable
+
+
+def _compact(text: str, limit: int = 300) -> str:
+    """折叠空白并截断，供日志与异常消息使用。"""
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[:limit] + "…"
+
 
 def _empty_stream_error(
-    *, model: str, max_tokens: int, finish_reason: Optional[str], reasoning_chars: int
+    *, model: str, max_tokens: int, finish_reason: Optional[str], reasoning_chars: int, detail: str = ""
 ) -> AIEmptyResponseError:
-    """把"零正文"流的现场信息翻译成用户能直接采取行动的错误。"""
+    """把"零正文"流的现场信息翻译成用户能直接采取行动的错误。
+
+    detail: 调用方补充的现场描述（收到多少 SSE 事件、非 SSE 正文预览…），拼进括号里便于事后定位。
+    """
+    reasoning_note = f"，期间收到约 {reasoning_chars} 字符思考过程" if reasoning_chars else ""
+    detail_note = f"；{detail}" if detail else ""
     if finish_reason == "length":
         if reasoning_chars:
             message = (
@@ -90,9 +143,56 @@ def _empty_stream_error(
                 f"模型 {model} 未输出任何正文即达到 Max Tokens 上限（{max_tokens}）。"
                 f"请在「设置」中调大 Max Tokens，或检查该网关是否把推理内容放在了非标准字段"
             )
+    elif finish_reason is None:
+        message = (
+            f"模型 {model} 的流式响应在输出任何正文前被中断（未收到 finish_reason{reasoning_note}{detail_note}）。"
+            f"常见于推理模型思考期间连接静默、触发中转网关空闲超时；请稍后重试、换用非推理模型或联系网关方"
+        )
     else:
-        message = f"模型 {model} 返回了空内容（finish_reason: {finish_reason}），请检查 API 配置或稍后重试"
+        message = (
+            f"模型 {model} 返回了空内容（finish_reason: {finish_reason}{reasoning_note}{detail_note}），"
+            f"请检查 API 配置或稍后重试"
+        )
     return AIEmptyResponseError(message, finish_reason=finish_reason, reasoning_chars=reasoning_chars)
+
+
+def _as_status_code(value: Any) -> Optional[int]:
+    """error.code 可能是 int 504、字符串 "504"，也可能是 "insufficient_quota"；只认 100-599 的整数。"""
+    try:
+        code = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return code if 100 <= code <= 599 else None
+
+
+def _upstream_stream_error(model: str, error: Any, *, where: str) -> AIUpstreamStreamError:
+    """把网关在 HTTP 200 流里夹带的 error 对象翻译成带真实原因的异常。
+
+    error 形态不一：OpenAI 风格 {"message","type","code"}，也有直接字符串。识别出 HTTP 状态码时
+    按 RETRIABLE_STATUS_CODES 判定是否重试；识别不出（"rate_limit_exceeded" 等字符串 code）一律
+    视为瞬时错误 —— 0 chunk 时多重开两次代价只有 3s，而漏掉一次能自愈的重试代价是整个任务失败。
+    """
+    if isinstance(error, dict):
+        raw_message = error.get("message") or error.get("msg") or json.dumps(error, ensure_ascii=False)
+        status_code = _as_status_code(error.get("code")) or _as_status_code(error.get("status"))
+    else:
+        raw_message, status_code = str(error), None
+    retriable = status_code is None or status_code in RETRIABLE_STATUS_CODES
+    http_note = f"（HTTP {status_code}）" if status_code is not None else ""
+    message = f"模型 {model} 的网关{where}返回错误{http_note}: {_compact(str(raw_message))}"
+    return AIUpstreamStreamError(message, status_code=status_code, retriable=retriable)
+
+
+def _extract_error_object(text: str) -> Any:
+    """从"非 SSE 正文"里识别 OpenAI 风格错误体 {"error": …}；不是就返回 None。"""
+    text = (text or "").strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return data.get("error") if isinstance(data, dict) else None
 
 
 # ============================================================
@@ -239,6 +339,18 @@ async def _stream_with_retry(
                     context, chunks_yielded, exc.response.status_code,
                 )
                 raise
+        except AIStreamError as exc:
+            # HTTP 200 但流不可用（上游掐断 / 网关夹带 error 事件）：同瞬时网络错误，
+            # 只在 retriable 且 0 chunk 时重开；推理耗尽 max_tokens 等确定性失败直接抛
+            if not exc.retriable:
+                raise
+            last_exc = exc
+            if chunks_yielded > 0:
+                logger.error(
+                    "❌ [%s] 流式中途断（已输出 %d chunks），不重试避免重复内容: %s: %s",
+                    context, chunks_yielded, type(exc).__name__, exc,
+                )
+                raise
 
         # 仅 0 chunk 失败到这里 → 准备 backoff 重试
         if attempt < max_retries - 1:
@@ -306,8 +418,7 @@ def _http_error_detail(response: httpx.Response, limit: int = 300) -> str:
     if text.startswith("<") or "html" in response.headers.get("content-type", "").lower():
         m = _HTML_TITLE_RE.search(text)
         text = html.unescape(m.group(1) if m else _HTML_TAG_RE.sub(" ", text))
-    text = " ".join(text.split())
-    return text if len(text) <= limit else text[:limit] + "…"
+    return _compact(text, limit)
 
 
 def _is_max_tokens_unsupported_error(body_text: str) -> bool:
@@ -779,7 +890,9 @@ class AIService:
             "length" 视为失败（内容被 max_tokens 截断，json_repair 补全括号也只是残缺数据）。
 
         Raises:
-            AIEmptyResponseError: 流结束却没有任何正文（典型：推理模型把 max_tokens 全耗在思考上）
+            AIEmptyResponseError: 流结束却没有任何正文（典型：推理模型把 max_tokens 全耗在思考上；
+                finish_reason=None 的"被掐断"已先经 _stream_with_retry 重开仍失败）
+            AIUpstreamStreamError: 网关以 HTTP 200 开流却夹带 error 事件 / JSON 错误体（消息带真实原因）
             其余底层流式异常原样抛出；调用方应像 `generate_text` 一样捕获并处理。
         """
         label = context or f"stream-collect-{model or self.default_model}"
@@ -1185,19 +1298,32 @@ class AIService:
                 has_content = False
                 reasoning_chars = 0
                 finish_reason = None
+                data_events = 0
+                # 非 SSE 字段的正文行：网关直接回 JSON 错误体 / 非流式完成体时落在这里，供错误识别与诊断
+                stray_lines: list[str] = []
 
                 async for line in response.aiter_lines():
-                    if not line.startswith('data: '):
+                    if not line.startswith('data:'):
+                        stripped = line.strip()
+                        if stripped and not stripped.startswith((':', 'event:', 'id:', 'retry:')) and len(stray_lines) < 64:
+                            stray_lines.append(stripped)
                         continue
-                    data_str = line[6:]
-                    if data_str.strip() == '[DONE]':
+                    # SSE 规范：冒号后的空格可选，部分网关发 data:{...}
+                    data_str = line[5:].strip()
+                    if data_str == '[DONE]':
                         break
 
                     try:
                         data = json.loads(data_str)
                     except json.JSONDecodeError:
                         continue
+                    if not isinstance(data, dict):
+                        continue
+                    data_events += 1
 
+                    if data.get('error'):
+                        # 网关把上游错误当 SSE 事件塞进 200 流（one-api/new-api 常见）：带真实原因抛出
+                        raise _upstream_stream_error(model, data['error'], where="在流式响应中")
                     if not data.get('choices'):
                         continue
                     choice = data['choices'][0]
@@ -1221,11 +1347,20 @@ class AIService:
                 _last_stream_finish_reason.set(finish_reason)
 
                 if not has_content:
+                    stray_text = "\n".join(stray_lines)
+                    upstream_error = _extract_error_object(stray_text)
+                    if upstream_error is not None:
+                        # 网关以 HTTP 200 + 纯 JSON 错误体应答（未按 SSE 开流）
+                        raise _upstream_stream_error(model, upstream_error, where="以 HTTP 200 + JSON 错误体")
+                    detail = f"收到 {data_events} 个 SSE 事件"
+                    if stray_text:
+                        detail += f"，非 SSE 正文: {_compact(stray_text, 200)}"
                     err = _empty_stream_error(
                         model=model, max_tokens=max_tokens,
-                        finish_reason=finish_reason, reasoning_chars=reasoning_chars,
+                        finish_reason=finish_reason, reasoning_chars=reasoning_chars, detail=detail,
                     )
-                    logger.error(f"❌ 流式响应未返回任何正文: {err}")
+                    # 可重试（被掐断）的由 _stream_with_retry 决定最终是否报错，这里只留 WARNING 记现场
+                    (logger.warning if err.retriable else logger.error)(f"❌ 流式响应未返回任何正文: {err}")
                     raise err
 
                 if finish_reason == 'length':
