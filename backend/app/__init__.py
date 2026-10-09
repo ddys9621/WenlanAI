@@ -1,2 +1,2 @@
 """AI Story Creator - 后端应用包"""
-__version__ = "1.5.5"
+__version__ = "1.6.0"
