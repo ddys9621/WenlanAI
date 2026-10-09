@@ -12,7 +12,7 @@ from typing import Any, Callable, Optional
 
 from app.services.ai_jobs import AIJob, AIJobConflictError, AIJobManager, Runner, ai_jobs
 from app.services.bridge_planning_service import BridgePlanningService, bridge_to_dict
-from app.services.bridge_slot_planner import BridgePlanningConflictError, chapter_range
+from app.services.bridge_slot_planner import BridgePlanningConflictError, bridge_chapter_range
 from app.services.generation_trace import stage_scope
 
 logger = logging.getLogger(__name__)
@@ -32,7 +32,7 @@ def _default_service(ai: Any) -> BridgePlanningService:
 
 
 def _label(bridge: Any) -> str:
-    c_start, c_end = chapter_range(bridge.bridge_number)
+    c_start, c_end = bridge_chapter_range(bridge)
     return f"展开桥段 {bridge.bridge_number}《{bridge.title or ''}》→ 第 {c_start}-{c_end} 章"
 
 

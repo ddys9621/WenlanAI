@@ -26,6 +26,7 @@ class Character(Base):
     personality = Column(Text, comment="性格特点/组织特性")
     background = Column(Text, comment="背景故事")
     appearance = Column(Text, comment="外貌描述")
+    speech_style = Column(Text, comment="说话风格 / 口头禅 / 称呼习惯（角色声音卡，正文生成按出场角色注入）")
     relationships = Column(Text, comment="人物关系(JSON)")
     
     # 组织特有字段

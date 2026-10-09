@@ -248,8 +248,11 @@ async def fetch_bridge_context(
         )
 
         # 桥段形态：节点收官 / 全书高潮节点收官（需要主线节点权重定位高潮节点）
+        from app.services.bridge_rhythm import positions_for
         from app.services.bridge_shapes import SHAPE_STANDARD, bridge_shape, climax_beat_index
-        from app.services.bridge_slot_planner import parse_plot_line
+        from app.services.bridge_slot_planner import bridge_chapter_range, parse_plot_line
+
+        c_start, c_end = bridge_chapter_range(bridge)
 
         shape = SHAPE_STANDARD
         if bridge.plot_line_id and bridge.beat_index is not None:
@@ -270,6 +273,10 @@ async def fetch_bridge_context(
             "prev_bridge_hook": (prev_bridge.next_bridge_hook or "") if prev_bridge else "",
             "shape": shape,
             "c3_hook_style": normalize_c3_hook_style(getattr(project, "c3_hook_style", None)),
+            # 变长桥段：位置序列 + 本章下标（多拉扯章 / 两波兑现 / 缓冲章的位置约束要用）
+            "positions": list(positions_for(c_end - c_start + 1)),
+            "index_in_bridge": max(0, min(c_end - c_start, (chapter_outline.chapter_number or c_start) - c_start)),
+            "rhythm_role": getattr(bridge, "rhythm_role", None),
         }
     except Exception as exc:
         logger.warning("[v4_compat] fetch_bridge_context 失败: %s", exc)

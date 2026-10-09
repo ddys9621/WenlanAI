@@ -83,3 +83,18 @@ class ChapterGenerateRequest(BaseModel):
     pack_ids: Optional[List[str]] = Field(None, description="显式选中的拆书参考包 ID 列表")
     dimensions: Optional[List[str]] = Field(None, description="显式选中的参考维度")
     strength: Optional[str] = Field(None, description="参考强度：light/medium/deep")
+
+
+class ChapterBatchRequest(BaseModel):
+    """服务端批量生成（后台任务，关掉浏览器也不停）。已有正文的章节自动跳过，中断后用同样范围重新发起即可续跑。"""
+    from_chapter: int = Field(..., ge=1, description="起始章号（含）")
+    to_chapter: int = Field(..., ge=1, description="结束章号（含）")
+    pause_on_critical: bool = Field(True, description="分析出严重一致性问题时暂停")
+    quality_gate: bool = Field(True, description="AI 味分过高 / 字数严重不足时自动重写一次")
+    ai_flavor_threshold: int = Field(60, ge=10, le=100, description="AI 味分阈值（越高越宽松）")
+    max_retries: int = Field(2, ge=0, le=5, description="单章生成失败的自动重试次数")
+    pipeline: bool = Field(False, description="流水线：第 N 章分析与第 N+1 章生成并行（需文件型 SQLite，否则自动退回顺序）")
+    auto_expand: bool = Field(True, description="缺章纲时自动填充 / 展开覆盖该章的桥段（滚动规划）")
+    style_id: Optional[int] = Field(None, description="写作风格ID")
+    enable_mcp: bool = Field(False, description="是否启用 MCP 参考资料（批量默认关闭：慢且容易失败）")
+    target_word_count: Optional[int] = Field(None, ge=500, le=10000, description="统一字数；不传按章纲 / 平台预设")

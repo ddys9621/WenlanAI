@@ -20,7 +20,7 @@ class PlotAnalyzer:
 - 章节：第{chapter_number}章
 - 标题：{title}
 - 字数：{word_count}字
-
+{context_block}
 【章节正文】
 {content}
 
@@ -43,6 +43,7 @@ class PlotAnalyzer:
 - strength: 1-10
 - subtlety: 1-10
 - reference_chapter: 若为回收伏笔，尽量指出对应章节号
+- resolves_promise_id: 回收的是上方「未回收清单」里的哪一条就填它的编号（如 P3），清单里没有就留空，不要猜
 - keyword: 必须从原文逐字复制 8-25 字
 
 ### 3. Conflict
@@ -114,10 +115,13 @@ class PlotAnalyzer:
 - plot_line_hint
 - priority: low / medium / high / critical
 - status: open / progressing / resolved / broken
-- deadline_chapter: 可为空
+- deadline_chapter: 新埋设且上方「本章计划叙事任务」给了计划回收章时填该章号，否则留空
 - reference_chapter: 若是回收/解决旧承诺，尽量给出起始章节号
 - resolves_title: 若能判断回收的是哪一个承诺，写标题，否则留空
+- resolves_promise_id: 本章把「未回收清单」里的某条彻底回收 / 解决时填它的编号（如 P3），status 填 resolved
+- advances_promise_id: 本章只是推进或重新提起清单里的某条（没解决）时填它的编号，status 填 progressing
 - evidence
+清单里的旧承诺被推进或回收时，务必用编号指认，不要另起一条同义的新承诺；清单外的新坑才新建。
 
 ### 13. Relationship Deltas
 提取本章明确推动的人物关系变化：
@@ -170,6 +174,31 @@ class PlotAnalyzer:
   - status: arrived / left / current
   - evidence
 
+- realm_updates: 仅在人物境界 / 实力等级 / 身份地位明确变化或被点明时填写
+  - character_name
+  - realm: 变化后的境界 / 等级 / 地位（如“筑基初期”“外门执事”）
+  - evidence
+
+- item_updates: 仅在人物明确获得、失去、用掉关键物品（法宝 / 功法秘籍 / 丹药 / 信物 / 大额钱财）时填写
+  - character_name
+  - item
+  - change: gained / lost / used
+  - evidence
+
+- injury_updates: 仅在人物明确受伤 / 中毒 / 痊愈时填写
+  - character_name
+  - injury: 伤势描述（如“左臂骨折”“经脉受损”）
+  - status: injured / recovered
+  - evidence
+
+- goal_updates: 仅在人物明确立下或改变当前目标时填写
+  - character_name
+  - goal
+  - evidence
+
+### 17. Story Time
+- story_time: 本章结束时的故事内时间（如“入宗第三年·深秋”“大比前三天”），无法判断留空
+
 ---
 
 仅输出 JSON，不要输出 Markdown，不要输出解释文字。
@@ -193,6 +222,7 @@ JSON 结构如下：
       "strength": 7,
       "subtlety": 8,
       "reference_chapter": null,
+      "resolves_promise_id": "",
       "keyword": "原文关键短句"
     }}
   ],
@@ -273,6 +303,8 @@ JSON 结构如下：
       "deadline_chapter": null,
       "reference_chapter": null,
       "resolves_title": "",
+      "resolves_promise_id": "",
+      "advances_promise_id": "",
       "evidence": "原文关键短句"
     }}
   ],
@@ -333,10 +365,30 @@ JSON 结构如下：
         "status": "current",
         "evidence": "原文关键短句"
       }}
+    ],
+    "realm_updates": [
+      {{"character_name": "林尘", "realm": "炼气五层", "evidence": "原文关键短句"}}
+    ],
+    "item_updates": [
+      {{"character_name": "林尘", "item": "玄铁剑", "change": "gained", "evidence": "原文关键短句"}}
+    ],
+    "injury_updates": [
+      {{"character_name": "林尘", "injury": "左臂骨折", "status": "injured", "evidence": "原文关键短句"}}
+    ],
+    "goal_updates": [
+      {{"character_name": "林尘", "goal": "三个月内进入内门", "evidence": "原文关键短句"}}
     ]
-  }}
+  }},
+  "story_time": "入宗第三年·深秋"
 }}
 """
+
+    # 未回收清单最多列多少条（按优先级 / 计划回收章 / 最近活跃排序后截取）
+    OPEN_PROMISE_LIMIT = 30
+    CONTINUITY_SIGNAL_KEYS: tuple[str, ...] = (
+        "life_state_changes", "ability_updates", "location_updates",
+        "realm_updates", "item_updates", "injury_updates", "goal_updates",
+    )
 
     ENTITY_EXTRACTION_PROMPT = """你是一个小说实体提取器。从以下章节正文中提取所有出场的**人物**和**组织/机构/势力**。
 
@@ -376,6 +428,7 @@ JSON 结构如下：
       "role_type": "protagonist/major/supporting/minor 之一",
       "personality": "性格特征，如'沉稳冷静'，本章无法判断填null",
       "appearance": "外貌描写，如'身穿白袍，剑眉星目'，本章无描写填null",
+      "speech_style": "说话方式 / 口头禅 / 称呼习惯，如'嘴硬爱吐槽，口头禅“行吧”'，本章台词体现不出来填null",
       "background": "一句话背景，如'青云宗外门弟子，被退婚'",
       "traits": ["特征标签1", "特征标签2"],
       "affiliations": [
@@ -408,6 +461,47 @@ JSON 结构如下：
         self.ai_service = ai_service
         logger.info("✅ PlotAnalyzer initialized")
 
+    def _model_kwargs(self) -> Dict[str, Any]:
+        """配了分析模型（设置 → 分析模型）就走它：分析 / 抽取占每章一半调用量，用便宜快模型即可。"""
+        model = getattr(self.ai_service, "analysis_model", None)
+        return {"model": model} if isinstance(model, str) and model.strip() else {}
+
+    @classmethod
+    def build_open_promise_block(cls, open_promises: Optional[List[Any]]) -> tuple[str, Dict[str, str]]:
+        """把未回收承诺渲染成带短编号（P1…）的清单，返回 (文本, 短编号 → 真实 id)。"""
+        if not open_promises:
+            return "", {}
+        lines = ["【当前未回收的伏笔 / 承诺（本章推进或回收了其中某条，必须回填它的编号）】"]
+        mapping: Dict[str, str] = {}
+        for index, item in enumerate(list(open_promises)[: cls.OPEN_PROMISE_LIMIT], start=1):
+            short_id = f"P{index}"
+            mapping[short_id] = str(getattr(item, "id", "") or "")
+            deadline = getattr(item, "deadline_chapter", None)
+            plan = f"，计划第{deadline}章前回收" if deadline else ""
+            lines.append(
+                f"- {short_id} [{getattr(item, 'promise_type', '') or 'promise'}/{getattr(item, 'priority', '') or 'medium'}] "
+                f"{getattr(item, 'title', '')}（第{getattr(item, 'source_chapter_number', '?')}章起{plan}）："
+                f"{str(getattr(item, 'content', '') or '')[:60]}"
+            )
+        return "\n".join(lines), mapping
+
+    @staticmethod
+    def _map_promise_ids(result: Dict[str, Any], mapping: Dict[str, str]) -> None:
+        """模型回填的短编号 → 真实 id；清单外的编号一律置空（宁可新建也不能错关别的伏笔）。"""
+        real_ids = set(mapping.values())
+        for section in ("narrative_promises", "foreshadows"):
+            for item in result.get(section) or []:
+                if not isinstance(item, dict):
+                    continue
+                for key in ("resolves_promise_id", "advances_promise_id"):
+                    raw = str(item.get(key) or "").strip()
+                    if not raw:
+                        item[key] = None
+                    elif raw.upper() in mapping:
+                        item[key] = mapping[raw.upper()]
+                    else:
+                        item[key] = raw if raw in real_ids else None
+
     async def extract_entities(
         self,
         chapter_number: int,
@@ -428,6 +522,7 @@ JSON 结构如下：
             async for chunk in self.ai_service.generate_text_stream(
                 prompt=prompt,
                 temperature=0.1,
+                **self._model_kwargs(),
             ):
                 chunks.append(chunk)
 
@@ -456,16 +551,35 @@ JSON 结构如下：
         title: str,
         content: str,
         word_count: int,
+        open_promises: Optional[List[Any]] = None,
+        planned_tasks: str = "",
+        known_characters: Optional[List[str]] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Analyze one chapter and return normalized JSON payload."""
+        """Analyze one chapter and return normalized JSON payload.
+
+        open_promises：本章之前仍未回收的承诺（ORM 或同形对象）。带短编号进提示词，模型回收 / 推进时回填编号，
+        这里映射回真实 id——narrative_state_service 据此精确关闭，不再按标题模糊猜。
+        planned_tasks：本章章纲计划的叙事任务（要埋 / 要回收什么，计划回收章），供模型填 deadline_chapter。
+        known_characters：已登记角色正式名，减少别名导致的建档重复与状态错挂。
+        """
         try:
             logger.info("📳 开始分析第%s章: %s", chapter_number, title)
             analysis_content = content[:8000] if len(content) > 8000 else content
+            promise_block, mapping = self.build_open_promise_block(open_promises)
+            context_parts = [promise_block]
+            if planned_tasks and planned_tasks.strip():
+                context_parts.append(f"【本章计划叙事任务（章纲）】\n{planned_tasks.strip()}")
+            if known_characters:
+                names = "、".join(n for n in known_characters[:60] if n)
+                if names:
+                    context_parts.append(f"【已登记角色正式名（输出人名优先用这些）】\n{names}")
+            context_block = "\n\n".join(p for p in context_parts if p)
             prompt = self.ANALYSIS_PROMPT.format(
                 chapter_number=chapter_number,
                 title=title,
                 word_count=word_count,
                 content=analysis_content,
+                context_block=f"\n{context_block}\n" if context_block else "",
             )
 
             logger.info("  调用 AI 分析(内容长度: %s字, 流式模式)...", len(analysis_content))
@@ -473,6 +587,7 @@ JSON 结构如下：
             async for chunk in self.ai_service.generate_text_stream(
                 prompt=prompt,
                 temperature=0.3,
+                **self._model_kwargs(),
             ):
                 chunks.append(chunk)
 
@@ -485,6 +600,7 @@ JSON 结构如下：
             if not analysis_result:
                 logger.error("❌ 分析结果解析失败")
                 return None
+            self._map_promise_ids(analysis_result, mapping)
 
             logger.info(
                 "✅ 第%s章分析完成: hooks=%s foreshadows=%s plot_points=%s causal=%s promises=%s",
@@ -532,14 +648,15 @@ JSON 结构如下：
         result.setdefault("relationship_deltas", [])
         result.setdefault("timeline_events", [])
         result.setdefault("knowledge_changes", [])
-        result.setdefault(
-            "continuity_signals",
-            {
-                "life_state_changes": [],
-                "ability_updates": [],
-                "location_updates": [],
-            },
-        )
+        signals = result.get("continuity_signals")
+        if not isinstance(signals, dict):
+            signals = {}
+            result["continuity_signals"] = signals
+        for key in self.CONTINUITY_SIGNAL_KEYS:
+            if not isinstance(signals.get(key), list):
+                signals[key] = []
+        if not isinstance(result.get("story_time"), str):
+            result["story_time"] = ""
 
         for field in ("pacing", "engagement", "coherence", "overall"):
             result["scores"].setdefault(field, 0)

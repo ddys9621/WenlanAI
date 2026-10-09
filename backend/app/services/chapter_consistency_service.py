@@ -28,6 +28,20 @@ class ChapterConsistencyService:
     LIFE_SIGNAL_VALUES = {"dead", "missing", "revived", "survived"}
     ABILITY_SIGNAL_VALUES = {"learned", "mastered", "used", "lost", "forgotten"}
     LOCATION_SIGNAL_VALUES = {"arrived", "left", "current"}
+    # 角色状态卡的数据源（character_state_service 按章回放）：境界 / 物品 / 伤势 / 目标 / 故事时间 / 出场
+    ITEM_SIGNAL_VALUES = {"gained", "lost", "used"}
+    INJURY_SIGNAL_VALUES = {"injured", "recovered"}
+    ALLOWED_VALUES = {
+        "life_state": LIFE_SIGNAL_VALUES,
+        "ability": ABILITY_SIGNAL_VALUES,
+        "location": LOCATION_SIGNAL_VALUES,
+        "item": ITEM_SIGNAL_VALUES,
+        "injury": INJURY_SIGNAL_VALUES,
+        "realm": {"current"},
+        "goal": {"current"},
+        "story_time": {"current"},
+        "presence": {"present"},
+    }
 
     async def settle_signals_and_audit(
         self,
@@ -492,17 +506,17 @@ class ChapterConsistencyService:
             normalized_value = (signal_value or "").strip().lower()
             if not normalized_value:
                 return
-            if signal_type == "life_state" and normalized_value not in self.LIFE_SIGNAL_VALUES:
+            allowed = self.ALLOWED_VALUES.get(signal_type)
+            if allowed is not None and normalized_value not in allowed:
                 return
-            if signal_type == "ability" and normalized_value not in self.ABILITY_SIGNAL_VALUES:
-                return
-            if signal_type == "location" and normalized_value not in self.LOCATION_SIGNAL_VALUES:
+            key = " ".join(str(signal_key or "").split())[:200] or None
+            if signal_type in {"realm", "item", "injury", "goal", "story_time"} and not key:
                 return
             signals.append(
                 {
                     "signal_type": signal_type,
                     "character_name": (character_name or "").strip() or None,
-                    "signal_key": (signal_key or "").strip() or None,
+                    "signal_key": key,
                     "signal_value": normalized_value,
                     "evidence_text": (evidence_text or "").strip() or None,
                 }
@@ -540,6 +554,28 @@ class ChapterConsistencyService:
                 names = item.get("target_names") or item.get("actor_names") or []
                 for name in names:
                     append_signal("life_state", name, None, "dead", item.get("evidence") or item.get("description"))
+
+        for item in continuity.get("realm_updates", []) or []:
+            append_signal("realm", item.get("character_name"), item.get("realm"), "current", item.get("evidence"))
+        for item in continuity.get("item_updates", []) or []:
+            append_signal("item", item.get("character_name"), item.get("item"), item.get("change"), item.get("evidence"))
+        for item in continuity.get("injury_updates", []) or []:
+            append_signal("injury", item.get("character_name"), item.get("injury"), item.get("status"), item.get("evidence"))
+        for item in continuity.get("goal_updates", []) or []:
+            append_signal("goal", item.get("character_name"), item.get("goal"), "current", item.get("evidence"))
+
+        story_time = analysis.get("story_time")
+        if isinstance(story_time, str) and story_time.strip():
+            append_signal("story_time", None, story_time, "current", None)
+
+        # 出场记录：最近活跃角色与"最近出场章"都靠它（按名字去重，章内只记一次）
+        present: list[str] = []
+        for item in analysis.get("character_states", []) or []:
+            name = (item.get("character_name") or "").strip() if isinstance(item, dict) else ""
+            if name and name not in present:
+                present.append(name)
+        for name in present:
+            append_signal("presence", name, None, "present", None)
 
         return signals
 

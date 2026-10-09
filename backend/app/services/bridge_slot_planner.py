@@ -55,6 +55,7 @@ class BeatData:
     antagonist: str = ""             # 主要对手 / 压力来源及层级
     realm: str = ""                  # 主角境界 / 实力 / 地位从哪到哪
     phases: tuple[dict[str, Any], ...] = ()   # 长节点阶段拆分结果（bridge_phases.parse_phases 产出；空 = 未拆）
+    review_note: str = ""            # 上一卷卷末复盘回写的修正意见（arc_summary_service），填充 / 展开本节点时参考
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,7 @@ class BridgeSlot:
     chapter_start: int
     chapter_end: int
     secondary: tuple[SecondaryBeatTask, ...] = field(default_factory=tuple)
+    rhythm_role: str = "standard"
 
 
 @dataclass(frozen=True)
@@ -154,6 +156,19 @@ class BridgeSlotPlan:
 def chapter_range(bridge_number: int) -> tuple[int, int]:
     start = CHAPTERS_PER_BRIDGE * (bridge_number - 1) + 1
     return start, start + CHAPTERS_PER_BRIDGE - 1
+
+
+def bridge_chapter_range(bridge: Any) -> tuple[int, int]:
+    """桥段实际章号区间：变长桥段落库了 chapter_start / chapter_end；旧数据为 NULL，按每桥段 4 章推算。"""
+    start, end = getattr(bridge, "chapter_start", None), getattr(bridge, "chapter_end", None)
+    if start and end and end >= start:
+        return int(start), int(end)
+    return chapter_range(int(bridge.bridge_number))
+
+
+def bridge_chapter_count(bridge: Any) -> int:
+    start, end = bridge_chapter_range(bridge)
+    return end - start + 1
 
 
 def primary_quota(estimated_chapters: int | None, total_bridges: int) -> int:
@@ -225,6 +240,7 @@ def parse_plot_line(line: Any) -> PlotLineData:
             antagonist=str(b.get("antagonist") or "").strip(),
             realm=str(b.get("realm") or "").strip(),
             phases=phases,
+            review_note=str(b.get("review_note") or "").strip(),
         ))
     beats.sort(key=lambda x: x.index)
     mode = raw.get("mode")
@@ -474,12 +490,47 @@ def main_beat_quotas(main: PlotLineData, total: int) -> list[int]:
     return quotas
 
 
-def compute_bridge_slots(lines: list[PlotLineData]) -> BridgeSlotPlan:
+def main_beat_chapters(main: PlotLineData) -> list[int]:
+    """变长模式：主线节点 → 篇幅（章）。最大余数法按份额分全书章数（每节点 ≥ 3 章），开篇节点最多 12 章。"""
+    from app.services.bridge_rhythm import MIN_BRIDGE_CHAPTERS
+
+    shares = beat_shares(main)
+    total = int(main.estimated_chapters or 0)
+    budgets = apportion(shares, total, minimum=MIN_BRIDGE_CHAPTERS)
+    opening_cap = OPENING_BEAT_MAX_BRIDGES * CHAPTERS_PER_BRIDGE
+    if len(budgets) >= OPENING_CAP_MIN_BEATS and budgets[0] > opening_cap:
+        budgets = [opening_cap, *apportion(shares[1:], sum(budgets) - opening_cap, minimum=MIN_BRIDGE_CHAPTERS)]
+    return budgets
+
+
+def _varied_skeleton(main: PlotLineData) -> list[tuple[int, BeatData, int, int, int, float, float, str]]:
+    """(bridge_number, beat, quota, chapter_start, chapter_end, cov_start, cov_end, rhythm_role)。"""
+    from app.services.bridge_rhythm import plan_beat_lengths
+    from app.services.bridge_shapes import climax_beat_index
+
+    climax = climax_beat_index(main)
+    out = []
+    number, cursor = 0, 1
+    for i, (beat, budget) in enumerate(zip(main.beats, main_beat_chapters(main))):
+        plan = plan_beat_lengths(budget, is_opening=(i == 0), is_climax=(beat.index == climax))
+        done = 0
+        for length, role in plan:
+            number += 1
+            out.append((number, beat, len(plan), cursor, cursor + length - 1, done / budget, (done + length) / budget, role))
+            cursor += length
+            done += length
+    return out
+
+
+def compute_bridge_slots(lines: list[PlotLineData], rhythm: str = "fixed4") -> BridgeSlotPlan:
+    """rhythm=fixed4：每桥段 4 章（旧行为）；varied：按节点篇幅切 3-12 章不等的桥段并标节奏角色。"""
     main = select_main_line(lines)
+    secondaries = [l for l in lines if l.line_type != "main" and l.beats]
+    if rhythm == "varied":
+        return _compute_varied_slots(main, secondaries)
     total = max(1, round(main.estimated_chapters / CHAPTERS_PER_BRIDGE))
     quotas = main_beat_quotas(main, total)
     total = sum(quotas)
-    secondaries = [l for l in lines if l.line_type != "main" and l.beats]
 
     # 主线槽位骨架（先不挂副线）
     skeleton: list[tuple[int, BeatData, int, int]] = []   # (bridge_number, beat, quota, j)
@@ -491,19 +542,7 @@ def compute_bridge_slots(lines: list[PlotLineData]) -> BridgeSlotPlan:
             skeleton.append((number, beat, quota, j))
             bridges_by_beat.setdefault(beat.index, []).append(number)
 
-    # 副线落位：锚定线按节点落位；未锚定线沿用全书进度求交
-    tasks_by_bridge: dict[int, list[SecondaryBeatTask]] = {n: [] for n in range(1, total + 1)}
-    for line in secondaries:
-        if is_anchored(line):
-            for n, ts in _anchored_tasks(line, bridges_by_beat, total).items():
-                tasks_by_bridge[n].extend(ts)
-        else:
-            for n in range(1, total + 1):
-                tasks_by_bridge[n].extend(_secondary_tasks([line], (n - 1) / total, n / total))
-    tasks_by_bridge = _resolve_roles(tasks_by_bridge, secondaries)
-    tasks_by_bridge = _apply_budget_caps(tasks_by_bridge, secondaries, total)
-    tasks_by_bridge = _fill_companion_mentions(tasks_by_bridge, secondaries, bridges_by_beat)
-
+    tasks_by_bridge = _place_secondaries(secondaries, bridges_by_beat, total)
     slots = [
         BridgeSlot(
             bridge_number=n,
@@ -520,11 +559,55 @@ def compute_bridge_slots(lines: list[PlotLineData]) -> BridgeSlotPlan:
         )
         for n, beat, quota, j in skeleton
     ]
+    return _plan(main, {b.index: q for b, q in zip(main.beats, quotas)}, slots, tasks_by_bridge, secondaries,
+                 total * CHAPTERS_PER_BRIDGE)
+
+
+def _place_secondaries(
+    secondaries: list[PlotLineData], bridges_by_beat: dict[int, list[int]], total: int,
+) -> dict[int, list[SecondaryBeatTask]]:
+    """副线落位：锚定线按节点落位；未锚定线沿用全书进度求交；再定主 B 线 / 预算降级 / 伴生保温。"""
+    tasks_by_bridge: dict[int, list[SecondaryBeatTask]] = {n: [] for n in range(1, total + 1)}
+    for line in secondaries:
+        if is_anchored(line):
+            for n, ts in _anchored_tasks(line, bridges_by_beat, total).items():
+                tasks_by_bridge[n].extend(ts)
+        else:
+            for n in range(1, total + 1):
+                tasks_by_bridge[n].extend(_secondary_tasks([line], (n - 1) / total, n / total))
+    tasks_by_bridge = _resolve_roles(tasks_by_bridge, secondaries)
+    tasks_by_bridge = _apply_budget_caps(tasks_by_bridge, secondaries, total)
+    return _fill_companion_mentions(tasks_by_bridge, secondaries, bridges_by_beat)
+
+
+def _compute_varied_slots(main: PlotLineData, secondaries: list[PlotLineData]) -> BridgeSlotPlan:
+    skeleton = _varied_skeleton(main)
+    total = len(skeleton)
+    bridges_by_beat: dict[int, list[int]] = {}
+    for number, beat, *_rest in skeleton:
+        bridges_by_beat.setdefault(beat.index, []).append(number)
+    tasks_by_bridge = _place_secondaries(secondaries, bridges_by_beat, total)
+    slots = [
+        BridgeSlot(
+            bridge_number=number, plot_line_id=main.id, beat_index=beat.index, beat_title=beat.title,
+            beat_description=beat.description, beat_weight=beat.weight,
+            coverage_start=round(cov_start, 6), coverage_end=round(cov_end, 6),
+            chapter_start=c_start, chapter_end=c_end, secondary=tuple(tasks_by_bridge[number]), rhythm_role=role,
+        )
+        for number, beat, _quota, c_start, c_end, cov_start, cov_end, role in skeleton
+    ]
+    quotas = {b.index: len(bridges_by_beat.get(b.index, [])) for b in main.beats}
+    return _plan(main, quotas, slots, tasks_by_bridge, secondaries, slots[-1].chapter_end if slots else 0)
+
+
+def _plan(main: PlotLineData, quotas: dict[int, int], slots: list[BridgeSlot],
+          tasks_by_bridge: dict[int, list[SecondaryBeatTask]], secondaries: list[PlotLineData],
+          total_chapters: int) -> BridgeSlotPlan:
     return BridgeSlotPlan(
         main_line_id=main.id,
-        total_bridges=total,
-        total_chapters=total * CHAPTERS_PER_BRIDGE,
-        beat_quotas={b.index: q for b, q in zip(main.beats, quotas)},
+        total_bridges=len(slots),
+        total_chapters=total_chapters,
+        beat_quotas=quotas,
         slots=tuple(slots),
-        line_budgets=_line_budgets(tasks_by_bridge, secondaries, total),
+        line_budgets=_line_budgets(tasks_by_bridge, secondaries, len(slots)),
     )

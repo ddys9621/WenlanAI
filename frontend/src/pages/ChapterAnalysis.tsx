@@ -27,7 +27,7 @@ import { BatchGenerateModal } from '@/components/chapters/BatchGenerateModal';
 import { ChapterEditModal } from '@/components/chapters/ChapterEditModal';
 import { ChapterGenerateModal } from '@/components/chapters/ChapterGenerateModal';
 import { ChapterStreamPanel } from '@/components/chapters/ChapterStreamPanel';
-import { DeaiRewriteModal } from '@/components/chapters/DeaiRewriteModal';
+import { DeaiRewriteModal, type RewriteMode } from '@/components/chapters/DeaiRewriteModal';
 import { NarrativeStatePanel } from '@/components/chapters/NarrativeStatePanel';
 
 const STATUS_MAP: Record<string, { label: string; cls: string }> = {
@@ -176,11 +176,11 @@ export default function ChapterAnalysis() {
     void jobs.startStream({ chapter, kind: 'chapter_generate', requestBody: body, mode: 'single' }).catch(() => { /* 已 toast / 已停止 */ });
   };
 
-  const confirmRewrite = (promptIds: string[]) => {
+  const confirmRewrite = (promptIds: string[], mode: RewriteMode) => {
     if (!rewriteTarget) return;
     const chapter = rewriteTarget;
     setRewriteTarget(null);
-    void jobs.startStream({ chapter, kind: 'chapter_regenerate', requestBody: { prompt_ids: promptIds }, mode: 'single' }).catch(() => { /* 已 toast / 已停止 */ });
+    void jobs.startStream({ chapter, kind: 'chapter_regenerate', requestBody: { prompt_ids: promptIds, mode }, mode: 'single' }).catch(() => { /* 已 toast / 已停止 */ });
   };
 
   const saveStreamContent = async () => {

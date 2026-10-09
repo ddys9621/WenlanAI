@@ -222,6 +222,97 @@ async def next_bridge_block(db: AsyncSession, project_id: str, bridge_number: in
     return f"【➡ 下一桥段目标（C4 引子要指向这里）】\n- 桥段 {nxt.bridge_number}《{nxt.title}》：{_clip(nxt.goal, 150)}"
 
 
+# ---------------- 滚动规划：实际进展 / 未回收伏笔 ----------------
+
+async def written_upto(db: AsyncSession, project_id: str) -> int:
+    """已写到第几章（有正文的最大章号；没有正文为 0）。"""
+    from sqlalchemy import func
+
+    from app.models.chapter import Chapter
+
+    value = (await db.execute(
+        select(func.max(Chapter.chapter_number)).where(
+            Chapter.project_id == project_id, Chapter.content.isnot(None), Chapter.content != "",
+        )
+    )).scalar_one_or_none()
+    return int(value or 0)
+
+
+async def actual_progress_block(
+    db: AsyncSession, project_id: str, before_chapter: int, *, recent: int = 5, budget: int = 2_400,
+) -> str:
+    """【📈 实际剧情进展】已写章节的层级摘要 + 最近几章摘要；规划（桥段 / 章纲）以它为准修正，避免越写越偏。"""
+    from app.models.chapter import Chapter
+    from app.models.memory import StoryMemory
+    from app.services.arc_summary_service import render_story_so_far
+
+    if before_chapter <= 1:
+        return ""
+    story, covered = await render_story_so_far(db, project_id, before_chapter, budget_chars=budget // 2)
+    rows = (await db.execute(
+        select(Chapter.chapter_number, Chapter.title, StoryMemory.content)
+        .join(StoryMemory, StoryMemory.chapter_id == Chapter.id)
+        .where(
+            Chapter.project_id == project_id,
+            Chapter.chapter_number < before_chapter,
+            StoryMemory.memory_type == "chapter_summary",
+        )
+        .order_by(Chapter.chapter_number.desc())
+        .limit(recent)
+    )).all()
+    if not story and not rows:
+        return ""
+    lines = ["【📈 实际剧情进展（以已写正文为准：计划与它冲突时顺着实际写，不要推翻已发生的事）】"]
+    if story:
+        lines.append(story)
+    if rows:
+        lines.append("最近几章：")
+        lines += [f"- 第{number}章《{_clip(title, 20)}》：{_clip(content, 160)}" for number, title, content in reversed(rows)]
+    return "\n".join(lines)[:budget]
+
+
+async def open_promises_block(
+    db: AsyncSession, project_id: str, before_chapter: int, *, limit: int = 12, with_ids: bool = False,
+) -> tuple[str, dict[str, str], list[Any]]:
+    """【🎣 当前未回收的伏笔】（按计划回收章 / 优先级排序）。with_ids → 带短编号 P1…，返回 (文本, 短编号→真实 id, 承诺列表)。"""
+    from app.services.narrative_state_service import narrative_state_service
+
+    promises = await narrative_state_service._get_active_promises(db, project_id, max(before_chapter, 1), limit=limit)
+    if not promises:
+        return "", {}, []
+    lines = ["【🎣 当前未回收的伏笔 / 承诺】"]
+    mapping: dict[str, str] = {}
+    for i, p in enumerate(promises, start=1):
+        flag = narrative_state_service._promise_flag(p, before_chapter).strip()
+        head = f"P{i} " if with_ids else ""
+        if with_ids:
+            mapping[f"P{i}"] = p.id
+        lines.append(
+            f"- {head}[{p.promise_type}/{p.priority}] {_clip(p.title, 40)}（第{p.source_chapter_number}章起）"
+            f"{' ' + flag if flag else ''}：{_clip(p.content, 60)}"
+        )
+    return "\n".join(lines), mapping, list(promises)
+
+
+def foreshadow_plan_block(raw: Any) -> str:
+    """【🧶 本桥段伏笔计划】（填充时规划，展开时落到具体章）。"""
+    try:
+        plan = json.loads(raw) if isinstance(raw, str) and raw else raw
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if not isinstance(plan, dict):
+        return ""
+    lines = []
+    for item in plan.get("plant") or []:
+        if isinstance(item, dict) and item.get("title"):
+            due = f"，计划约 {item['payoff_after']} 章后回收" if item.get("payoff_after") else ""
+            lines.append(f"- 埋：{_clip(item['title'], 30)}：{_clip(item.get('content'), 60)}{due}")
+    for title in plan.get("payoff") or []:
+        if str(title).strip():
+            lines.append(f"- 收：{_clip(title, 40)}")
+    return "【🧶 本桥段伏笔计划（落到具体某一章的 narrative_tasks）】\n" + "\n".join(lines) if lines else ""
+
+
 def pov_line(narrative_perspective: str | None) -> str:
     perspective = (narrative_perspective or "").strip() or "第三人称"
     if "第一" in perspective:

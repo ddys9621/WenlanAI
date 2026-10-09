@@ -18,6 +18,7 @@ from app.models.plot_card import PlotCard
 from app.models.plot_card_plot_line_link import PlotCardPlotLineLink
 from app.models.plot_card_chapter_outline_link import PlotCardChapterOutlineLink
 from app.models.chapter_outline_plot_line_link import ChapterOutlinePlotLineLink
+from app.services.narrative_tasks import parse_narrative_tasks
 from app.schemas.import_export import (
     ProjectExportData,
     ChapterExportData,
@@ -93,6 +94,9 @@ class ImportExportService:
             "narrative_perspective": project.narrative_perspective,
             "character_count": project.character_count,
             "c3_hook_style": project.c3_hook_style,
+            "platform_preset": project.platform_preset,
+            "bridge_rhythm": project.bridge_rhythm,
+            "rolling_planning": project.rolling_planning,
             "user_id": project.user_id,
             "created_at": project.created_at.isoformat() if project.created_at else None,
         }
@@ -243,6 +247,7 @@ class ImportExportService:
                 personality=char.personality,
                 background=char.background,
                 appearance=char.appearance,
+                speech_style=char.speech_style,
                 traits=traits,
                 organization_type=char.organization_type,
                 organization_purpose=char.organization_purpose,
@@ -515,6 +520,7 @@ class ImportExportService:
                 pov=outline.pov,
                 emotional_arc=getattr(outline, 'emotional_arc', None),
                 chapter_hook=getattr(outline, 'chapter_hook', None),
+                narrative_tasks=parse_narrative_tasks(outline.narrative_tasks) if outline.narrative_tasks else None,
                 created_at=outline.created_at.isoformat() if outline.created_at else None
             ))
 
@@ -776,6 +782,9 @@ class ImportExportService:
                 narrative_perspective=project_data.get("narrative_perspective"),
                 character_count=project_data.get("character_count"),
                 c3_hook_style=project_data.get("c3_hook_style") or "none",
+                platform_preset=project_data.get("platform_preset"),
+                bridge_rhythm=project_data.get("bridge_rhythm"),
+                rolling_planning=project_data.get("rolling_planning"),
                 current_words=project_data.get("current_words", 0),  # 保留原项目的字数
                 wizard_step=4,  # 导入的项目设置为向导完成状态
                 wizard_status="completed"  # 标记向导已完成
@@ -984,6 +993,7 @@ class ImportExportService:
                 personality=char_data.get("personality"),
                 background=char_data.get("background"),
                 appearance=char_data.get("appearance"),
+                speech_style=char_data.get("speech_style"),
                 traits=traits,
                 organization_type=char_data.get("organization_type"),
                 organization_purpose=char_data.get("organization_purpose")
@@ -1253,7 +1263,9 @@ class ImportExportService:
                 scene=outline_data.get("scene"),
                 pov=outline_data.get("pov"),
                 emotional_arc=outline_data.get("emotional_arc"),
-                chapter_hook=outline_data.get("chapter_hook")
+                chapter_hook=outline_data.get("chapter_hook"),
+                narrative_tasks=(json.dumps(outline_data["narrative_tasks"], ensure_ascii=False)
+                                 if isinstance(outline_data.get("narrative_tasks"), dict) else None),
             )
             db.add(outline)
             await db.flush()  # 获取ID

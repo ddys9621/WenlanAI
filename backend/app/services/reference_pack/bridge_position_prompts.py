@@ -17,7 +17,7 @@ BRIDGE_POSITION_INTRO = """【🎯 桥段位置约束 - 本章 = 桥段「{bridg
 本桥段目标：{bridge_goal}
 本桥段装逼点：{bridge_showoff}
 
-**章内结构（严格 5:5）**：
+**章内结构（约 5:5，上下浮动两成即可，不用掐字数）**：
 
 ▼ 上半部分（约 {upper_word_count} 字）— 目的：制造代入（N+1 原则）
    - 用主角的日常场景让读者代入：起床/吃饭/路上聊天/和熟人对话
@@ -41,11 +41,12 @@ BRIDGE_POSITION_BUILD = """【🎯 桥段位置约束 - 本章 = 桥段「{bridg
 本桥段目标：{bridge_goal}
 本桥段装逼点：{bridge_showoff}
 
-**章内结构（严格 9:1）**：
+**章内结构（约 9:1）**：
 
 ▼ 主体部分（约 {main_word_count} 字）— 目的：拉扯增强期待
    - 通过配角的台词、神态、心理活动加强读者对"主角装逼"的期待
-   - 可写：配角讨论困境的严重性 / 配角对主角的怀疑 / 反派的嚣张
+   - 可写：配角讨论困境的严重性 / 有理由的怀疑 / 反派的施压；也可以写主角主动布局、收集信息、试探对手（拉扯不只靠旁人嘴碎）
+   - 怀疑和嚣张都要有理由，人物不降智：反派按自己掌握的信息行事
    - 必须让读者越来越想看"主角到底怎么解决"
    - **禁止**：主角直接介入解决（要让读者憋住）
    - **禁止**：跳过拉扯直接进入装逼
@@ -69,10 +70,10 @@ BRIDGE_POSITION_PAYOFF = """【🎯 桥段位置约束 - 本章 = 桥段「{brid
 **章内结构（10:0 纯爽点）**：
 
 ▼ 整章目的：兑现读者期待，把爽感写透
-   - 把 C2 章末开始的装逼动作**完整展开**
-   - 配角的震惊/崇拜/恐惧反应**必须充分描写**
-   - 反派的崩溃/求饶**要给到位**
-   - 给读者前两章压抑的所有情绪一次性释放
+   - 把 C2 章末开始的装逼动作**完整展开**，过程写具体
+   - 旁人反应给 2-3 处就够，类型要错开（震惊之外还有盘算、忌惮、拉拢、不服、沉默），别写成一屋子人轮流倒吸凉气
+   - 反派按自己掌握的信息合理应对：可以不服、撤退、记仇、留后手，不写降智求饶
+   - 给读者前两章压抑的所有情绪一次性释放，并落到一个实际收获上（资源 / 地位 / 关系 / 信息）
 
 **严格禁止**：
    - ❌ 章末留任何钩子（不要写"但故事远未结束"、"他知道未来..."这类）
@@ -123,7 +124,7 @@ MYSTERY_INTRO = """【🎯 桥段位置约束 - 本章 = 桥段「{bridge_title}
 本桥段目标：{bridge_goal}
 本桥段反转点：{bridge_showoff}
 
-**章内结构（严格 5:5）**：
+**章内结构（约 5:5，上下浮动两成即可）**：
 
 ▼ 上半部分（约 {upper_word_count} 字）— 目的：代入
    - 用主角的日常场景让读者代入，顺带交代与本案相关的背景
@@ -142,7 +143,7 @@ MYSTERY_BUILD = """【🎯 桥段位置约束 - 本章 = 桥段「{bridge_title}
 本桥段目标：{bridge_goal}
 本桥段反转点：{bridge_showoff}
 
-**章内结构（严格 9:1）**：
+**章内结构（约 9:1）**：
 
 ▼ 主体部分（约 {main_word_count} 字）— 目的：收集线索并误导
    - 主角按“看似合理”的方向追查，配角给出误导性解释，嫌疑转移
@@ -165,7 +166,7 @@ MYSTERY_PAYOFF = """【🎯 桥段位置约束 - 本章 = 桥段「{bridge_title
 
 ▼ 整章目的：兑现局部真相，把前两章的判断整个掀翻
    - 逐条回收 C1/C2 埋下的线索，让读者事后能验证
-   - 涉案人物的反应（震惊 / 崩溃 / 沉默）**必须充分描写**
+   - 涉案人物的反应写 2-3 处、类型错开（震惊 / 崩溃 / 沉默 / 狡辩），对手按自己的信息应对，不降智
    - 给读者前两章积压的疑惑一次性释放
 
 **严格禁止**：
@@ -210,7 +211,7 @@ ROMANCE_INTRO = """【🎯 桥段位置约束 - 本章 = 桥段「{bridge_title}
 本桥段目标：{bridge_goal}
 本桥段情感兑现点：{bridge_showoff}
 
-**章内结构（严格 5:5）**：
+**章内结构（约 5:5，上下浮动两成即可）**：
 
 ▼ 上半部分（约 {upper_word_count} 字）— 目的：代入
    - 用主角的日常与二人当前的相处状态让读者代入
@@ -229,7 +230,7 @@ ROMANCE_BUILD = """【🎯 桥段位置约束 - 本章 = 桥段「{bridge_title}
 本桥段目标：{bridge_goal}
 本桥段情感兑现点：{bridge_showoff}
 
-**章内结构（严格 9:1）**：
+**章内结构（约 9:1）**：
 
 ▼ 主体部分（约 {main_word_count} 字）— 目的：推拉
    - 升温与拉开交替，第三方（情敌 / 闺蜜 / 家人）搅动
@@ -296,7 +297,7 @@ INFINITE_INTRO = """【🎯 桥段位置约束 - 本章 = 桥段「{bridge_title
 本桥段目标：{bridge_goal}
 本桥段破局点：{bridge_showoff}
 
-**章内结构（严格 5:5）**：
+**章内结构（约 5:5，上下浮动两成即可）**：
 
 ▼ 上半部分（约 {upper_word_count} 字）— 目的：代入
    - 用结算 / 休整 / 队友日常让读者代入，顺带交代当前资源与状态
@@ -315,7 +316,7 @@ INFINITE_BUILD = """【🎯 桥段位置约束 - 本章 = 桥段「{bridge_title
 本桥段目标：{bridge_goal}
 本桥段破局点：{bridge_showoff}
 
-**章内结构（严格 9:1）**：
+**章内结构（约 9:1）**：
 
 ▼ 主体部分（约 {main_word_count} 字）— 目的：试错与代价
    - 队伍按字面理解试探规则，误读带来实际损失（队友 / 道具 / 身体）
@@ -338,7 +339,7 @@ INFINITE_PAYOFF = """【🎯 桥段位置约束 - 本章 = 桥段「{bridge_titl
 
 ▼ 整章目的：利用规则完成反杀或通关，恐惧转为掌控
    - 破局过程逐步展开，每一步都对应 C1/C2 展示过的规则
-   - 队友与对手的反应**必须充分描写**
+   - 队友与对手的反应写 2-3 处、类型错开，对手按自己掌握的信息应对，不降智
 
 **严格禁止**：
    - ❌ 章末留任何钩子
@@ -385,7 +386,7 @@ _CONTINUED_HEAD = """【🎯 桥段位置约束 - 本章 = 桥段「{bridge_titl
 本桥段{payoff_label}：{bridge_showoff}
 上桥段留下的钩子：{prev_bridge_hook}
 
-**章内结构（严格 1:3，本桥段不是开篇，读者已代入，不写日常铺垫）**：
+**章内结构（约 1:3，本桥段不是开篇，读者已代入，不写日常铺垫）**：
 
 ▼ 开头（约 {lead_word_count} 字）— 目的：承接
    - 从上桥段结尾的钩子 / 引子直接接上：人物已在路上 / 已到现场 / 已开口，不得重述上桥段内容
@@ -466,6 +467,50 @@ BRIDGE_POSITION_TEMPLATES_BY_FAMILY: dict[str, dict[str, str]] = {
 BRIDGE_POSITION_TEMPLATES: dict[str, str] = BRIDGE_POSITION_TEMPLATES_BY_FAMILY["showoff"]
 
 
+# ============================================================
+# 变长桥段的额外位置（四个题材族通用）
+# ============================================================
+
+BRIDGE_POSITION_BREATHER = """【🎯 桥段位置约束 - 本章 = 桥段「{bridge_title}」缓冲章】
+
+本桥段目标：{bridge_goal}（已兑现）
+下一桥段目标：{next_bridge_goal}
+
+**本章是大高潮之后的缓冲章：节奏放缓，给读者喘口气**：
+   - 写日常 / 感情 / 群像 / 收获盘点 / 世界观的一角，人物关系往前走一小步
+   - 可以轻松、插科打诨，但每个场景都要带一点信息量（新消息、新关系、新目标的影子）
+   - 让配角也有戏：配角的变化、配角之间的关系，读者在这里认识人物
+   - **禁止**：开启新的大冲突；**禁止**：重复上一章的兑现场面；**禁止**：总结升华
+
+**章末**：留一个温和的引子，指向下一桥段目标，不用强钩
+"""
+
+BRIDGE_POSITION_BUILD_CONTINUE = """【🎯 桥段位置约束 - 本章 = 桥段「{bridge_title}」拉扯章（{k}/{m}）】
+
+本桥段目标：{bridge_goal}
+本桥段{payoff_label}：{bridge_showoff}
+
+**本章是本轮第 {k}/{m} 个拉扯章：继续加压、布局或试探，让局面一步步收紧**：
+   - 局势要比上一章更紧：新的阻碍、更高的代价、对手的新动作或主角的新发现，不能原地打转
+   - 可以写主角主动布局、收集信息、拉拢帮手，也可以写对手出招、旁人施压（施压要有理由，人物不降智）
+   - **禁止**：主角在本章开装或解决问题——开装放在本轮最后一个拉扯章的章尾
+
+**章末钩子**：以局势进一步收紧的一个具体事件为钩
+"""
+
+FIRST_WAVE_PAYOFF_BLOCK = """【🌊 第一波兑现】本桥段有两波兑现，本章是第一波：把这一轮的期待放出来（兑现一半），但不要把桥段目标彻底解决。
+**章末**：抛出更大的威胁或反转（一个具体事件：援兵到了 / 底牌被看穿 / 真正的对手现身），引出下一轮拉扯——这里要留钩。
+"""
+FINAL_WAVE_NOTE = "【🌊 最终兑现】这是本桥段的最终兑现：规模要大于前一波，把积压的期待彻底放完。"
+LAST_BUILD_NOTE = "【⏫ 本轮最后一个拉扯章】前面几章已经在加压，本章把压力推到顶，章尾让主角开装。"
+
+
+def _bridge_slot(positions: tuple[str, ...] | list[str] | None, index: int | None) -> tuple[tuple[str, ...], int] | None:
+    if not positions or index is None or not 0 <= index < len(positions):
+        return None
+    return tuple(positions), index
+
+
 def format_position_constraint(
     position: str,
     bridge_title: str,
@@ -478,11 +523,13 @@ def format_position_constraint(
     prev_bridge_hook: str = "",
     shape: str = "standard",
     c3_hook_style: str = "none",
+    positions: tuple[str, ...] | list[str] | None = None,
+    index_in_bridge: int | None = None,
 ) -> str:
     """格式化指定位置的约束模板。
 
     Args:
-        position: 'intro' / 'build' / 'payoff' / 'aftermath'
+        position: 'intro' / 'build' / 'payoff' / 'aftermath' / 'breather'（变长桥段的缓冲章）
         bridge_title: 桥段标题
         bridge_goal: 桥段目标
         bridge_showoff: 桥段装逼点（其它题材为反转点 / 情感兑现点 / 破局点）
@@ -494,10 +541,42 @@ def format_position_constraint(
         prev_bridge_hook: 上桥段留给本桥段的钩子（仅承接版 C1 使用）
         shape: 桥段形态（bridge_shapes：standard / finale / climax_finale），收官 / 高潮桥段在 C2-C4 追加形态段
         c3_hook_style: C3 章末风格（bridge_hook_style：none 不留钩子 / soft 半钩），仅 payoff 位置生效
+        positions / index_in_bridge: 变长桥段的位置序列与本章下标（0 起）。同一轮多个拉扯章时中间章不开装；
+            两波兑现时第一波留钩、最终兑现收束；缺省按标准 4 章处理
 
     Returns:
         格式化后的 prompt 段，可直接拼入 user_prompt
     """
+    family_key = template if template in BRIDGE_POSITION_TEMPLATES_BY_FAMILY else "showoff"
+    if position == "breather":
+        return BRIDGE_POSITION_BREATHER.format(
+            bridge_title=bridge_title, bridge_goal=bridge_goal, next_bridge_goal=next_bridge_goal,
+        )
+    slot = _bridge_slot(positions, index_in_bridge)
+    note = ""
+    if slot and position == "build":
+        seq, i = slot
+        start = i
+        while start > 0 and seq[start - 1] == "build":
+            start -= 1
+        end = i
+        while end + 1 < len(seq) and seq[end + 1] == "build":
+            end += 1
+        if i < end:
+            return BRIDGE_POSITION_BUILD_CONTINUE.format(
+                bridge_title=bridge_title, bridge_goal=bridge_goal, bridge_showoff=bridge_showoff,
+                payoff_label=_PAYOFF_LABEL_BY_FAMILY.get(family_key, "装逼点"), k=i - start + 1, m=end - start + 1,
+            )
+        if end > start:
+            note = LAST_BUILD_NOTE
+    first_wave = False
+    if slot and position == "payoff":
+        seq, i = slot
+        payoffs = [j for j, p in enumerate(seq) if p == "payoff"]
+        if len(payoffs) > 1:
+            first_wave = i != payoffs[-1]
+            note = "" if first_wave else FINAL_WAVE_NOTE
+
     text = _format_position_body(
         position, bridge_title, bridge_goal, bridge_showoff, target_word_count, next_bridge_goal, template,
         opening, prev_bridge_hook,
@@ -507,8 +586,15 @@ def format_position_constraint(
     from app.services.bridge_hook_style import apply_writing_payoff_style
     from app.services.bridge_shapes import shape_writing_rule
 
+    if first_wave:
+        # 第一波兑现：去掉"不留钩子"的禁令与收束式章末处理，改成留钩
+        body = text.split("**章末处理**")[0]
+        body = "\n".join(line for line in body.splitlines() if "章末留任何钩子" not in line)
+        return f"{body.rstrip()}\n\n{FIRST_WAVE_PAYOFF_BLOCK}"
     if position == "payoff":
         text = apply_writing_payoff_style(text, c3_hook_style)
+    if note:
+        text = f"{text.rstrip()}\n\n{note}\n"
     extra = shape_writing_rule(shape, position)
     return f"{text}\n{extra}\n" if extra else text
 

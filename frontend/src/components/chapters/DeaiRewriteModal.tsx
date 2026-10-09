@@ -1,4 +1,5 @@
-/** 去 AI 味重写：勾选项目提示词（可多选、可内联增删改）→ 只带提示词 + 原文重写 → 直接覆盖正文并清掉本章旧分析 */
+/** 去 AI 味重写：勾选项目提示词（可多选、可内联增删改）→ 只带提示词 + 原文重写 → 直接覆盖正文并清掉本章旧分析
+ *  模式：全文重写 / 局部重写（只改检测出 AI 味重的段落，其余一字不动）；两种都会附专有名词表防止改名 */
 import { useCallback, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Loader2, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-react';
@@ -14,16 +15,24 @@ interface DeaiRewriteModalProps {
   /** 正文任务进行中：禁用「开始重写」 */
   busy: boolean;
   onClose: () => void;
-  /** 按勾选顺序的提示词 id */
-  onConfirm: (promptIds: string[]) => void;
+  /** 按勾选顺序的提示词 id + 重写模式 */
+  onConfirm: (promptIds: string[], mode: RewriteMode) => void;
 }
 
+export type RewriteMode = 'full' | 'local';
+
 const EMPTY_FORM: DeaiPromptInput = { name: '', content: '' };
+
+const MODE_OPTIONS: { value: RewriteMode; label: string; hint: string }[] = [
+  { value: 'local', label: '局部重写（推荐）', hint: '只改检测出书面词扎堆 / 总结升华 / 超长段的段落，其余段落一字不动，最不容易改坏剧情。' },
+  { value: 'full', label: '全文重写', hint: '整章重写一遍，改动最大；适合整章都很机械的情况。' },
+];
 
 export function DeaiRewriteModal({ open, projectId, chapter, busy, onClose, onConfirm }: DeaiRewriteModalProps) {
   const [prompts, setPrompts] = useState<DeaiPrompt[]>([]);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
+  const [mode, setMode] = useState<RewriteMode>('local');
   const [editingId, setEditingId] = useState<string | 'new' | null>(null);
   const [form, setForm] = useState<DeaiPromptInput>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
@@ -208,6 +217,20 @@ export function DeaiRewriteModal({ open, projectId, chapter, busy, onClose, onCo
             </div>
           )}
 
+          <div className="space-y-1.5">
+            <p className="text-sm font-medium text-content">重写方式</p>
+            {MODE_OPTIONS.map((opt) => (
+              <label key={opt.value} className="flex cursor-pointer items-start gap-2 text-xs text-content-secondary">
+                <input type="radio" name="deai-mode" className="mt-0.5" checked={mode === opt.value} onChange={() => setMode(opt.value)} />
+                <span className="leading-5">
+                  <span className="font-medium text-content">{opt.label}</span>
+                  <span className="block text-content-tertiary">{opt.hint}</span>
+                </span>
+              </label>
+            ))}
+            <p className="text-[11px] leading-5 text-content-tertiary">两种方式都会附上本书人名 / 势力名清单，要求原样保留。</p>
+          </div>
+
           <p className="text-[11px] leading-5 text-content-tertiary">
             重写完成后<span className="font-medium text-amber-600">直接覆盖正文，不留版本、不能回滚</span>；本章已有的分析结果（记忆标注、伏笔 / 承诺、一致性等）会一并清除，需要时可重新「分析」。
           </p>
@@ -216,13 +239,13 @@ export function DeaiRewriteModal({ open, projectId, chapter, busy, onClose, onCo
         <div className="hh-modal-foot">
           <button onClick={onClose} className="hh-btn-ghost">取消</button>
           <button
-            onClick={() => onConfirm(selected)}
+            onClick={() => onConfirm(selected, mode)}
             disabled={busy || selected.length === 0 || editingId !== null}
             title={selected.length === 0 ? '先勾选至少一条提示词' : editingId !== null ? '先保存或取消正在编辑的提示词' : undefined}
             className={cn('hh-btn-primary', selected.length === 0 && 'opacity-60')}
           >
             <RefreshCw className="h-4 w-4" />
-            开始重写{selected.length > 0 ? `（${selected.length} 条提示词）` : ''}
+            {mode === 'local' ? '开始局部重写' : '开始重写'}{selected.length > 0 ? `（${selected.length} 条提示词）` : ''}
           </button>
         </div>
       </div>

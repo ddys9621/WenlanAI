@@ -5,9 +5,12 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import defer
 import json
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime
 from asyncio import Lock
+from typing import Optional
 
+from app.config import settings as app_settings
 from app.database import get_db
 from app.models.chapter import Chapter
 from app.models.chapter_outline import ChapterOutline
@@ -22,6 +25,7 @@ from app.models.deai_prompt import DeaiPrompt
 from app.models.plot_card import PlotCard
 from app.models.plot_card_chapter_outline_link import PlotCardChapterOutlineLink
 from app.schemas.chapter import (
+    ChapterBatchRequest,
     ChapterCreate,
     ChapterUpdate,
     ChapterResponse,
@@ -31,15 +35,41 @@ from app.schemas.chapter import (
 from app.schemas.regeneration import ChapterRegenerateRequest
 from app.api.ai_jobs import job_sse_response
 from app.services.ai_jobs import AIJobConflictError, ai_jobs, job_session_factory
-from app.services.ai_service import AIService
+from app.services.ai_service import AIService, last_stream_finish_reason, reset_stream_finish_reason
+from app.services import ai_flavor_metrics
 from app.services.chapter_analysis_jobs import create_analysis_task, start_chapter_analysis
-from app.services.deai_rewrite import build_rewrite_prompt
+from app.services.chapter_batch_service import (
+    CANCELLED_MESSAGE as BATCH_CANCELLED_MESSAGE,
+    KIND as BATCH_KIND,
+    BatchOptions,
+    isolated_sqlite_engine,
+    run_batch,
+)
+from app.services.chapter_context_service import (
+    build_character_context,
+    build_outline_window,
+    build_query_text,
+    hook_policy_for,
+    is_final_payoff,
+    parse_json_list,
+)
+from app.services.chapter_prompt_builder import ChapterPromptInput, build_chapter_prompt, build_continuation_prompt
+from app.services.platform_presets import default_chapter_words, platform_block
+from app.services.deai_rewrite import (
+    build_local_rewrite_prompt,
+    build_rewrite_prompt,
+    merge_paragraphs,
+    parse_local_rewrite,
+    split_paragraph_lines,
+)
 from app.services.generation_trace import begin_stage, stage_scope, trace_progress, trace_reference
 from app.services.prompt_service import prompt_service
 from app.services.plot_analyzer import PlotAnalyzer
 from app.services.chapter_consistency_service import chapter_consistency_service
 from app.services.memory_service import memory_service
 from app.services.narrative_state_service import narrative_state_service
+from app.services.narrative_tasks import render_narrative_tasks, task_promise_ids
+from app.services import arc_summary_service
 from app.logger import get_logger
 from app.api.settings import get_user_ai_service
 from app.utils.character_names import build_name_index
@@ -137,6 +167,8 @@ async def _auto_create_entities(
             "appearance": "appearance",
             "traits": "traits",
         }
+        if not is_org:
+            field_map["speech_style"] = "speech_style"
         if is_org:
             field_map.update({
                 "organization_type": "organization_type",
@@ -206,6 +238,11 @@ async def _auto_create_entities(
             if _enrich(existing, char, is_org=False):
                 enriched += 1
         else:
+            role_type = (_val(char.get("role_type")) or "minor").lower()
+            if role_type == "minor":
+                # 龙套（店小二 / 路人甲）不建档：长篇里每章都冒几个，角色表会无限膨胀；
+                # 之后若升格为配角（再次出场且抽取为 supporting+）自然会建档
+                continue
             import json as _json
             traits_raw = char.get("traits")
             traits_str = _json.dumps(traits_raw, ensure_ascii=False) if isinstance(traits_raw, list) and traits_raw else None
@@ -214,9 +251,10 @@ async def _auto_create_entities(
                 name=name,
                 gender=_val(char.get("gender")),
                 age=_val(char.get("age")),
-                role_type=_val(char.get("role_type")) or "minor",
+                role_type=role_type,
                 personality=_val(char.get("personality")),
                 appearance=_val(char.get("appearance")),
+                speech_style=_val(char.get("speech_style")),
                 background=f"第{chapter_number}章首次出场。{_val(char.get('background')) or ''}",
                 traits=traits_str,
             )
@@ -720,6 +758,12 @@ async def _purge_chapter_analysis_and_memory(db: AsyncSession, chapter_id: str) 
         await db.delete(_m)
     await narrative_state_service.clear_chapter_state(db, chapter_id)
     await chapter_consistency_service.clear_chapter_records(db, chapter_id)
+    located = (await db.execute(
+        select(Chapter.project_id, Chapter.chapter_number).where(Chapter.id == chapter_id)
+    )).first()
+    if located:
+        # 覆盖本章的单元 / 阶段 / 卷摘要已过期：删掉，等本章重新分析后自然重算
+        await arc_summary_service.invalidate_covering(db, located[0], located[1])
     return len(mem_rows)
 
 
@@ -735,45 +779,45 @@ async def _purge_chapter_vector_memory(user_id: str | None, project_id: str, cha
         logger.warning(f"⚠️ 向量记忆清理失败（不影响正文覆盖）: {e}")
 
 
+RECENT_FULL_COUNT = 2
+RECENT_SUMMARY_COUNT = 10
+RECENT_SUMMARY_MAX = 30
+RELEVANT_HISTORY_LIMIT = 8
+STORY_SO_FAR_BUDGET = 4000
+
+
 async def build_smart_chapter_context(
     db: AsyncSession,
     project_id: str,
     current_chapter_number: int,
-    user_id: str
+    user_id: str,
+    query_text: str | None = None,
 ) -> dict:
     """
-    智能构建章节生成上下文（支持海量章节场景）
-    
+    智能构建章节生成上下文（长篇版：总长基本不随章数增长）
+
     策略：
-    1. 故事骨架：每50章采样1章（标题+摘要）
-    2. 相关历史：通过chapter_summary记忆语义检索15个最相关章节
-    3. 近期概要：最近30章的简要摘要（200字/章）
-    4. 最近完整：最近3章的完整内容
-    
+    1. 前情脉络（story_skeleton 键）：层级摘要（卷 / 阶段 / 单元），每段章节取能覆盖它的最高一级
+    2. 近期概要：层级摘要尚未覆盖的章节 + 最近 RECENT_SUMMARY_COUNT 章（不含全文章节），最多 RECENT_SUMMARY_MAX 章
+    3. 相关历史：章节摘要语义检索（限定本章之前，去掉已在近期段里的章节）
+    4. 最近完整：最近 RECENT_FULL_COUNT 章全文（衔接口吻与动作）
+
     Args:
-        db: 数据库会话
-        project_id: 项目ID
-        current_chapter_number: 当前章节序号
-        user_id: 用户ID
-        
-    Returns:
-        包含各部分上下文的字典
+        query_text: 精简检索语句（标题 + 关键事件 + 出场人物）；不给则用本章章纲
     """
     context_parts = {
-        'story_skeleton': '',      # 故事骨架
+        'story_skeleton': '',      # 前情脉络（层级摘要）
         'relevant_history': '',    # 相关历史章节
         'recent_summary': '',      # 近期概要
         'recent_full': '',         # 最近完整内容
         'stats': {}                # 统计信息
     }
 
-    # 初始化变量，避免后续引用时出现 NameError
     relevant_memories = []
     recent_summaries = []
-    skeleton_chapters = []
 
     try:
-        # 1. 获取所有已完成的前置章节（只取ID和序号）
+        # 1. 前置章节（只取 ID / 序号 / 标题）
         all_chapters_result = await db.execute(
             select(Chapter.id, Chapter.chapter_number, Chapter.title)
             .where(Chapter.project_id == project_id)
@@ -790,100 +834,85 @@ async def build_smart_chapter_context(
             return context_parts
 
         logger.info(f"📚 开始构建智能上下文：共{total_previous}章前置内容")
-        # 前置章节按 id 建索引：相关记忆回填章节号 / 标题不再逐条查库；不在这里的（非前置章节）直接跳过
         chapters_by_id = {info.id: info for info in all_chapters_info}
 
-        # 各段需要的章节范围先算出来，摘要 / 全文各用一条 IN 查询批量取（原来每章一次，几十章就几十次往返）
-        skeleton_infos = [all_chapters_info[idx] for idx in range(0, total_previous, 50)] if total_previous > 50 else []
-        skeleton_chapter_ids = {info.id for info in skeleton_infos}
-        recent_summary_count = min(30, total_previous)
-        recent_for_summary = all_chapters_info[-recent_summary_count:] if total_previous > 3 else []
-        summary_targets = recent_for_summary[:-3] if len(recent_for_summary) > 3 else []  # 最后 3 章走全文
-        recent_full_chapters = all_chapters_info[-min(3, total_previous):]
+        # 2. 前情脉络：层级摘要
+        story_so_far, covered_until = await arc_summary_service.render_story_so_far(
+            db, project_id, current_chapter_number, budget_chars=STORY_SO_FAR_BUDGET,
+        )
+        if story_so_far:
+            context_parts['story_skeleton'] = "【前情脉络】\n" + story_so_far
+
+        # 3. 各段章节范围：最近 N 章全文；近期概要 = 层级摘要未覆盖的 ∪ 最近 10 章（不含全文章节）
+        recent_full_chapters = all_chapters_info[-min(RECENT_FULL_COUNT, total_previous):]
+        full_ids = {info.id for info in recent_full_chapters}
+        candidates = [info for info in all_chapters_info if info.id not in full_ids]
+        tail = candidates[-RECENT_SUMMARY_COUNT:]
+        uncovered = [info for info in candidates if info.chapter_number > covered_until]
+        tail_ids = {info.id for info in tail}
+        summary_targets = sorted(
+            {info.id: info for info in [*uncovered, *tail]}.values(), key=lambda info: info.chapter_number,
+        )[-RECENT_SUMMARY_MAX:]
+        if not tail_ids:
+            summary_targets = []
 
         summary_by_chapter: dict[str, str] = {}
-        need_summary_ids = skeleton_chapter_ids | {info.id for info in summary_targets}
-        if need_summary_ids:
+        if summary_targets:
             summary_rows = await db.execute(
                 select(StoryMemory.chapter_id, StoryMemory.content)
                 .where(StoryMemory.project_id == project_id)
                 .where(StoryMemory.memory_type == 'chapter_summary')
-                .where(StoryMemory.chapter_id.in_(need_summary_ids))
+                .where(StoryMemory.chapter_id.in_([info.id for info in summary_targets]))
             )
             for chapter_id, content in summary_rows.all():
-                summary_by_chapter.setdefault(chapter_id, content)  # 一章多条摘要时取第一条（与原 limit(1) 一致）
+                summary_by_chapter.setdefault(chapter_id, content)
 
-        # 2. 构建故事骨架（每50章采样）
-        if skeleton_infos:
-            skeleton_chapters = [
-                {'number': info.chapter_number, 'title': info.title, 'summary': summary_by_chapter.get(info.id) or "（无摘要）"}
-                for info in skeleton_infos
-            ]
-            context_parts['story_skeleton'] = "【故事骨架】\n" + "\n".join([
-                f"第{ch['number']}章《{ch['title']}》：{ch['summary']}"
-                for ch in skeleton_chapters
-            ])
-            logger.info(f"  ✅ 故事骨架：采样{len(skeleton_chapters)}章（每50章1个）")
+        # 4. 相关历史：章节摘要语义检索（限定本章之前；近期段里已有的章节去重）
+        exclude_ids = full_ids | {info.id for info in summary_targets}
+        if not query_text:
+            current_outline_data = (await db.execute(
+                select(ChapterOutline.title, ChapterOutline.summary, ChapterOutline.plot_points)
+                .join(Chapter, Chapter.chapter_outline_id == ChapterOutline.id)
+                .where(Chapter.project_id == project_id)
+                .where(Chapter.chapter_number == current_chapter_number)
+            )).first()
+            if current_outline_data:
+                title, summary, plot_points = current_outline_data
+                query_text = f"{title or ''} {summary or ''} {(plot_points or '')[:200]}".strip()
 
-        # 计算近期章节范围（最近30章 + 最近3章完整内容），这些章节不需要在语义检索中重复出现
-        recent_summary_start = max(1, current_chapter_number - 30)
-        exclude_chapter_numbers = set(range(recent_summary_start, current_chapter_number))
-
-        # 3. 语义检索相关历史章节（使用chapter_summary记忆）
-        # 获取当前章节的章纲作为查询
-        current_outline_result = await db.execute(
-            select(ChapterOutline.summary, ChapterOutline.plot_points)
-            .join(Chapter, Chapter.chapter_outline_id == ChapterOutline.id)
-            .where(Chapter.project_id == project_id)
-            .where(Chapter.chapter_number == current_chapter_number)
-        )
-        current_outline_data = current_outline_result.first()
-
-        current_outline_text = ""
-        if current_outline_data:
-            summary, plot_points = current_outline_data
-            current_outline_text = f"{summary or ''} {plot_points or ''}".strip()
-
-        if current_outline_text and total_previous > 3:
-            # 使用记忆服务进行语义检索
+        if query_text and total_previous > len(exclude_ids):
             relevant_memories = await memory_service.search_memories(
                 user_id=user_id,
                 project_id=project_id,
-                query=current_outline_text,
+                query=query_text,
                 memory_types=['chapter_summary'],
-                limit=15,  # 检索15个最相关的章节
-                min_importance=0.0  # 不过滤重要性，依赖语义相关度
+                limit=RELEVANT_HISTORY_LIMIT + len(exclude_ids) // 4,
+                min_importance=0.0,
+                chapter_range=(0, current_chapter_number - 1),
             )
-
-            if relevant_memories:
-                relevant_chapters_text = []
-                skipped_count = 0
-                for mem in relevant_memories:
-                    chapter_info = chapters_by_id.get(mem['metadata'].get('chapter_id'))
-                    # 去重：跳过已在故事骨架中的章节、近期章节（已在近期概要或完整内容中）；非前置章节不算历史
-                    if chapter_info is None or chapter_info.id in skeleton_chapter_ids or chapter_info.chapter_number in exclude_chapter_numbers:
-                        skipped_count += 1
-                        continue
-                    relevant_chapters_text.append(
-                        f"第{chapter_info.chapter_number}章《{chapter_info.title}》：{mem['content']} "
-                        f"(相关度:{mem['similarity']:.2f})"
-                    )
-
+            relevant_chapters_text = []
+            for mem in relevant_memories:
+                chapter_info = chapters_by_id.get(mem['metadata'].get('chapter_id'))
+                if chapter_info is None or chapter_info.id in exclude_ids:
+                    continue
+                relevant_chapters_text.append(f"第{chapter_info.chapter_number}章《{chapter_info.title}》：{mem['content']}")
+                if len(relevant_chapters_text) >= RELEVANT_HISTORY_LIMIT:
+                    break
+            if relevant_chapters_text:
                 context_parts['relevant_history'] = "【相关历史章节】\n" + "\n".join(relevant_chapters_text)
-                logger.info(f"  ✅ 相关历史：语义检索到{len(relevant_chapters_text)}章（去重跳过{skipped_count}章）")
+                logger.info(f"  ✅ 相关历史：语义检索到{len(relevant_chapters_text)}章")
 
-        # 4. 近期概要（最近30章，每章200字摘要；排除最后3章，它们会完整展示）
-        if summary_targets:
-            recent_summaries = [
-                f"第{info.chapter_number}章《{info.title}》：{summary_by_chapter[info.id]}"
-                for info in summary_targets
-                if summary_by_chapter.get(info.id)
-            ]
-            if recent_summaries:
-                context_parts['recent_summary'] = "【近期章节概要】\n" + "\n".join(recent_summaries)
-                logger.info(f"  ✅ 近期概要：{len(recent_summaries)}章摘要")
+        # 5. 近期概要
+        recent_summaries = [
+            f"第{info.chapter_number}章《{info.title}》：{summary_by_chapter[info.id]}"
+            for info in summary_targets
+            if summary_by_chapter.get(info.id)
+        ]
+        if recent_summaries:
+            context_parts['recent_summary'] = "【近期章节概要】\n" + "\n".join(recent_summaries)
+            logger.info(f"  ✅ 近期概要：{len(recent_summaries)}章摘要")
 
-        # 5. 最近完整内容（最近3章，一条 IN 查询取全文，按章节顺序拼）
+        # 6. 最近完整内容（一条 IN 查询取全文，按章节顺序拼）
         content_rows = await db.execute(
             select(Chapter.id, Chapter.content).where(Chapter.id.in_([info.id for info in recent_full_chapters]))
         )
@@ -893,29 +922,19 @@ async def build_smart_chapter_context(
             for info in recent_full_chapters
             if content_by_id.get(info.id)
         ]
-
         context_parts['recent_full'] = "【最近章节完整内容】\n" + "\n\n".join(recent_full_texts)
-        logger.info(f"  ✅ 最近完整：{len(recent_full_texts)}章全文")
 
-        # 6. 统计信息
         context_parts['stats'] = {
             'total_previous': total_previous,
-            'skeleton_samples': len(skeleton_chapters),
-            'relevant_history': len(relevant_memories) if total_previous > 3 else 0,
+            'skeleton_samples': 0,
+            'arc_covered_until': covered_until,
+            'relevant_history': len(relevant_memories),
             'recent_summaries': len(recent_summaries),
             'recent_full': len(recent_full_texts)
         }
-
-        # 计算总长度
-        total_length = sum([
-            len(context_parts['story_skeleton']),
-            len(context_parts['relevant_history']),
-            len(context_parts['recent_summary']),
-            len(context_parts['recent_full'])
-        ])
+        total_length = sum(len(context_parts[k]) for k in ('story_skeleton', 'relevant_history', 'recent_summary', 'recent_full'))
         context_parts['stats']['total_length'] = total_length
-
-        logger.info(f"📊 智能上下文构建完成：总长度 {total_length} 字符")
+        logger.info(f"📊 智能上下文构建完成：总长度 {total_length} 字符（层级摘要覆盖到第 {covered_until} 章）")
 
     except Exception as e:
         logger.error(f"❌ 构建智能上下文失败: {str(e)}", exc_info=True)
@@ -968,12 +987,40 @@ async def check_can_generate(
     }
 
 
+ANALYSIS_KNOWN_CHARACTER_LIMIT = 60
+_ROLE_ORDER = {"protagonist": 0, "antagonist": 1, "major": 2, "supporting": 3}
+
+
+async def _load_analysis_inputs(db: AsyncSession, project_id: str, chapter: Chapter) -> dict:
+    """章节分析的额外输入：未回收承诺（本章计划处理的排前面）、本章计划叙事任务、已登记角色正式名。"""
+    planned_raw = None
+    if chapter.chapter_outline_id:
+        planned_raw = (await db.execute(
+            select(ChapterOutline.narrative_tasks).where(ChapterOutline.id == chapter.chapter_outline_id)
+        )).scalar_one_or_none()
+    open_promises = await narrative_state_service._get_active_promises(
+        db, project_id, chapter.chapter_number,
+        focus_ids=task_promise_ids(planned_raw), limit=PlotAnalyzer.OPEN_PROMISE_LIMIT,
+    )
+    rows = (await db.execute(
+        select(Character.name, Character.role_type)
+        .where(Character.project_id == project_id, Character.is_organization.isnot(True))
+    )).all()
+    names = [name for name, _role in sorted(rows, key=lambda r: _ROLE_ORDER.get((r[1] or "").lower(), 9)) if name]
+    return {
+        "open_promises": open_promises,
+        "planned_tasks": render_narrative_tasks(planned_raw, chapter.chapter_number, for_analysis=True),
+        "known_characters": names[:ANALYSIS_KNOWN_CHARACTER_LIMIT],
+    }
+
+
 async def analyze_chapter_background(
     chapter_id: str,
     user_id: str,
     project_id: str,
     task_id: str,
-    ai_service: AIService
+    ai_service: AIService,
+    engine=None,
 ):
     """
     后台异步分析章节（支持并发，使用锁保护数据库写入）
@@ -995,7 +1042,8 @@ async def analyze_chapter_background(
         from app.database import get_engine
         from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
         
-        engine = await get_engine(user_id)
+        # engine 由服务端批量的流水线模式传入独立连接（StaticPool 共用连接时并发会话会互相回滚）
+        engine = engine or await get_engine(user_id)
         AsyncSessionLocal = async_sessionmaker(
             engine,
             class_=AsyncSession,
@@ -1041,13 +1089,16 @@ async def analyze_chapter_background(
         trace_progress("模型分析章节中…", 20)
         
         # 3. 并行执行：章节分析 + 实体提取
+        # 分析带上「未回收承诺清单 + 本章计划叙事任务 + 已登记角色名」：回收必须用编号指认，不再按标题猜
+        analysis_inputs = await _load_analysis_inputs(db_session, project_id, chapter)
         analyzer = PlotAnalyzer(ai_service)
         async with stage_scope("analyze", "模型分析章节 + 提取实体") as st:
             analysis_task_coro = analyzer.analyze_chapter(
                 chapter_number=chapter.chapter_number,
                 title=chapter.title,
                 content=chapter.content,
-                word_count=chapter.word_count or count_words(chapter.content)
+                word_count=chapter.word_count or count_words(chapter.content),
+                **analysis_inputs,
             )
             entity_task_coro = analyzer.extract_entities(
                 chapter_number=chapter.chapter_number,
@@ -1243,8 +1294,11 @@ async def analyze_chapter_background(
             st.note(memories=len(memories))
         trace_progress("记忆已结算，写入向量库…", 90)
         
-        # 批量添加到向量数据库
+        # 批量添加到向量数据库：先清本章旧向量（Chroma 的 add 遇到已存在 id 会静默忽略，重新分析会留下旧摘要）
         async with stage_scope("vector", "写入向量库") as st:
+            await memory_service.delete_chapter_memories(
+                user_id=user_id, project_id=project_id, chapter_id=chapter_id
+            )
             if memory_records:
                 added_count = await memory_service.batch_add_memories(
                     user_id=user_id,
@@ -1253,6 +1307,19 @@ async def analyze_chapter_background(
                 )
                 logger.info(f"✅ 添加{added_count}条记忆到向量库")
             st.note(records=len(memory_records))
+
+        # 层级摘要：本章所在单元 / 阶段 / 卷写齐了就汇总（卷末同时复盘并回写下一节点）；失败不影响分析结果
+        async with stage_scope("arc_rollup", "汇总剧情单元 / 卷摘要") as st:
+            try:
+                async with write_lock:
+                    rollup_calls = await arc_summary_service.maybe_rollup(
+                        db_session, project_id, chapter.chapter_number, ai_service
+                    )
+                st.note(llm_calls=rollup_calls)
+            except Exception as rollup_error:  # noqa: BLE001
+                await db_session.rollback()
+                logger.warning(f"⚠️ 层级摘要汇总失败（不影响本章分析）: {rollup_error}")
+                st.note(error=str(rollup_error)[:200])
         
         # 最终更新任务状态（写操作，需要锁）- 增加重试机制
         update_success = False
@@ -1345,6 +1412,474 @@ async def chapter_generation_precheck(
     }
 
 
+@dataclass
+class ChapterGenerateOptions:
+    """一次正文生成的参数（单章端点与服务端批量共用）。target_word_count=None → 按章纲 / 平台默认。"""
+    style_id: Optional[int] = None
+    target_word_count: Optional[int] = None
+    enable_mcp: bool = True
+    selected_plugins: Optional[list[str]] = None
+    auto_analyze: bool = False
+    pack_ids: Optional[list[str]] = None
+    dimensions: Optional[list[str]] = None
+    strength: Optional[str] = None
+
+    @classmethod
+    def from_request(cls, req: ChapterGenerateRequest) -> "ChapterGenerateOptions":
+        explicit_words = "target_word_count" in getattr(req, "model_fields_set", set())
+        return cls(
+            style_id=req.style_id,
+            target_word_count=req.target_word_count if explicit_words else None,
+            enable_mcp=getattr(req, "enable_mcp", True),
+            selected_plugins=getattr(req, "selected_plugins", None),
+            auto_analyze=getattr(req, "auto_analyze", False),
+            pack_ids=req.pack_ids,
+            dimensions=req.dimensions,
+            strength=req.strength,
+        )
+
+
+MAX_CONTINUATIONS = 2
+CARD_TYPE_LABELS = {'plot': '剧情', 'character': '角色', 'scene': '场景', 'conflict': '冲突', 'event': '事件',
+                    'dialogue': '对话', 'inner': '内心'}
+USAGE_TYPE_LABELS = {'reference': '参考', 'used': '已使用', 'planned': '计划使用'}
+
+
+def _outline_task_text(chapter_outline: ChapterOutline, target_word_count: int) -> str:
+    key_events = parse_json_list(chapter_outline.key_events)
+    characters_involved = parse_json_list(chapter_outline.characters_involved)
+    lines = [f"【章节标题】{chapter_outline.title}"]
+    if chapter_outline.scene:
+        lines.append(f"【场景】{chapter_outline.scene}")
+    if chapter_outline.pov:
+        lines.append(f"【视角人物】{chapter_outline.pov}")
+    if chapter_outline.summary:
+        lines.append(f"【章节摘要】{chapter_outline.summary}")
+    lines.append(f"【剧情要点】{chapter_outline.plot_points or '无'}")
+    if key_events:
+        lines.append(f"【关键事件】{'、'.join(key_events)}（最后一条是章末落点）")
+    if characters_involved:
+        lines.append(f"【涉及角色】{'、'.join(characters_involved)}")
+    lines.append(f"【目标字数】{target_word_count}字")
+    return "\n".join(lines)
+
+
+async def run_chapter_generation(job, *, chapter_id: str, user_id: str, ai_service: AIService,
+                                 options: ChapterGenerateOptions) -> dict:
+    """生成一章正文：上下文装配（过预算器）→ 流式创作（截断自动续写）→ 写库 → 可选排队分析。
+
+    单章端点与服务端批量（chapter_batch_service）共用；事件写进 job 日志，可回放。
+    """
+    current_user_id = user_id
+    async with job_session_factory(current_user_id)() as db_session:
+        st_ctx = begin_stage("context", "加载章纲 / 世界规则 / 角色 / 剧情卡")
+        current_chapter = (await db_session.execute(select(Chapter).where(Chapter.id == chapter_id))).scalar_one_or_none()
+        if not current_chapter:
+            raise ValueError('章节不存在')
+        project = (await db_session.execute(
+            select(Project).where(Project.id == current_chapter.project_id)
+        )).scalar_one_or_none()
+        if not project:
+            raise ValueError('项目不存在')
+        if not current_chapter.chapter_outline_id:
+            raise ValueError('章节未关联章纲，无法生成。请先在章纲管理中创建章纲。')
+        chapter_outline = (await db_session.execute(
+            select(ChapterOutline).where(ChapterOutline.id == current_chapter.chapter_outline_id)
+        )).scalar_one_or_none()
+        if not chapter_outline:
+            raise ValueError('关联的章纲不存在')
+
+        target_word_count = (
+            options.target_word_count
+            or chapter_outline.target_word_count
+            or default_chapter_words(project.platform_preset)
+        )
+        chapter_number = current_chapter.chapter_number
+
+        # 世界规则：项目规则 + 语义检索相关条目
+        outline_text = chapter_outline.summary or chapter_outline.plot_points or ''
+        query_text = f"{project.theme or ''} {project.genre or ''} {outline_text[:500]}"
+        from app.services.world_rule_service import world_rule_service
+        enhanced_world_rules = await world_rule_service.generate_rules_summary_with_search(
+            db_session, project.id, query_text, limit=5
+        )
+        final_world_rules = project.world_rules or '未设定'
+        if enhanced_world_rules:
+            final_world_rules = f"{final_world_rules}\n\n{enhanced_world_rules}"
+
+        current_outline_content = _outline_task_text(chapter_outline, target_word_count)
+        logger.info(f"📖 使用章纲生成: 第{chapter_outline.chapter_number}章《{chapter_outline.title}》")
+
+        # 章纲关联的剧情卡
+        linked_plot_cards_data = (await db_session.execute(
+            select(PlotCard, PlotCardChapterOutlineLink.usage_type, PlotCardChapterOutlineLink.usage_notes)
+            .join(PlotCardChapterOutlineLink, PlotCard.id == PlotCardChapterOutlineLink.plot_card_id)
+            .where(PlotCardChapterOutlineLink.chapter_outline_id == chapter_outline.id)
+            .order_by(PlotCardChapterOutlineLink.created_at)
+        )).all()
+        cards_text = []
+        for card, usage_type, usage_notes in linked_plot_cards_data[:10]:
+            content_preview = (card.content or "无内容")[:200] + ("..." if len(card.content or "") > 200 else "")
+            card_text = (
+                f"【{CARD_TYPE_LABELS.get(card.card_type, '其他')}卡片】{card.title}"
+                f"（{USAGE_TYPE_LABELS.get(usage_type or 'reference', '参考')}）\n{content_preview}"
+            )
+            if usage_notes:
+                card_text += f"\n使用说明：{usage_notes}"
+            cards_text.append(card_text)
+        linked_cards_context = "\n\n".join(cards_text)
+        if linked_plot_cards_data:
+            trace_reference("plot_cards", "关联剧情卡", [
+                {"title": card.title, "detail": usage_type or "reference"} for card, usage_type, _notes in linked_plot_cards_data[:10]
+            ])
+
+        # 写作风格（进 system 提示词）
+        style_content = ""
+        if options.style_id:
+            style = (await db_session.execute(
+                select(WritingStyle).where(WritingStyle.id == options.style_id)
+            )).scalar_one_or_none()
+            if style and (style.project_id is None or style.project_id == current_chapter.project_id):
+                style_content = style.prompt_content or ""
+                logger.info(f"使用指定风格: {style.name}")
+            elif style:
+                logger.warning(f"风格 {options.style_id} 不属于当前项目，无法使用")
+
+        characters = list((await db_session.execute(
+            select(Character).where(Character.project_id == current_chapter.project_id)
+        )).scalars().all())
+        st_ctx.done(characters=len(characters), plot_cards=len(linked_plot_cards_data), style=bool(style_content))
+
+        st_smart = begin_stage("smart_context", "组装前情脉络 / 近期剧情 / 上一章正文")
+        char_ctx = await build_character_context(db_session, project.id, chapter_number, chapter_outline, characters)
+        retrieval_query = build_query_text(chapter_outline, char_ctx.involved or char_ctx.names)
+        smart_context = await build_smart_chapter_context(
+            db=db_session,
+            project_id=project.id,
+            current_chapter_number=chapter_number,
+            user_id=current_user_id,
+            query_text=retrieval_query,
+        )
+        stats = smart_context.get('stats') or {}
+        st_smart.done(previous_chapters=stats.get('total_previous', 0), context_chars=stats.get('total_length', 0),
+                      arc_covered_until=stats.get('arc_covered_until', 0))
+
+        st_mem = begin_stage("memory", "角色状态卡 / 叙事账本 / 向量记忆")
+        planned_tasks_raw = getattr(chapter_outline, "narrative_tasks", None)
+        memory_context = await memory_service.build_context_for_generation(
+            user_id=current_user_id,
+            project_id=project.id,
+            current_chapter=chapter_number,
+            chapter_outline=current_outline_content,
+            character_names=char_ctx.names,
+            query_text=retrieval_query,
+        )
+        state_context = await narrative_state_service.build_generation_context(
+            db=db_session,
+            project_id=project.id,
+            current_chapter=chapter_number,
+            pov_character_name=char_ctx.pov_name,
+            character_names=char_ctx.names,
+            focus_promise_ids=task_promise_ids(planned_tasks_raw),
+        )
+        ledger_blocks = {**{k: v for k, v in (memory_context or {}).items() if isinstance(v, str)},
+                         **{k: v for k, v in (state_context or {}).items() if isinstance(v, str)}}
+        st_mem.done(characters=len(char_ctx.selected), ledger_blocks=len([v for v in ledger_blocks.values() if v]))
+        trace_reference("memory", "前情与记忆", [
+            {"title": "层级摘要覆盖", "detail": f"至第 {stats.get('arc_covered_until', 0)} 章"},
+            {"title": "近期章节概要", "detail": f"{stats.get('recent_summaries', 0)} 章"},
+            {"title": "最近完整内容", "detail": f"{stats.get('recent_full', 0)} 章"},
+            {"title": "出场角色状态卡", "detail": f"{len(char_ctx.selected)} 人"},
+        ])
+        job.progress('开始AI创作...', 25)
+
+        # MCP 参考资料（剧情线标准模式）
+        mcp_reference_materials = ""
+        _has_mcp_plugins = False
+        if options.enable_mcp and current_user_id:
+            from app.services.mcp_tool_service import mcp_tool_service
+            _available_tools = await mcp_tool_service.get_user_enabled_tools(
+                user_id=current_user_id,
+                db_session=db_session,
+                plugin_names=options.selected_plugins,
+            )
+            _has_mcp_plugins = len(_available_tools) > 0
+            if not _has_mcp_plugins:
+                logger.info("⏭️ 用户没有启用的MCP插件，跳过MCP工具收集")
+
+        if options.enable_mcp and current_user_id and _has_mcp_plugins:
+            st_mcp = begin_stage("mcp", "MCP 规划收集参考资料")
+            job.progress('🔍 尝试使用MCP工具收集参考资料...', 28)
+            from app.services.plot_generation_service import PlotGenerationService
+            plot_service = PlotGenerationService(ai_service)
+            planning_result = await plot_service._plan_with_mcp(
+                context_type="chapter_content",
+                project_data={'title': project.title, 'genre': project.genre or '未知', 'theme': project.theme or '未知'},
+                outline_content=None,
+                chapter_outline=current_outline_content,
+                user_id=current_user_id,
+                db_session=db_session,
+                selected_plugins=options.selected_plugins,
+                provider=None,
+                model=None
+            )
+            mcp_reference_materials = planning_result.get("reference_materials", "")
+            tools_used = planning_result.get("tools_used", [])
+            job.progress(f'✅ MCP工具调用成功（{planning_result.get("tool_calls_made", 0)}次）', 32)
+            st_mcp.done(tools=len(tools_used), chars=len(mcp_reference_materials))
+
+        # 拆书参考注入：user 段进参考资料，style 段进 system
+        st_ref = begin_stage("reference_pack", "组装拆书参考包")
+        try:
+            from app.services.reference_pack_injector import ReferencePackInjector
+            _anchor = f"{current_chapter.title or ''} {current_outline_content[:300]}".strip() or "章节正文"
+            _ref_block = await ReferencePackInjector().build_reference_block(
+                db_session, project.id,
+                scene="chapter_content",
+                pack_ids=options.pack_ids,
+                dimensions=options.dimensions,
+                strength=options.strength,
+                anchor_query=_anchor,
+            )
+            if _ref_block.user_segment:
+                mcp_reference_materials = f"{mcp_reference_materials}\n\n{_ref_block.user_segment}".strip()
+            if _ref_block.system_segment:
+                style_content = f"{style_content}\n\n{_ref_block.system_segment}".strip()
+            if not _ref_block.is_empty:
+                _dims_label = ','.join(_ref_block.used_dimensions)
+                job.progress(f'📚 已注入拆书参考包（{_dims_label}）', 33)
+                st_ref.done(packs=len(_ref_block.used_packs), dimensions=_dims_label, strength=_ref_block.used_strength)
+            else:
+                st_ref.skip("参考包无可用内容")
+        except ValueError:
+            st_ref.skip("项目未挂载参考包")
+        except Exception as _e:  # pragma: no cover - 防御性兜底
+            logger.warning(f"[R5-章节正文] 拆书参考注入失败（已跳过）: {_e}")
+            st_ref.skip("注入失败，已跳过")
+
+        # 桥段位置约束 → 本章任务里的「结构要求」（不再塞进参考资料）
+        structure_requirements = ""
+        st_bridge = None
+        _bridge_ctx = None
+        try:
+            from app.services.reference_pack import build_v4_bridge_constraint_only, fetch_bridge_context
+            if getattr(chapter_outline, "bridge_id", None):
+                st_bridge = begin_stage("bridge_constraint", "桥段位置约束")
+                _bridge_ctx = await fetch_bridge_context(db_session, chapter_outline)
+                if _bridge_ctx:
+                    structure_requirements = await build_v4_bridge_constraint_only(
+                        db_session, project.id,
+                        scene="chapter_content",
+                        model_name=getattr(ai_service, "default_model", None) or "deepseek-v3",
+                        bridge_position=chapter_outline.bridge_position,
+                        bridge_context=_bridge_ctx,
+                        chapter_outline_id=chapter_outline.id,
+                        target_word_count=target_word_count,
+                    )
+                st_bridge.done(position=chapter_outline.bridge_position, injected=bool(structure_requirements))
+        except Exception as _be:  # pragma: no cover
+            logger.warning(f"[V4.1 K2] 桥段约束注入失败（已跳过）: {_be}")
+            if st_bridge is not None:
+                st_bridge.skip("注入失败，已跳过")
+
+        st_prompt = begin_stage("prompt", "上下文预算 / 组装提示词")
+        prompt = build_chapter_prompt(ChapterPromptInput(
+            title=project.title,
+            theme=project.theme or '',
+            genre=project.genre or '',
+            narrative_perspective=project.narrative_perspective or '第三人称',
+            time_period=project.world_time_period or '未设定',
+            location=project.world_location or '未设定',
+            atmosphere=project.world_atmosphere or '未设定',
+            world_rules=final_world_rules,
+            chapter_number=chapter_number,
+            chapter_title=current_chapter.title,
+            chapter_outline_text=current_outline_content,
+            outline_window=await build_outline_window(db_session, project.id, chapter_outline),
+            linked_cards=linked_cards_context,
+            narrative_tasks=render_narrative_tasks(planned_tasks_raw, chapter_number),
+            structure_requirements=structure_requirements,
+            hook_policy=hook_policy_for(chapter_outline.bridge_position, project.c3_hook_style,
+                                        final_payoff=is_final_payoff(_bridge_ctx)),
+            story_so_far=smart_context.get('story_skeleton', ''),
+            recent_summaries=smart_context.get('recent_summary', ''),
+            relevant_history=smart_context.get('relevant_history', ''),
+            recent_full=smart_context.get('recent_full', ''),
+            character_cards=char_ctx.cards_text,
+            absent_characters=char_ctx.absent_text,
+            organizations=char_ctx.organizations_text,
+            story_time=char_ctx.story_time_text,
+            ledger_blocks=ledger_blocks,
+            references=mcp_reference_materials,
+            style_content=style_content,
+            platform_block=platform_block(project.platform_preset),
+            generation_prompt=project.generation_prompt or '',
+            target_word_count=target_word_count,
+            word_soft_range=app_settings.chapter_word_soft_range,
+            budget_chars=app_settings.chapter_context_budget_chars,
+        ))
+        prompt_chars = len(prompt.system) + len(prompt.user)
+        st_prompt.done(prompt_chars=prompt_chars, trimmed=[k for k, v in prompt.report.items() if v.get("trimmed")])
+        trace_reference("context_budget", "上下文预算", [
+            {"title": key, "detail": f"{info['chars']} 字{'（已裁剪）' if info['trimmed'] else ''}"}
+            for key, info in prompt.report.items()
+        ], chars=prompt_chars)
+        logger.info(f"🧮 正文提示词：system {len(prompt.system)} 字 + user {len(prompt.user)} 字；裁剪 {prompt.report}")
+
+        max_tokens = getattr(ai_service, "default_max_tokens", None)
+        if isinstance(max_tokens, int) and 0 < max_tokens < int(target_word_count * 1.2):
+            job.progress(f'⚠️ 当前 Max Tokens（{max_tokens}）可能写不完 {target_word_count} 字，被截断时会自动续写；'
+                         f'建议在设置中调大', 34)
+        job.progress('🎨 AI开始创作章节内容...', 35)
+
+        # 流式生成（content 事件逐块进任务日志：重连即可重建全文；进度每累计 ≥200 字发一次）
+        st_llm = begin_stage("llm", "模型创作正文")
+        full_content = ""
+        last_progress_at = 0
+
+        async def _stream(user_prompt: str) -> Optional[str]:
+            nonlocal full_content, last_progress_at
+            reset_stream_finish_reason()
+            async for chunk in ai_service.generate_text_stream(
+                prompt=user_prompt, system_prompt=prompt.system, creative=True,
+            ):
+                full_content += chunk
+                job.publish({'type': 'content', 'content': chunk})
+                if len(full_content) - last_progress_at >= 200:
+                    last_progress_at = len(full_content)
+                    generation_progress = min(35 + (len(full_content) / target_word_count) * 60, 95)
+                    job.publish({'type': 'progress', 'message': f'🎨 AI 创作中… 已写出 {len(full_content)} 字',
+                                 'progress': int(generation_progress), 'status': 'processing',
+                                 'word_count': len(full_content)})
+                await asyncio.sleep(0)
+            return last_stream_finish_reason()
+
+        finish_reason = await _stream(prompt.user)
+        continuations = 0
+        while finish_reason == "length" and continuations < MAX_CONTINUATIONS:
+            continuations += 1
+            job.progress(f'✂️ 正文被 Max Tokens 截断，自动续写（第 {continuations} 次）…',
+                         int(min(35 + (len(full_content) / target_word_count) * 60, 95)))
+            finish_reason = await _stream(
+                build_continuation_prompt(prompt, full_content, target_word_count, chapter_number)
+            )
+        if finish_reason == "length":
+            raise ValueError(
+                f"正文连续 {MAX_CONTINUATIONS + 1} 次被 Max Tokens 截断，本章未保存。"
+                f"请在「设置」中调大 Max Tokens（建议 ≥ 目标字数 × 2）后重试"
+            )
+        st_llm.done(chars=len(full_content), continuations=continuations)
+        st_persist = begin_stage("persist", "写入正文 / 生成历史")
+
+        old_word_count = current_chapter.word_count or 0
+        current_chapter.content = full_content
+        new_word_count = count_words(full_content)
+        current_chapter.word_count = new_word_count
+        current_chapter.status = "completed"
+        project.current_words = (project.current_words or 0) - old_word_count + new_word_count
+        db_session.add(GenerationHistory(
+            project_id=current_chapter.project_id,
+            chapter_id=current_chapter.id,
+            prompt=f"创作章节: 第{chapter_number}章 {current_chapter.title}",
+            generated_content=full_content[:500] if len(full_content) > 500 else full_content,
+            model="default"
+        ))
+        await db_session.commit()
+        await db_session.refresh(current_chapter)
+
+        logger.info(f"成功创作章节 {chapter_id}，共 {new_word_count} 字")
+        job.publish({'type': 'progress', 'message': '✅ 章节创作完成', 'progress': 95, 'status': 'processing', 'word_count': new_word_count})
+        quality = ai_flavor_metrics.analyze_text(
+            full_content,
+            previous_text=(smart_context.get('recent_full') or '')[-4000:],
+            target_word_count=target_word_count,
+        )
+        st_persist.done(word_count=new_word_count, ai_flavor=quality["score"])
+        result = {'word_count': new_word_count, 'analysis_task_id': None, 'analysis_job_id': None,
+                  'continuations': continuations, 'quality': quality}
+
+        # 单章生成：不自动分析（用户可先改正文再分析）；批量 / auto_analyze：自动排队分析
+        if not options.auto_analyze:
+            return result
+
+        st_ana = begin_stage("analysis", "排队章节分析")
+        task_id = await create_analysis_task(db_session, chapter_id=chapter_id, user_id=current_user_id, project_id=project.id)
+        logger.info(f"📋 已创建分析任务: {task_id}")
+        result['analysis_task_id'] = task_id
+        try:
+            analysis_job = await start_chapter_analysis(
+                chapter_id=chapter_id, chapter_number=chapter_number, chapter_title=current_chapter.title,
+                user_id=current_user_id, project_id=project.id, task_id=task_id, ai_service=ai_service,
+            )
+            result['analysis_job_id'] = analysis_job.id
+            st_ana.done(task_id=task_id)
+        except AIJobConflictError as conflict:
+            logger.warning(f"⚠️ 章节分析任务未启动（已有同章分析在跑）: {conflict}")
+            st_ana.skip("同章分析任务已在运行")
+        return result
+
+
+@router.post("/project/{project_id}/batch-write-stream", summary="服务端批量生成章节（后台任务 + SSE，可关浏览器）")
+async def batch_generate_chapters(
+    project_id: str,
+    request: Request,
+    batch_request: ChapterBatchRequest,
+    db: AsyncSession = Depends(get_db),
+    user_ai_service: AIService = Depends(get_user_ai_service),
+):
+    """逐章：生成（失败重试）→ 质检（AI 味 / 字数，必要时重写一次）→ 分析 → 一致性闸门；缺章纲时自动滚动规划。
+
+    与单章生成共用互斥键（同一项目同时只跑一个正文任务）；已有正文的章节跳过，中断后同范围重新发起即续跑。
+    """
+    user_id = getattr(request.state, "user_id", None)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="未登录")
+    await verify_project_access(project_id, user_id, db)
+    if batch_request.to_chapter < batch_request.from_chapter:
+        raise HTTPException(status_code=400, detail="结束章号不能小于起始章号")
+    options = BatchOptions(**batch_request.model_dump())
+
+    async def runner(job):
+        extra: dict = {}
+        isolated = None
+        if options.pipeline:
+            # 独立连接指向任务会话实际用的库（而不是配置里的地址）：拿不到（内存库等）就退回顺序模式
+            async with job_session_factory(user_id)() as probe:
+                url = probe.bind.url.render_as_string(hide_password=False)
+            isolated = isolated_sqlite_engine(url)
+            options.pipeline = isolated is not None
+            job.meta["pipeline"] = options.pipeline
+        if isolated is not None:
+            from sqlalchemy.ext.asyncio import async_sessionmaker
+
+            extra = {
+                "analysis_session_factory": async_sessionmaker(isolated, class_=AsyncSession, expire_on_commit=False),
+                "analyze_kwargs": {"engine": isolated},
+            }
+        try:
+            return await run_batch(job, project_id=project_id, user_id=user_id, ai_service=user_ai_service,
+                                   options=options, session_factory=job_session_factory(user_id), **extra)
+        finally:
+            if isolated is not None:
+                await isolated.dispose()
+
+    try:
+        job = await ai_jobs.start(
+            kind=BATCH_KIND,
+            title=f"批量生成第 {batch_request.from_chapter}-{batch_request.to_chapter} 章",
+            user_id=user_id,
+            project_id=project_id,
+            scope=f"chapter_write:{project_id}",
+            runner=runner,
+            cancel_message=BATCH_CANCELLED_MESSAGE,
+            meta={"from_chapter": batch_request.from_chapter, "to_chapter": batch_request.to_chapter,
+                  "pipeline": options.pipeline},  # 运行时拿不到独立连接会改成 False
+        )
+    except AIJobConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return job_sse_response(job)
+
+
 @router.post("/{chapter_id}/generate-stream", summary="AI创作章节内容（流式）")
 async def generate_chapter_content_stream(
     chapter_id: str,
@@ -1353,577 +1888,31 @@ async def generate_chapter_content_stream(
     user_ai_service: AIService = Depends(get_user_ai_service)
 ):
     """
-    根据大纲、前置章节内容和项目信息AI创作章节完整内容（流式返回）
+    根据章纲、前情（层级摘要）、本章相关角色状态与叙事账本创作章节正文（流式返回）
     要求：必须按顺序生成，确保前置章节都已完成
-    
+
     请求体参数：
-    - style_id: 可选，指定使用的写作风格ID。不提供则不使用任何风格
-    - target_word_count: 可选，目标字数，默认3000字，范围500-10000字
+    - style_id: 可选，写作风格ID
+    - target_word_count: 可选，目标字数；不传则用章纲 / 平台预设的字数
     - enable_mcp: 可选，是否启用MCP工具增强，默认True
-    
-    注意：此函数不使用依赖注入的db，而是在生成器内部创建独立的数据库会话
-    以避免流式响应期间的连接泄漏问题
+    - auto_analyze: 生成后是否自动排队分析
     """
-    style_id = generate_request.style_id
-    target_word_count = generate_request.target_word_count or 3000
-    enable_mcp = generate_request.enable_mcp if hasattr(generate_request, 'enable_mcp') else True
-    selected_plugins = generate_request.selected_plugins if hasattr(generate_request, 'selected_plugins') else None
-    # auto_analyze：批量生成时前端传 True → 生成后自动排队分析（累积记忆 + 支撑一致性闸门）；
-    # 单章生成默认 False → 不自动分析，由用户手动触发（可先改正文再分析）
-    auto_analyze = getattr(generate_request, 'auto_analyze', False)
-    # 预先验证章节存在性（使用临时会话）
     async for temp_db in get_db(request):
-        result = await temp_db.execute(
-            select(Chapter).where(Chapter.id == chapter_id)
-        )
-        chapter = result.scalar_one_or_none()
+        chapter = (await temp_db.execute(select(Chapter).where(Chapter.id == chapter_id))).scalar_one_or_none()
         if not chapter:
             raise HTTPException(status_code=404, detail="章节不存在")
-        
-        # 检查前置条件
-        can_generate, error_msg, previous_chapters = await check_prerequisites(temp_db, chapter)
+        can_generate, error_msg, _previous = await check_prerequisites(temp_db, chapter)
         if not can_generate:
             raise HTTPException(status_code=400, detail=error_msg)
         break
-    
+
     user_id = getattr(request.state, "user_id", "system")
+    options = ChapterGenerateOptions.from_request(generate_request)
 
     async def runner(job):
-        """后台任务体：独立会话 → 上下文 / MCP / 参考包 → 流式创作 → 写库 → 排队分析。事件进任务日志，可回放。"""
-        current_user_id = user_id
-        async with job_session_factory(current_user_id)() as db_session:
-            st_ctx = begin_stage("context", "加载章纲 / 世界规则 / 角色 / 剧情卡")
-            # 重新获取章节信息
-            chapter_result = await db_session.execute(
-                select(Chapter).where(Chapter.id == chapter_id)
-            )
-            current_chapter = chapter_result.scalar_one_or_none()
-            if not current_chapter:
-                raise ValueError('章节不存在')
-        
-            # 获取项目信息
-            project_result = await db_session.execute(
-                select(Project).where(Project.id == current_chapter.project_id)
-            )
-            project = project_result.scalar_one_or_none()
-            if not project:
-                raise ValueError('项目不存在')
+        return await run_chapter_generation(job, chapter_id=chapter_id, user_id=user_id,
+                                            ai_service=user_ai_service, options=options)
 
-            # 检查章节是否关联章纲
-            if not current_chapter.chapter_outline_id:
-                raise ValueError('章节未关联章纲，无法生成。请先在章纲管理中创建章纲。')
-
-            # 获取当前章纲
-            chapter_outline_result = await db_session.execute(
-                select(ChapterOutline).where(ChapterOutline.id == current_chapter.chapter_outline_id)
-            )
-            chapter_outline = chapter_outline_result.scalar_one_or_none()
-
-            if not chapter_outline:
-                raise ValueError('关联的章纲不存在')
-
-            # 构建查询文本（用于智能检索世界规则）
-            outline_text = chapter_outline.summary or chapter_outline.plot_points or ''
-            query_text = f"{project.theme or ''} {project.genre or ''} {outline_text[:500]}"
-
-            # 增强世界规则（使用语义检索）
-            from app.services.world_rule_service import world_rule_service
-            enhanced_world_rules = await world_rule_service.generate_rules_summary_with_search(
-                db_session, project.id, query_text, limit=5
-            )
-            final_world_rules = project.world_rules or '未设定'
-            if enhanced_world_rules:
-                final_world_rules = f"{final_world_rules}\n\n{enhanced_world_rules}"
-            
-            # 获取所有章纲用于上下文
-            all_chapter_outlines_result = await db_session.execute(
-                select(ChapterOutline)
-                .where(ChapterOutline.project_id == current_chapter.project_id)
-                .order_by(ChapterOutline.chapter_number)
-            )
-            all_chapter_outlines = all_chapter_outlines_result.scalars().all()
-            
-            # 构建章纲上下文
-            outlines_context = "\n".join([
-                f"第{co.chapter_number}章 {co.title}:\n摘要: {co.summary or ''}\n剧情要点: {co.plot_points or ''}"
-                for co in all_chapter_outlines
-            ])
-            
-            # 当前章节的详细规划
-            try:
-                key_events = json.loads(chapter_outline.key_events or '[]')
-                characters_involved = json.loads(chapter_outline.characters_involved or '[]')
-            except json.JSONDecodeError:
-                key_events = []
-                characters_involved = []
-            
-            current_outline_content = f"""
-【章节标题】{chapter_outline.title}
-
-【章节摘要】
-{chapter_outline.summary or '无'}
-
-【剧情要点】
-{chapter_outline.plot_points or '无'}
-
-【关键事件】
-{', '.join(key_events) if key_events else '无'}
-
-【涉及角色】
-{', '.join(characters_involved) if characters_involved else '无'}
-
-【目标字数】
-{chapter_outline.target_word_count or target_word_count}字
-"""
-            
-            logger.info(f"📖 使用章纲生成: 第{chapter_outline.chapter_number}章《{chapter_outline.title}》")
-            
-            # 🎯 获取章纲关联的剧情卡片
-            plot_cards_result = await db_session.execute(
-                select(PlotCard, PlotCardChapterOutlineLink.usage_type, PlotCardChapterOutlineLink.usage_notes)
-                .join(PlotCardChapterOutlineLink, PlotCard.id == PlotCardChapterOutlineLink.plot_card_id)
-                .where(PlotCardChapterOutlineLink.chapter_outline_id == chapter_outline.id)
-                .order_by(PlotCardChapterOutlineLink.created_at)
-            )
-            linked_plot_cards_data = plot_cards_result.all()
-            
-            # 构建剧情卡片上下文
-            linked_cards_context = ""
-            if linked_plot_cards_data:
-                cards_text = []
-                for card, usage_type, usage_notes in linked_plot_cards_data[:10]:  # 限制最多10个卡片
-                    card_type_label = {
-                        'plot': '剧情',
-                        'character': '角色',
-                        'scene': '场景',
-                        'conflict': '冲突'
-                    }.get(card.card_type, '其他')
-                    
-                    usage_type_label = {
-                        'reference': '参考',
-                        'used': '已使用',
-                        'planned': '计划使用'
-                    }.get(usage_type or 'reference', '参考')
-                    
-                    # 截断内容，避免过长
-                    content_preview = card.content[:200] if card.content else "无内容"
-                    if len(card.content or "") > 200:
-                        content_preview += "..."
-                    
-                    card_text = f"【{card_type_label}卡片】{card.title}（{usage_type_label}）\n{content_preview}"
-                    if usage_notes:
-                        card_text += f"\n使用说明：{usage_notes}"
-                    
-                    cards_text.append(card_text)
-                
-                linked_cards_context = "\n\n".join(cards_text)
-                logger.info(f"📇 找到 {len(linked_plot_cards_data)} 个关联剧情卡片（使用前 {min(10, len(linked_plot_cards_data))} 个）")
-                logger.info(f"📏 剧情卡片上下文长度: {len(linked_cards_context)} 字符")
-            else:
-                logger.info(f"📇 本章纲未关联剧情卡片")
-            
-            if linked_plot_cards_data:
-                trace_reference("plot_cards", "关联剧情卡", [
-                    {"title": card.title, "detail": usage_type or "reference"} for card, usage_type, _notes in linked_plot_cards_data[:10]
-                ])
-
-            # 获取角色信息
-            characters_result = await db_session.execute(
-                select(Character).where(Character.project_id == current_chapter.project_id)
-            )
-            characters = characters_result.scalars().all()
-            characters_info = "\n".join([
-                f"- {c.name}({'组织' if c.is_organization else '角色'}, {c.role_type}): {c.personality[:100] if c.personality else ''}"
-                for c in characters
-            ])
-            
-            # 获取写作风格
-            style_content = ""
-            if style_id:
-                # 使用指定的风格
-                style_result = await db_session.execute(
-                    select(WritingStyle).where(WritingStyle.id == style_id)
-                )
-                style = style_result.scalar_one_or_none()
-                if style:
-                    # 验证风格是否可用：全局预设风格（project_id为NULL）或者当前项目的自定义风格
-                    if style.project_id is None or style.project_id == current_chapter.project_id:
-                        style_content = style.prompt_content or ""
-                        style_type = "全局预设" if style.project_id is None else "项目自定义"
-                        logger.info(f"使用指定风格: {style.name} ({style_type})")
-                    else:
-                        logger.warning(f"风格 {style_id} 不属于当前项目，无法使用")
-                else:
-                    logger.warning(f"未找到风格 {style_id}")
-            else:
-                logger.info("未指定写作风格，使用原始提示词")
-            
-            st_ctx.done(characters=len(characters), plot_cards=len(linked_plot_cards_data), outlines=len(all_chapter_outlines),
-                        style=bool(style_content))
-            st_smart = begin_stage("smart_context", "组装前文上下文 + 记忆")
-            # 🚀 使用智能上下文构建（支持海量章节）
-            smart_context = await build_smart_chapter_context(
-                db=db_session,
-                project_id=project.id,
-                current_chapter_number=current_chapter.chapter_number,
-                user_id=current_user_id
-            )
-            
-            # 组装上下文
-            previous_content = ""
-            if smart_context['story_skeleton']:
-                previous_content += smart_context['story_skeleton'] + "\n\n"
-            if smart_context['relevant_history']:
-                previous_content += smart_context['relevant_history'] + "\n\n"
-            if smart_context['recent_summary']:
-                previous_content += smart_context['recent_summary'] + "\n\n"
-            if smart_context['recent_full']:
-                previous_content += smart_context['recent_full']
-            
-            # 日志输出统计信息
-            stats = smart_context['stats']
-            logger.info(f"📊 智能上下文统计:")
-            logger.info(f"  - 前置章节总数: {stats.get('total_previous', 0)}")
-            logger.info(f"  - 故事骨架采样: {stats.get('skeleton_samples', 0)}章")
-            logger.info(f"  - 相关历史检索: {stats.get('relevant_history', 0)}章")
-            logger.info(f"  - 近期章节概要: {stats.get('recent_summaries', 0)}章")
-            logger.info(f"  - 最近完整内容: {stats.get('recent_full', 0)}章")
-            logger.info(f"  - 上下文总长度: {stats.get('total_length', 0)}字符")
-            
-            # 🧠 构建记忆增强上下文
-            logger.info(f"🧠 开始构建记忆增强上下文...")
-            memory_context = await memory_service.build_context_for_generation(
-                user_id=current_user_id,
-                project_id=project.id,
-                current_chapter=current_chapter.chapter_number,
-                chapter_outline=current_outline_content,
-                character_names=[c.name for c in characters] if characters else None
-            )
-            state_context = await narrative_state_service.build_generation_context(
-                db=db_session,
-                project_id=project.id,
-                current_chapter=current_chapter.chapter_number,
-                pov_character_name=chapter_outline.pov if chapter_outline else None,
-            )
-            memory_context = {
-                **memory_context,
-                **state_context,
-            }
-            
-            # 计算各部分的字符长度
-            context_lengths = {
-                'recent_context': len(memory_context.get('recent_context', '')),
-                'relevant_memories': len(memory_context.get('relevant_memories', '')),
-                'foreshadows': len(memory_context.get('foreshadows', '')),
-                'character_states': len(memory_context.get('character_states', '')),
-                'plot_points': len(memory_context.get('plot_points', ''))
-            }
-            total_memory_length = sum(context_lengths.values())
-            
-            logger.info(f"✅ 记忆上下文构建完成: {memory_context['stats']}")
-            logger.info(f"📏 记忆上下文长度统计:")
-            logger.info(f"  - 最近章节记忆: {context_lengths['recent_context']} 字符")
-            logger.info(f"  - 语义相关记忆: {context_lengths['relevant_memories']} 字符")
-            logger.info(f"  - 未完结伏笔: {context_lengths['foreshadows']} 字符")
-            logger.info(f"  - 角色状态记忆: {context_lengths['character_states']} 字符")
-            logger.info(f"  - 重要情节点: {context_lengths['plot_points']} 字符")
-            logger.info(f"  - 记忆总长度: {total_memory_length} 字符")
-            logger.info(f"  - 前置章节上下文长度: {len(previous_content)} 字符")
-            logger.info(f"  - 总上下文长度(估算): {total_memory_length + len(previous_content) + 2000} 字符")
-        
-            st_smart.done(previous_chapters=stats.get('total_previous', 0), context_chars=stats.get('total_length', 0),
-                          memory_chars=total_memory_length)
-            trace_reference("memory", "记忆与前文上下文", [
-                {"title": "故事骨架采样", "detail": f"{stats.get('skeleton_samples', 0)} 章"},
-                {"title": "相关历史检索", "detail": f"{stats.get('relevant_history', 0)} 章"},
-                {"title": "近期章节概要", "detail": f"{stats.get('recent_summaries', 0)} 章"},
-                {"title": "最近完整内容", "detail": f"{stats.get('recent_full', 0)} 章"},
-                {"title": "语义相关记忆", "detail": f"{context_lengths['relevant_memories']} 字符"},
-                {"title": "未完结伏笔", "detail": f"{context_lengths['foreshadows']} 字符"},
-                {"title": "角色状态记忆", "detail": f"{context_lengths['character_states']} 字符"},
-            ], chars=total_memory_length + len(previous_content))
-            job.progress('开始AI创作...', 25)
-            
-            # 🔧 MCP工具增强：收集章节参考资料（使用剧情线标准模式）
-            mcp_reference_materials = ""
-            # 前置检查：用户是否有启用的 MCP 插件，没有则直接跳过（避免白等 1 分钟+）
-            _has_mcp_plugins = False
-            if enable_mcp and current_user_id:
-                from app.services.mcp_tool_service import mcp_tool_service
-                _available_tools = await mcp_tool_service.get_user_enabled_tools(
-                    user_id=current_user_id,
-                    db_session=db_session,
-                    plugin_names=selected_plugins,
-                )
-                _has_mcp_plugins = len(_available_tools) > 0
-                if not _has_mcp_plugins:
-                    logger.info("⏭️ 用户没有启用的MCP插件，跳过MCP工具收集")
-
-            if enable_mcp and current_user_id and _has_mcp_plugins:
-                st_mcp = begin_stage("mcp", "MCP 规划收集参考资料")
-                job.progress('🔍 尝试使用MCP工具收集参考资料...', 28)
-
-                # 使用 PlotGenerationService._plan_with_mcp 进行严格的 MCP 规划
-                from app.services.plot_generation_service import PlotGenerationService
-                plot_service = PlotGenerationService(user_ai_service)
-
-                project_data = {
-                    'title': project.title,
-                    'genre': project.genre or '未知',
-                    'theme': project.theme or '未知'
-                }
-
-                # 调用统一的 MCP 规划方法
-                # 这里会：
-                # 1. 强制工具调用（tool_choice="required"）
-                # 2. 工具未触发时抛出 MCPToolNotTriggeredError
-                # 3. 其他异常包装为 MCPPlanningFailedError
-                planning_result = await plot_service._plan_with_mcp(
-                    context_type="chapter_content",
-                    project_data=project_data,
-                    outline_content=None,
-                    chapter_outline=current_outline_content,
-                    user_id=current_user_id,
-                    db_session=db_session,
-                    selected_plugins=selected_plugins,
-                    provider=None,
-                    model=None
-                )
-
-                # 提取参考资料（已经过截断处理）
-                mcp_reference_materials = planning_result.get("reference_materials", "")
-                tool_count = planning_result.get("tool_calls_made", 0)
-                tools_used = planning_result.get("tools_used", [])
-                planning_time = planning_result.get("planning_time", 0)
-
-                job.progress(f'✅ MCP工具调用成功（{tool_count}次，耗时{planning_time:.1f}秒）', 32)
-                logger.info(f"📚 MCP工具收集参考资料：{len(mcp_reference_materials)} 字符")
-                logger.info(f"  - 使用的工具: {', '.join(tools_used)}")
-                logger.info(f"  - 规划耗时: {planning_time:.2f}秒")
-                st_mcp.done(tools=len(tools_used), chars=len(mcp_reference_materials))
-
-            # 拆书参考注入（R5-S3）：把已挂载参考包的 style/methodology/corpus 等拼到生成参数
-            # user_segment → mcp_references；system_segment（style 维度）→ style_content
-            # 设计文档：@/agent-docs/features/dissect_to_creation_pipeline.md §A.2
-            st_ref = begin_stage("reference_pack", "组装拆书参考包")
-            try:
-                from app.services.reference_pack_injector import ReferencePackInjector
-                _injector = ReferencePackInjector()
-                _anchor = (
-                    f"{current_chapter.title or ''} "
-                    f"{current_outline_content[:300] if current_outline_content else ''}"
-                ).strip() or "章节正文"
-                _ref_block = await _injector.build_reference_block(
-                    db_session, project.id,
-                    scene="chapter_content",
-                    pack_ids=generate_request.pack_ids,
-                    dimensions=generate_request.dimensions,
-                    strength=generate_request.strength,
-                    anchor_query=_anchor,
-                )
-                if _ref_block.user_segment:
-                    mcp_reference_materials = (
-                        f"{mcp_reference_materials}\n\n{_ref_block.user_segment}".strip()
-                        if mcp_reference_materials
-                        else _ref_block.user_segment
-                    )
-                if _ref_block.system_segment:
-                    # 拆书 style 维度并入项目内已有 writing_style（叠加注入，互不冲突）
-                    style_content = (
-                        f"{style_content}\n\n{_ref_block.system_segment}".strip()
-                        if style_content
-                        else _ref_block.system_segment
-                    )
-                if not _ref_block.is_empty:
-                    logger.info(
-                        f"📚 [R5-章节正文] 注入拆书参考包 {len(_ref_block.used_packs)} 个，"
-                        f"维度={_ref_block.used_dimensions}，强度={_ref_block.used_strength}"
-                    )
-                    _dims_label = ','.join(_ref_block.used_dimensions)
-                    job.progress(f'📚 已注入拆书参考包（{_dims_label}）', 33)
-                    st_ref.done(packs=len(_ref_block.used_packs), dimensions=_dims_label, strength=_ref_block.used_strength)
-                else:
-                    st_ref.skip("参考包无可用内容")
-            except ValueError:
-                # 项目未挂载参考包 → 优雅跳过
-                st_ref.skip("项目未挂载参考包")
-            except Exception as _e:  # pragma: no cover - 防御性兜底
-                logger.warning(f"[R5-章节正文] 拆书参考注入失败（已跳过）: {_e}")
-                st_ref.skip("注入失败，已跳过")
-
-            # 🆕 V4.1 K2 桥段位置约束注入（chapter_outline 含 bridge_id 时自动启用）
-            # 与上方 v3 拆书注入互补：v3 管拆书维度，V4 管桥段位置约束
-            st_bridge = None
-            try:
-                from app.services.reference_pack import (
-                    build_v4_bridge_constraint_only,
-                    fetch_bridge_context,
-                )
-                # 本函数里章纲变量叫 chapter_outline（上文第 1559 行）；此前误写 current_outline，
-                # NameError 被下面的 except 吞成 WARNING，导致桥段位置约束从未真正注入
-                if chapter_outline and getattr(chapter_outline, "bridge_id", None):
-                    st_bridge = begin_stage("bridge_constraint", "桥段位置约束")
-                    _v4_bridge_seg = None
-                    _bridge_ctx = await fetch_bridge_context(db_session, chapter_outline)
-                    if _bridge_ctx:
-                        _v4_bridge_seg = await build_v4_bridge_constraint_only(
-                            db_session, project.id,
-                            scene="chapter_content",
-                            model_name=getattr(user_ai_service, "default_model", None) or "deepseek-v3",
-                            bridge_position=chapter_outline.bridge_position,
-                            bridge_context=_bridge_ctx,
-                            chapter_outline_id=chapter_outline.id,
-                            target_word_count=target_word_count,
-                        )
-                        if _v4_bridge_seg:
-                            mcp_reference_materials = (
-                                f"{mcp_reference_materials}\n\n{_v4_bridge_seg}".strip()
-                                if mcp_reference_materials
-                                else _v4_bridge_seg
-                            )
-                            logger.info(
-                                f"🎯 [V4.1 K2] 注入桥段位置约束 "
-                                f"position={chapter_outline.bridge_position} "
-                                f"bridge={_bridge_ctx.get('title','?')}"
-                            )
-                    st_bridge.done(position=chapter_outline.bridge_position, injected=bool(_v4_bridge_seg))
-            except Exception as _be:  # pragma: no cover
-                logger.warning(f"[V4.1 K2] 桥段约束注入失败（已跳过）: {_be}")
-                if st_bridge is not None:
-                    st_bridge.skip("注入失败，已跳过")
-
-            # 根据是否有前置内容选择不同的提示词，并应用写作风格、记忆增强、剧情卡片和MCP参考资料
-            if previous_content:
-                prompt = prompt_service.get_chapter_generation_with_context_prompt(
-                    title=project.title,
-                    theme=project.theme or '',
-                    genre=project.genre or '',
-                    narrative_perspective=project.narrative_perspective or '第三人称',
-                    time_period=project.world_time_period or '未设定',
-                    location=project.world_location or '未设定',
-                    atmosphere=project.world_atmosphere or '未设定',
-                    rules=final_world_rules,
-                    characters_info=characters_info or '暂无角色信息',
-                    outlines_context=outlines_context,
-                    previous_content=previous_content,
-                    chapter_number=current_chapter.chapter_number,
-                    chapter_title=current_chapter.title,
-                    chapter_outline=current_outline_content,
-                    style_content=style_content,
-                    target_word_count=target_word_count,
-                    memory_context=memory_context,
-                    linked_cards_context=linked_cards_context,
-                    mcp_references=mcp_reference_materials,
-                )
-            else:
-                prompt = prompt_service.get_chapter_generation_prompt(
-                    title=project.title,
-                    theme=project.theme or '',
-                    genre=project.genre or '',
-                    narrative_perspective=project.narrative_perspective or '第三人称',
-                    time_period=project.world_time_period or '未设定',
-                    location=project.world_location or '未设定',
-                    atmosphere=project.world_atmosphere or '未设定',
-                    rules=final_world_rules,
-                    characters_info=characters_info or '暂无角色信息',
-                    outlines_context=outlines_context,
-                    chapter_number=current_chapter.chapter_number,
-                    chapter_title=current_chapter.title,
-                    chapter_outline=current_outline_content,
-                    style_content=style_content,
-                    target_word_count=target_word_count,
-                    memory_context=memory_context,
-                    linked_cards_context=linked_cards_context,
-                    mcp_references=mcp_reference_materials,
-                )
-
-            prompt = prompt_service.apply_project_generation_prompt(
-                prompt,
-                project.generation_prompt or ''
-            )
-            
-            if mcp_reference_materials:
-                logger.info(f"📖 已整合MCP参考资料（{len(mcp_reference_materials)}字符）到章节生成提示词")
-            
-            if linked_cards_context:
-                logger.info(f"📇 已整合剧情卡片上下文（{len(linked_cards_context)}字符）到章节生成提示词")
-            
-            logger.info(f"开始AI流式创作章节 {chapter_id}")
-            job.progress('🎨 AI开始创作章节内容...', 35)
-
-            # 流式生成内容（content 事件逐块进任务日志：重连即可重建全文；进度每累计 ≥200 字发一次）
-            st_llm = begin_stage("llm", "模型创作正文")
-            full_content = ""
-            accumulated_length = 0
-            last_progress_at = 0
-            async for chunk in user_ai_service.generate_text_stream(prompt=prompt):
-                full_content += chunk
-                accumulated_length += len(chunk)
-
-                # 发送内容块（使用 'content' 类型，与前端保持一致）
-                job.publish({'type': 'content', 'content': chunk})
-
-                # 计算进度（35%-95%，为后处理预留5%）
-                if accumulated_length - last_progress_at >= 200:
-                    last_progress_at = accumulated_length
-                    generation_progress = min(35 + (accumulated_length / target_word_count) * 60, 95)
-                    job.publish({'type': 'progress', 'message': f'🎨 AI 创作中… 已写出 {accumulated_length} 字',
-                                 'progress': int(generation_progress), 'status': 'processing', 'word_count': accumulated_length})
-
-                await asyncio.sleep(0)  # 让出控制权
-            st_llm.done(chars=accumulated_length)
-            st_persist = begin_stage("persist", "写入正文 / 生成历史")
-            
-            # 更新章节内容到数据库
-            old_word_count = current_chapter.word_count or 0
-            current_chapter.content = full_content
-            new_word_count = count_words(full_content)
-            current_chapter.word_count = new_word_count
-            current_chapter.status = "completed"
-            
-            # 更新项目字数
-            project.current_words = project.current_words - old_word_count + new_word_count
-            
-            # 记录生成历史
-            history = GenerationHistory(
-                project_id=current_chapter.project_id,
-                chapter_id=current_chapter.id,
-                prompt=f"创作章节: 第{current_chapter.chapter_number}章 {current_chapter.title}",
-                generated_content=full_content[:500] if len(full_content) > 500 else full_content,
-                model="default"
-            )
-            db_session.add(history)
-            
-            await db_session.commit()
-            await db_session.refresh(current_chapter)
-
-            logger.info(f"成功创作章节 {chapter_id}，共 {new_word_count} 字")
-            job.publish({'type': 'progress', 'message': '✅ 章节创作完成', 'progress': 95, 'status': 'processing', 'word_count': new_word_count})
-            
-            st_persist.done(word_count=new_word_count)
-
-            # 单章生成：不自动分析，仅落库（用户可先改正文再手动分析）。
-            # 批量生成（auto_analyze=True）：自动排队分析，累积记忆并支撑批量一致性闸门。
-            if not auto_analyze:
-                return {'word_count': new_word_count, 'analysis_task_id': None, 'analysis_job_id': None}
-
-            st_ana = begin_stage("analysis", "排队章节分析")
-            task_id = await create_analysis_task(db_session, chapter_id=chapter_id, user_id=current_user_id, project_id=project.id)
-            logger.info(f"📋 已创建分析任务: {task_id}")
-            analysis_job_id = None
-            try:
-                analysis_job = await start_chapter_analysis(
-                    chapter_id=chapter_id, chapter_number=current_chapter.chapter_number, chapter_title=current_chapter.title,
-                    user_id=current_user_id, project_id=project.id, task_id=task_id, ai_service=user_ai_service,
-                )
-                analysis_job_id = analysis_job.id
-                st_ana.done(task_id=task_id)
-            except AIJobConflictError as conflict:
-                logger.warning(f"⚠️ 章节分析任务未启动（已有同章分析在跑）: {conflict}")
-                st_ana.skip("同章分析任务已在运行")
-
-            return {'word_count': new_word_count, 'analysis_task_id': task_id, 'analysis_job_id': analysis_job_id}
-            
     try:
         job = await ai_jobs.start(
             kind="chapter_generate",
@@ -1933,7 +1922,7 @@ async def generate_chapter_content_stream(
             scope=f"chapter_write:{chapter.project_id}",
             runner=runner,
             cancel_message="已停止生成；本章正文未写入",
-            meta={"chapter_id": chapter_id, "target_word_count": target_word_count},
+            meta={"chapter_id": chapter_id, "target_word_count": options.target_word_count},
         )
     except AIJobConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
@@ -2245,8 +2234,9 @@ async def regenerate_chapter_stream(
     db: AsyncSession = Depends(get_db),
     user_ai_service: AIService = Depends(get_user_ai_service),
 ):
-    """提示词只带用户勾选的项目去 AI 味提示词 + 本章原文（不带章纲 / 前文 / 设定）。
+    """提示词只带用户勾选的项目去 AI 味提示词 + 本章原文（不带章纲 / 前文 / 设定），附专有名词表防止改名。
 
+    mode=full 全文重写；mode=local 只重写 AI 味重的段落（自动检测或 paragraph_indices 指定），其余段落一字不动。
     完成后直接覆盖正文，并清掉本章已有的分析产物（分析 / 记忆 / 伏笔承诺 / 一致性…），回到「未分析」。不留版本、不可回滚。
     """
     user_id = getattr(request.state, "user_id", None)
@@ -2266,31 +2256,59 @@ async def regenerate_chapter_stream(
     prompt_texts = [by_id[pid] for pid in regenerate_request.prompt_ids if pid in by_id]  # 保持用户勾选顺序
     if not prompt_texts:
         raise HTTPException(status_code=400, detail="请至少选择一条本项目的去 AI 味提示词")
-    prompt = build_rewrite_prompt(prompt_texts, chapter.content)
-    original_len = max(len(chapter.content), 1)
+    glossary = await _project_glossary(db, chapter.project_id)
+    original = chapter.content
+    local = regenerate_request.mode == "local"
+    targets: list[int] = []
+    _lines, para_lines = split_paragraph_lines(original)
+    paragraphs = [_lines[i] for i in para_lines]
+    if local:
+        targets = sorted({
+            i for i in (regenerate_request.paragraph_indices
+                        if regenerate_request.paragraph_indices is not None
+                        else ai_flavor_metrics.flagged_paragraph_indices(paragraphs))
+            if 0 <= i < len(paragraphs)
+        })
+        if not targets:
+            raise HTTPException(status_code=400, detail="没有检测到需要局部重写的段落（可改用全文重写）")
+        prompt = build_local_rewrite_prompt(prompt_texts, paragraphs, targets, glossary)
+    else:
+        prompt = build_rewrite_prompt(prompt_texts, original, glossary)
+    original_len = max(len(original), 1)
     project_id = chapter.project_id
 
     async def runner(job):
         """后台任务体：流式重写 → 覆盖正文 → 清旧分析与记忆。事件进任务日志，可回放。"""
-        st_llm = begin_stage("llm", "模型按去 AI 味提示词重写正文")
+        st_llm = begin_stage("llm", "模型按去 AI 味提示词重写" + (f"（局部 {len(targets)} 段）" if local else "正文"))
         job.progress("开始重写…", 5)
         full_content = ""
         accumulated = 0
         last_progress_at = 0
-        async for chunk in user_ai_service.generate_text_stream(prompt=prompt):
+        expected = sum(len(paragraphs[i]) for i in targets) if local else original_len
+        async for chunk in user_ai_service.generate_text_stream(prompt=prompt, creative=True):
             full_content += chunk
             accumulated += len(chunk)
-            job.publish({"type": "content", "content": chunk})
+            if not local:  # 局部模式输出是「[P编号] 段落」行，最后合并成全文再发
+                job.publish({"type": "content", "content": chunk})
             if accumulated - last_progress_at >= 200:
                 last_progress_at = accumulated
                 job.publish({
                     "type": "progress", "message": f"重写中… 已写出 {accumulated} 字",
-                    "progress": int(min(5 + accumulated / original_len * 85, 90)), "status": "processing", "word_count": accumulated,
+                    "progress": int(min(5 + accumulated / max(expected, 1) * 85, 90)), "status": "processing",
+                    "word_count": accumulated,
                 })
             await asyncio.sleep(0)
         st_llm.done(chars=accumulated)
         if not full_content.strip():
             raise ValueError("模型没有返回内容，正文未改动")
+        rewritten = len(targets)
+        if local:
+            replacements = parse_local_rewrite(full_content, targets)
+            if not replacements:
+                raise ValueError("模型没有按「[P编号] 段落」格式返回，正文未改动")
+            rewritten = len(replacements)
+            full_content = merge_paragraphs(original, replacements)
+            job.publish({"type": "content", "content": full_content})
 
         st_persist = begin_stage("persist", "覆盖正文 / 清理旧分析与记忆")
         async with job_session_factory(user_id)() as db_session:
@@ -2310,19 +2328,36 @@ async def regenerate_chapter_stream(
         st_persist.done(word_count=new_wc, purged_memories=purged)
         await _purge_chapter_vector_memory(user_id, project_id, chapter_id, purged)
         logger.info(f"✅ 去 AI 味重写完成并覆盖正文: {chapter_id}，{new_wc} 字，清理旧记忆 {purged} 条")
-        return {"word_count": new_wc}
+        result = {"word_count": new_wc}
+        if local:
+            result["rewritten_paragraphs"] = rewritten
+        return result
 
     try:
         job = await ai_jobs.start(
             kind="chapter_regenerate",
-            title=f"去 AI 味重写第 {chapter.chapter_number} 章《{chapter.title}》",
+            title=f"去 AI 味{'局部' if local else ''}重写第 {chapter.chapter_number} 章《{chapter.title}》",
             user_id=user_id,
             project_id=project_id,
             scope=f"chapter_write:{project_id}",
             runner=runner,
             cancel_message="已停止重写；正文未改动",
-            meta={"chapter_id": chapter_id},
+            meta={"chapter_id": chapter_id, "mode": regenerate_request.mode},
         )
     except AIJobConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     return job_sse_response(job)
+
+
+async def _project_glossary(db: AsyncSession, project_id: str) -> list[str]:
+    """专有名词表：角色 / 组织名及曾用名（重写时原样保留）。主角与重要角色排前面。"""
+    rows = (await db.execute(
+        select(Character.name, Character.aliases, Character.role_type).where(Character.project_id == project_id)
+    )).all()
+    names: list[str] = []
+    for name, aliases, _role in sorted(rows, key=lambda r: _ROLE_ORDER.get((r[2] or "").lower(), 9)):
+        names.append(name)
+        names.extend(parse_json_list(aliases))
+    return [n for n in dict.fromkeys(names) if n]
+
+

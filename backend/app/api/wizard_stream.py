@@ -23,6 +23,7 @@ from app.models.project_default_style import ProjectDefaultStyle
 from app.models.reference_pack import ReferencePack
 from app.models.project_reference_pack import ProjectReferencePack
 from app.services.ai_service import AIService
+from app.services.platform_presets import normalize_longform_settings
 from app.services.prompt_service import prompt_service
 from app.logger import get_logger
 from app.utils.role_type import normalize_role_type, is_protagonist_role
@@ -290,6 +291,8 @@ async def world_building_generator(
             target_words = data.get("target_words")
             chapter_count = data.get("chapter_count")
             character_count = data.get("character_count")
+        # 长篇设置（仅新建项目时生效；空 = 旧行为）
+        longform = normalize_longform_settings(data)
         provider = data.get("provider")
         model = data.get("model")
         enable_mcp = data.get("enable_mcp", False)  # 默认禁用MCP，需要用户明确选择
@@ -533,7 +536,8 @@ async def world_building_generator(
                 character_count=character_count,
                 wizard_status="incomplete",
                 wizard_step=1,
-                status="planning"
+                status="planning",
+                **longform,
             )
             db.add(project)
             await db.commit()
@@ -1135,6 +1139,7 @@ async def characters_generator(
                 personality=char_data.get("personality", ""),
                 background=char_data.get("background", ""),
                 appearance=char_data.get("appearance", ""),
+                speech_style=(str(char_data.get("speech_style") or "").strip() or None) if not is_organization else None,
                 relationships=relationships_text,
                 organization_type=char_data.get("organization_type") if is_organization else None,
                 organization_purpose=char_data.get("organization_purpose") if is_organization else None,

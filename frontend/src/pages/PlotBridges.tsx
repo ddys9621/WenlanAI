@@ -55,6 +55,7 @@ import {
   BRIDGE_STATUS_LABEL,
   BRIDGE_TEMPLATE_UI,
   LINE_MODE_LABEL,
+  RHYTHM_ROLE_LABELS,
   isPrimaryTask,
   resolveTemplateKey,
   type BridgeGenerationMeta,
@@ -896,6 +897,14 @@ function BridgeCard({ bridge, partial = null, generating = false, onEdit, onExpa
         (bridge.beat_coverage_end ?? 0) * 100,
       )}%`
     : null;
+  // 变长桥段：章数与卷内节奏角色（升温 / 常规不单独打标签，避免满屏标签）
+  const chapterCount = bridge.chapter_count ?? bridge.chapter_end - bridge.chapter_start + 1;
+  const rhythmLabel =
+    bridge.rhythm_role && bridge.rhythm_role !== 'rise' && bridge.rhythm_role !== 'standard'
+      ? RHYTHM_ROLE_LABELS[bridge.rhythm_role]
+      : '';
+  const plannedForeshadows =
+    (bridge.foreshadow_plan?.plant?.length ?? 0) + (bridge.foreshadow_plan?.payoff?.length ?? 0);
   return (
     <article className="hh-panel p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -909,13 +918,32 @@ function BridgeCard({ bridge, partial = null, generating = false, onEdit, onExpa
             {BRIDGE_STATUS_LABEL[bridge.status]}
           </span>
           <span className="inline-flex items-center border border-surface-border px-2 py-0.5 text-[11px] text-content-secondary tabular-nums">
-            第 {bridge.chapter_start}-{bridge.chapter_end} 章
+            第 {bridge.chapter_start}-{bridge.chapter_end} 章 · {chapterCount} 章
           </span>
+          {rhythmLabel && (
+            <Tooltip title="变长桥段的卷内节奏角色：卷中高潮可两波兑现，低谷写受挫 / 代价，卷末收官以缓冲章收尾">
+              <span className="inline-flex items-center border border-brand/30 bg-brand/5 px-2 py-0.5 text-[11px] text-brand">
+                {rhythmLabel}
+              </span>
+            </Tooltip>
+          )}
+          {plannedForeshadows > 0 && (
+            <Tooltip
+              title={[
+                ...(bridge.foreshadow_plan?.plant ?? []).map((p) => `埋：${p.title}${p.payoff_after ? `（约 ${p.payoff_after} 章后回收）` : ''}`),
+                ...(bridge.foreshadow_plan?.payoff ?? []).map((t) => `收：${t}`),
+              ].join('；')}
+            >
+              <span className="inline-flex items-center border border-surface-border px-2 py-0.5 text-[11px] text-content-secondary">
+                伏笔计划 {plannedForeshadows}
+              </span>
+            </Tooltip>
+          )}
           {hasBeatBinding && (
             <Tooltip
               title={
                 `本桥段绑定到主线节点 ${bridge.beat_index}，覆盖该节点进度 ${coveragePct}。` +
-                ' 展开为章纲时会把覆盖度均分到 4 章并回写剧情线进度。'
+                ` 展开为章纲时会把覆盖度均分到 ${chapterCount} 章并回写剧情线进度。`
               }
             >
               <span className="inline-flex items-center gap-1 border border-surface-border px-2 py-0.5 text-[11px] text-content-secondary tabular-nums">

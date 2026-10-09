@@ -2,8 +2,9 @@
 
 三段式（设计文档 @/agent-docs/features/engineered_bridge_pipeline.md）：
 1. plan_bridges：按主线节点由代码算出槽位表，建 N 个 status=draft 的桥段（无 LLM）
-2. fill_bridges：按主线节点分批调 LLM 填 title/goal/爽点/四章卡 → ready（可续跑）
-3. expand_bridge_to_chapters：把 ready 桥段展开为第 4(n-1)+1…4n 章，回写剧情线节点覆盖账本
+2. fill_bridges：按主线节点分批调 LLM 填 title/goal/爽点/四章卡/伏笔计划 → ready（可续跑；滚动规划只填近处）
+3. expand_bridge_to_chapters：把 ready 桥段展开为其章号区间（变长桥段 3-12 章；旧数据每桥段 4 章）的章纲，
+   带叙事任务（伏笔 / 承诺），回写剧情线节点覆盖账本
 4. CRUD：列表、读取、删除、重置
 
 调用 V4.3 PromptAssembler 获取拆书参考包注入的 prompt 上下文。
@@ -28,15 +29,22 @@ from app.models.plot_line import PlotLine
 from app.models.project import Project
 from app.models.story_outline import StoryOutline
 from app.services.bridge_prompt_context import (
+    actual_progress_block,
     beat_facts_lines,
     build_fill_provenance,
     filled_ledger_block,
+    foreshadow_plan_block,
     next_bridge_block,
+    open_promises_block,
     opening_block,
     pov_line,
     prev_bridge_last_chapter_block,
     story_core_lines,
+    written_upto,
 )
+from app.services.bridge_rhythm import RHYTHM_FILL_RULES, RHYTHM_LABELS, position_note, positions_for
+from app.services.narrative_tasks import has_tasks, normalize_narrative_tasks
+from app.services.platform_presets import default_chapter_words
 from app.services.bridge_hook_style import (
     C3_HOOK_NONE,
     expansion_c3_rule,
@@ -61,12 +69,11 @@ from app.services.bridge_shapes import (
     shape_label,
 )
 from app.services.bridge_slot_planner import (
-    CHAPTERS_PER_BRIDGE,
     BridgePlanningConflictError,
     BridgePlanningPreconditionError,
     BridgeSlotPlan,
     PlotLineData,
-    chapter_range,
+    bridge_chapter_range,
     compute_bridge_slots,
     parse_plot_line,
 )
@@ -96,7 +103,11 @@ def bridge_to_dict(b: PlotBridge) -> dict[str, Any]:
         meta = None
     if not isinstance(meta, dict):
         meta = None
-    c_start, c_end = chapter_range(b.bridge_number)
+    try:
+        foreshadow_plan = json.loads(b.foreshadow_plan) if getattr(b, "foreshadow_plan", None) else None
+    except (json.JSONDecodeError, TypeError):
+        foreshadow_plan = None
+    c_start, c_end = bridge_chapter_range(b)
     return {
         "id": b.id,
         "project_id": b.project_id,
@@ -120,6 +131,9 @@ def bridge_to_dict(b: PlotBridge) -> dict[str, Any]:
         "secondary_beats": secondary if isinstance(secondary, list) else [],
         "chapter_start": c_start,
         "chapter_end": c_end,
+        "chapter_count": c_end - c_start + 1,
+        "rhythm_role": getattr(b, "rhythm_role", None),
+        "foreshadow_plan": foreshadow_plan if isinstance(foreshadow_plan, dict) else None,
         "generation_meta": meta,
         "template": meta.get("template") if meta else None,
     }
@@ -226,6 +240,8 @@ async def _load_beat_context_for_bridge(
     if current_beat.description:
         lines.append(f"  描述：{current_beat.description[:200]}")
     lines.extend(beat_facts_lines(current_beat))
+    if current_beat.review_note:
+        lines.append(f"  上一卷复盘修正（按它调整本段章纲）：{current_beat.review_note[:300]}")
     lines.append(f"- 本桥段在该节点覆盖进度：{coverage_text}")
     phase = phase_for_bridge(current_beat.phases, bridge.bridge_number) if current_beat.phases else None
     if phase:
@@ -280,18 +296,24 @@ BRIDGE_FILL_TASK_PROMPT = """请为下面 {count} 个桥段槽位填写内容。
 # 桥段四章方法论（{template_name}）
 {methodology}
 
+# 桥段长度与节奏
+- 桥段章数以槽位表为准（3-12 章不等）：多出的章是加长的拉扯、第二波兑现或收尾的缓冲章；c1-c4 四张卡分别写开场 / 拉扯 / 兑现 / 收尾四个阶段的设计，展开章纲时按章数分配
+{rhythm_rules}
+
 # 本节点全部槽位（标 ★ 的 {count} 个为本批要填的，其余仅供衔接参考）
 {slot_table}
 
 # 约束
 - 只输出标 ★ 的 {count} 个对象，严格按槽位顺序，`bridge_number` 必须与槽位一致
 - 每个桥段的 goal 必须落在所属节点主题内，进度按覆盖区间推进（区间末尾对应节点完成度）
-- 标「主B线」的桥段：该支线节点所述事件必须在本桥段 4 章内发生并推进到位（建议放 C1 下半或 C4，不得抢占主线{payoff_label}）
+- 标「主B线」的桥段：该支线节点所述事件必须在本桥段内发生并推进到位（建议放开场下半或收尾，不得抢占主线{payoff_label}）
 - 标「保温」的支线：只需一句话带过其现状，不得展开新事件
 - 金手指使用方式在相邻桥段间不得重复
 - payoff_type 只能从列表中选：{payoff_types}；相邻桥段不得同型，参考账本里的「兑现方式累计」优先选全书用得少的
 - 人名、地名、势力名只能使用【本书角色】【世界规则表】里已有的；确需新角色时在 goal 里用“新角色：身份”标注
 - 最后一个桥段的 next_bridge_hook 要为下一节点开头留引子
+- foreshadow_plan（可空）：plant = 本桥段要埋下的长线伏笔（最多 2 条，payoff_after = 计划多少章后回收，长线可以几十上百章）；payoff = 本桥段要回收的旧伏笔标题（只能来自【当前未回收的伏笔】，标了"临近 / 超期"的优先）
+- 已有【实际剧情进展】时以它为准：已经发生的事不能改，计划与实际冲突时顺着实际往下规划
 {extra_constraints}
 
 # 输出格式（纯 JSON 数组，不要 markdown）
@@ -307,7 +329,8 @@ BRIDGE_FILL_TASK_PROMPT = """请为下面 {count} 个桥段槽位填写内容。
     "c2_build": "{c2_hint}（80-120 字）",
     "c3_payoff": "{c3_hint}（80-120 字）",
     "c4_aftermath": "{c4_hint}（60-100 字）",
-    "next_bridge_hook": "给下一桥段的钩子（20-40 字）"
+    "next_bridge_hook": "给下一桥段的钩子（20-40 字）",
+    "foreshadow_plan": {{"plant": [{{"title": "伏笔名", "content": "怎么埋（20-40 字）", "payoff_after": 60}}], "payoff": ["要回收的旧伏笔标题"]}}
   }}
 ]
 """
@@ -319,12 +342,15 @@ def render_fill_task(
     slot_table: str,
     shape_rules: tuple[str, ...] = (),
     c3_hook_style: str = C3_HOOK_NONE,
+    rhythm_rules: tuple[str, ...] = (),
 ) -> str:
-    """按题材模板渲染填充任务段；shape_rules = 本批收官 / 高潮桥段的形态约束行；c3_hook_style = C3 章末风格。"""
+    """按题材模板渲染填充任务段；shape_rules = 本批收官 / 高潮桥段的形态约束行；c3_hook_style = C3 章末风格；
+    rhythm_rules = 本批桥段节奏角色（卷中高潮 / 低谷 / 卷末收官…）对应的写法。"""
     return BRIDGE_FILL_TASK_PROMPT.format(
         count=count,
         template_name=template.name,
         methodology=methodology_for(template.methodology, c3_hook_style),
+        rhythm_rules="\n".join(f"- {r}" for r in rhythm_rules),
         slot_table=slot_table,
         payoff_label=template.payoff_label,
         payoff_types=" / ".join(template.payoff_types),
@@ -356,45 +382,62 @@ CONTINUED_C1_RULE = (
 )
 
 
-def render_expansion_task(
-    template: BridgeTemplate,
-    bridge: PlotBridge,
-    c_start: int,
-    pov_rule: str,
-    shape: str = SHAPE_STANDARD,
-    c3_hook_style: str = C3_HOOK_NONE,
-) -> str:
-    """按题材模板渲染章纲展开任务段；shape = 桥段形态（收官 / 高潮加密时追加「# 桥段形态」段）；c3_hook_style = C3 章末风格。"""
-    shape_block = shape_expansion_block(shape)
-    return CHAPTER_EXPANSION_TASK_PROMPT.format(
-        title=bridge.title,
-        goal=bridge.goal,
-        showoff_point=bridge.showoff_point,
-        golden_finger_usage=bridge.golden_finger_usage or "",
-        c1_intro=bridge.c1_intro or "",
-        c2_build=bridge.c2_build or "",
-        c3_payoff=bridge.c3_payoff or "",
-        c4_aftermath=bridge.c4_aftermath or "",
-        start_chapter=c_start,
-        c2_num=c_start + 1,
-        c3_num=c_start + 2,
-        c4_num=c_start + 3,
-        template_name=template.name,
-        intro_label=template.position_labels["intro"],
-        build_label=template.position_labels["build"],
-        payoff_label=template.position_labels["payoff"],
-        aftermath_label=template.position_labels["aftermath"],
-        c1_rule=OPENING_C1_RULE if bridge.bridge_number == 1 else CONTINUED_C1_RULE,
-        c3_end_rule=expansion_c3_rule(c3_hook_style),
-        pov_rule=pov_rule,
-        shape_block=f"\n{shape_block}\n" if shape_block else "",
-    )
-
 _FILL_FIELDS = (
     "title", "goal", "showoff_point", "golden_finger_usage",
     "c1_intro", "c2_build", "c3_payoff", "c4_aftermath", "next_bridge_hook",
 )
 _FILL_SHORT_FIELDS = {"title": 200, "goal": 500, "showoff_point": 500}
+
+# 滚动规划前瞻：桥段填充只做到已写章节之后约 3 个剧情单元；章纲展开只做到之后约 3 个桥段
+FILL_LOOKAHEAD_CHAPTERS = 48
+EXPAND_LOOKAHEAD_CHAPTERS = 12
+FORESHADOW_PLANT_MAX = 2
+FORESHADOW_PAYOFF_MAX = 3
+
+
+def normalize_foreshadow_plan(raw: Any) -> str | None:
+    """桥段伏笔计划 → 规整 JSON（plant ≤2 条含 payoff_after，payoff ≤3 个旧伏笔标题）；空 / 坏数据 → None。"""
+    if not isinstance(raw, dict):
+        return None
+    plant = []
+    for item in raw.get("plant") or []:
+        if not isinstance(item, dict) or not str(item.get("title") or "").strip():
+            continue
+        try:
+            payoff_after = int(item.get("payoff_after")) if item.get("payoff_after") is not None else None
+        except (TypeError, ValueError):
+            payoff_after = None
+        plant.append({
+            "title": str(item["title"]).strip()[:60],
+            "content": str(item.get("content") or "").strip()[:160],
+            "payoff_after": payoff_after if payoff_after and payoff_after > 0 else None,
+        })
+    payoff = [str(t).strip()[:60] for t in (raw.get("payoff") or []) if str(t).strip()]
+    plan = {"plant": plant[:FORESHADOW_PLANT_MAX], "payoff": payoff[:FORESHADOW_PAYOFF_MAX]}
+    return json.dumps(plan, ensure_ascii=False) if plan["plant"] or plan["payoff"] else None
+
+
+def _valid_word_count(raw: Any, default: int) -> int:
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if 500 <= value <= 10000 else default
+
+
+def _map_task_ids(raw: Any, mapping: dict[str, str]) -> Any:
+    """章纲 narrative_tasks 里的短编号（P3）→ 真实承诺 id；其余原样（normalize 时按未回收清单过滤）。"""
+    if not isinstance(raw, dict):
+        return raw
+    out = dict(raw)
+    for kind in ("resolve", "advance"):
+        items = []
+        for item in raw.get(kind) or []:
+            if isinstance(item, dict):
+                pid = str(item.get("promise_id") or "").strip()
+                items.append({**item, "promise_id": mapping.get(pid.upper(), pid)})
+        out[kind] = items
+    return out
 
 
 def normalize_payoff_type(raw: Any, template: BridgeTemplate) -> str | None:
@@ -448,50 +491,53 @@ def _collected_json_text(resp: Any, *, what: str) -> str:
     return content
 
 
-CHAPTER_EXPANSION_TASK_PROMPT = """请把下面这个桥段展开为 4 个详细章纲（C1/C2/C3/C4），\
+CHAPTER_EXPANSION_TASK_PROMPT = """请把下面这个桥段展开为 {count} 个详细章纲（第 {start_chapter}-{end_chapter} 章），\
 **每个章纲再细分为 3-5 个场景卡片**（一张卡 ≈ 500-800 字，用于后续场景级流式生成）。
 
 # 桥段信息
 - 标题：{title}
 - 目标：{goal}
-- 装逼点：{showoff_point}
+- {payoff_name}：{showoff_point}
 - 金手指用法：{golden_finger_usage}
-- C1 提示：{c1_intro}
-- C2 提示：{c2_build}
-- C3 提示：{c3_payoff}
-- C4 提示：{c4_aftermath}
+- 开场（C1）提示：{c1_intro}
+- 拉扯（C2）提示：{c2_build}
+- 兑现（C3）提示：{c3_payoff}
+- 收尾（C4）提示：{c4_aftermath}
+- 节奏角色：{rhythm_label}
 - 起始章号：第 {start_chapter} 章
 
-# 四章位置语义（{template_name}）
-- C1 intro：{intro_label}
-- C2 build：{build_label}
-- C3 payoff：{payoff_label}（{c3_end_rule}）
-- C4 aftermath：{aftermath_label}
+# 各章位置（{template_name}）
+{position_lines}
 - {c1_rule}
 - {pov_rule}
 - 人名只能使用【本书角色】里的名字；`characters_involved` / `pov` 不得出现新名字
 {shape_block}
+# 叙事任务（伏笔 / 承诺）
+- 每章可带 `narrative_tasks`：resolve = 本章回收的旧承诺（promise_id 填【当前未回收的伏笔】里的编号，如 P3，how 写怎么回收）；\
+advance = 本章顺带推进 / 提一句的旧承诺（保温，不解决）；plant = 本章新埋的伏笔（payoff_after = 计划多少章后回收）
+- 【本桥段伏笔计划】里的条目要落到具体某一章；清单里标了"临近计划回收 / 已超期"的优先安排回收；没有合适的就留空，不要硬塞
+
 # 场景卡片设计要求
 - 每章 3-5 张，按章内时间顺序排列
 - `card_type` 取值之一：`event`（事件推进）/ `scene`（场景描写）/ `dialogue`（关键对话）/ `inner`（内心独白）/ `conflict`（冲突高潮）
 - `content` 字段要写清"这段写什么 / 谁在场 / 解决什么 / 产出什么"，方便后续直接据此生成正文
-- 4 章总场景数建议 12-20 张（C3 兑现章可加密到 5 张）
-- C1 章必须有 1 张 `inner` 或 `dialogue` 做代入；C2 章必须有 1 张 `conflict` 做拉扯；\
-C3 章场景密度最大；C4 章最后一张要含"下桥段引子"。
+- 开场章必须有 1 张 `inner` 或 `dialogue` 做代入；拉扯章必须有 1 张 `conflict` 做拉扯；兑现章场景密度最大（可加密到 5 张）；\
+收尾章最后一张要含"下桥段引子"；缓冲章以 `dialogue` / `scene` 为主
 
-# 输出格式（纯 JSON 数组，4 个章纲对象，每个内嵌 scenes 数组）
+# 输出格式（纯 JSON 数组，{count} 个章纲对象，按章号顺序，每个内嵌 scenes 数组）
 
 [
   {{
     "chapter_number": {start_chapter},
-    "title": "C1 章节标题",
-    "bridge_position": "intro",
+    "title": "章节标题",
+    "bridge_position": "{first_position}",
     "scene": "场景地点",
     "pov": "视角角色名",
-    "plot_points": "C1 详细剧情要点 300-400 字",
-    "key_events": ["事件1", "事件2", "章末钩子事件"],
+    "plot_points": "详细剧情要点 300-400 字",
+    "key_events": ["事件1", "事件2", "章末落点事件"],
     "characters_involved": ["角色1", "角色2"],
-    "target_word_count": 3000,
+    "target_word_count": {default_words},
+    "narrative_tasks": {{"resolve": [{{"promise_id": "P1", "how": "怎么回收"}}], "advance": [], "plant": [{{"title": "伏笔名", "content": "怎么埋", "payoff_after": 40}}]}},
     "scenes": [
       {{
         "title": "场景标题（如：清晨醒来回忆任务）",
@@ -502,15 +548,69 @@ C3 章场景密度最大；C4 章最后一张要含"下桥段引子"。
       }},
       {{ "title": "...", "content": "...", "card_type": "dialogue", "scene_order": 1, "word_count_target": 500 }}
     ]
-  }},
-  {{ "chapter_number": {c2_num}, "title": "...", "bridge_position": "build", "scenes": [...], ... }},
-  {{ "chapter_number": {c3_num}, "title": "...", "bridge_position": "payoff", "scenes": [...], ... }},
-  {{ "chapter_number": {c4_num}, "title": "...", "bridge_position": "aftermath", "scenes": [...], ... }}
+  }}
+  …共 {count} 个对象，chapter_number 从 {start_chapter} 到 {end_chapter}，bridge_position 依次为：{position_sequence}
 ]
 
 直接返回 JSON 数组，不要 markdown 标记。
 """
 
+BREATHER_LABEL = "缓冲章：大高潮之后的日常 / 感情 / 群像 / 收获盘点，节奏放缓，人物关系往前走一小步，章末留一个温和的引子"
+
+
+def _position_lines(
+    template: BridgeTemplate, positions: tuple[str, ...], c_start: int, c3_end_rule: str,
+) -> str:
+    last_payoff = max((i for i, p in enumerate(positions) if p == "payoff"), default=-1)
+    lines = []
+    for i, pos in enumerate(positions):
+        label = BREATHER_LABEL if pos == "breather" else template.position_labels.get(pos, pos)
+        if i == last_payoff:
+            label = f"{label}（{c3_end_rule}）"
+        note = position_note(positions, i)
+        lines.append(f"- 第 {c_start + i} 章（{pos}）：{label}" + (f"；{note}" if note else ""))
+    return "\n".join(lines)
+
+
+def render_expansion_task(
+    template: BridgeTemplate,
+    bridge: PlotBridge,
+    c_start: int,
+    pov_rule: str,
+    shape: str = SHAPE_STANDARD,
+    c3_hook_style: str = C3_HOOK_NONE,
+    *,
+    positions: tuple[str, ...] | None = None,
+    default_words: int = 3000,
+) -> str:
+    """按题材模板渲染章纲展开任务段（N 章）；shape = 桥段形态（收官 / 高潮加密时追加「# 桥段形态」段）；
+    c3_hook_style = C3 章末风格；positions = 各章位置序列（变长桥段），默认 4 章标准结构。"""
+    positions = positions or positions_for(4)
+    shape_block = shape_expansion_block(shape)
+    rhythm_label = RHYTHM_LABELS.get(getattr(bridge, "rhythm_role", None) or "standard", "") or "常规"
+    return CHAPTER_EXPANSION_TASK_PROMPT.format(
+        count=len(positions),
+        title=bridge.title,
+        goal=bridge.goal,
+        payoff_name=template.payoff_label,
+        showoff_point=bridge.showoff_point,
+        golden_finger_usage=bridge.golden_finger_usage or "",
+        c1_intro=bridge.c1_intro or "",
+        c2_build=bridge.c2_build or "",
+        c3_payoff=bridge.c3_payoff or "",
+        c4_aftermath=bridge.c4_aftermath or "",
+        rhythm_label=rhythm_label,
+        start_chapter=c_start,
+        end_chapter=c_start + len(positions) - 1,
+        template_name=template.name,
+        position_lines=_position_lines(template, positions, c_start, expansion_c3_rule(c3_hook_style)),
+        c1_rule=OPENING_C1_RULE if bridge.bridge_number == 1 else CONTINUED_C1_RULE,
+        pov_rule=pov_rule,
+        shape_block=f"\n{shape_block}\n" if shape_block else "",
+        first_position=positions[0],
+        default_words=default_words,
+        position_sequence=" / ".join(positions),
+    )
 
 class BridgePlanningService:
     """桥段规划服务（工程化流水线：plan → fill → expand）。"""
@@ -524,8 +624,13 @@ class BridgePlanningService:
     # ---------------- 骨架层（无 LLM） ----------------
 
     async def preview_plan(self, db: AsyncSession, project_id: str) -> BridgeSlotPlan:
-        """纯计算：主线节点 → 桥段槽位表。前置不满足抛 BridgePlanningPreconditionError。"""
-        return compute_bridge_slots(await load_plot_line_data(db, project_id))
+        """纯计算：主线节点 → 桥段槽位表。前置不满足抛 BridgePlanningPreconditionError。
+
+        项目 bridge_rhythm=varied → 变长桥段（3-12 章，带卷内节奏角色）；其余（含旧项目 NULL）→ 每桥段 4 章。
+        """
+        project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
+        rhythm = "varied" if getattr(project, "bridge_rhythm", None) == "varied" else "fixed4"
+        return compute_bridge_slots(await load_plot_line_data(db, project_id), rhythm=rhythm)
 
     async def plan_bridges(self, db: AsyncSession, project_id: str) -> list[PlotBridge]:
         """建骨架：按槽位表创建 N 个 draft 桥段（无 LLM）。已有桥段 → Conflict。"""
@@ -547,6 +652,9 @@ class BridgePlanningService:
                 beat_coverage_end=slot.coverage_end,
                 secondary_beats=json.dumps([asdict(t) for t in slot.secondary], ensure_ascii=False),
                 bridge_number=slot.bridge_number,
+                chapter_start=slot.chapter_start,
+                chapter_end=slot.chapter_end,
+                rhythm_role=slot.rhythm_role,
                 title=f"桥段 {slot.bridge_number} · {slot.beat_title}",
                 goal="",
                 showoff_point="",
@@ -598,6 +706,8 @@ class BridgePlanningService:
         if cur.description:
             parts.append(f"  描述：{cur.description[:300]}")
         parts.extend(beat_facts_lines(cur))
+        if cur.review_note:
+            parts.append(f"  上一卷复盘修正（按它调整本节点规划）：{cur.review_note[:300]}")
         if pos > 0:
             p = beats[pos - 1]
             parts.append(f"- 上一节点：[节点 {p.index}] {p.title}（已收尾）")
@@ -646,6 +756,17 @@ class BridgePlanningService:
             parts.append("")
             parts.append(ledger)
 
+        # 滚动规划：已写正文的实际进展 + 未回收伏笔（供 foreshadow_plan.payoff 选择）
+        first_chapter = bridge_chapter_range(chunk[0])[0]
+        progress = await actual_progress_block(db, project_id, before_chapter=first_chapter)
+        if progress:
+            parts.append("")
+            parts.append(progress)
+        promises, _mapping, _items = await open_promises_block(db, project_id, before_chapter=first_chapter, limit=10)
+        if promises:
+            parts.append("")
+            parts.append(promises)
+
         return FillContext(
             text="\n".join(parts),
             story_fields=story_fields,
@@ -671,12 +792,15 @@ class BridgePlanningService:
             if phase and phase["index"] != current_phase:
                 current_phase = phase["index"]
                 rows.append(f"── 阶段 {phase['index']}《{phase['title']}》（桥段 {phase['bridge_start']}-{phase['bridge_end']}）：{phase['goal'][:60]}")
-            c_start, c_end = chapter_range(b.bridge_number)
+            c_start, c_end = bridge_chapter_range(b)
             cs = (b.beat_coverage_start or 0.0) * 100
             ce = (b.beat_coverage_end or 0.0) * 100
             mark = "★ " if b.bridge_number in target_numbers else "- "
             label = shape_label(bridge_shape(b.beat_coverage_end, b.beat_index, climax_index))
-            row = f"{mark}桥段 {b.bridge_number}：第 {c_start}-{c_end} 章，节点进度 {cs:.0f}% → {ce:.0f}%{label}"
+            rhythm = RHYTHM_LABELS.get(getattr(b, "rhythm_role", None) or "standard", "")
+            rhythm_tag = f"【{rhythm}】" if rhythm else ""
+            row = (f"{mark}桥段 {b.bridge_number}：第 {c_start}-{c_end} 章（{c_end - c_start + 1} 章），"
+                   f"节点进度 {cs:.0f}% → {ce:.0f}%{label}{rhythm_tag}")
             try:
                 secondary = json.loads(b.secondary_beats) if b.secondary_beats else []
             except (json.JSONDecodeError, TypeError):
@@ -761,11 +885,15 @@ class BridgePlanningService:
         """长节点阶段拆分：一次 LLM 调用把节点拆成 K 个递进阶段，落 PlotLine.timeline_data，最后 yield phase_plan。"""
         ranges = phase_ranges(all_numbers)
         beat_lines, _ = self._beat_block(main, beat.index, "【📍 待拆分的主线节点】")
+        rows = (await db.execute(
+            select(PlotBridge).where(PlotBridge.project_id == project_id, PlotBridge.bridge_number.in_(all_numbers))
+        )).scalars().all()
+        chapter_ranges = {b.bridge_number: bridge_chapter_range(b) for b in rows}
         user_prompt = "\n\n".join([
             prompt.user_prompt,
             "\n".join(story_core_lines(fields)),
             "\n".join(beat_lines),
-            render_phase_split_task(beat.index, beat.title, ranges, template.payoff_label),
+            render_phase_split_task(beat.index, beat.title, ranges, template.payoff_label, chapter_ranges),
         ])
         collected: dict[str, Any] = {}
         async for ev in self._stream_llm(
@@ -801,16 +929,20 @@ class BridgePlanningService:
         project_id: str,
         model_name: Optional[str],
         beat_index: Optional[int] = None,
+        max_chapter: Optional[int] = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """按主线节点顺序，把 status=draft 的桥段分批交给 LLM 填内容 → ready。
 
         可续跑：只处理 draft；beat_index 指定时只填该节点。
+        滚动规划（项目 rolling_planning 开启，或显式传 max_chapter）：只填起始章 ≤ 已写章节 + FILL_LOOKAHEAD_CHAPTERS
+        的桥段——远处的桥段等写到附近、带着实际进展再填，避免规划与正文越走越远。
         节点桥段数 ≥ PHASE_SPLIT_MIN_BRIDGES 且尚未拆阶段 → 先一次 LLM 拆阶段（落 timeline_data，续跑复用），
         之后一个阶段一批；否则同节点桥段每 FILL_BATCH_MAX 个一次 LLM 调用（子批之间靠账本衔接）。
         LLM 返回条目与槽位不一致 → ValueError（该批保持 draft，调用方终止流）。
         事件：beat_start → [phase_plan] → batch_done（每批，含 provenance）→ beat_done → … → done
         """
         effective_model = model_name or getattr(self.ai_service, "default_model", None) or ""
+        project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
         drafts_result = await db.execute(
             select(PlotBridge)
             .where(PlotBridge.project_id == project_id, PlotBridge.status == "draft")
@@ -819,8 +951,15 @@ class BridgePlanningService:
         drafts = list(drafts_result.scalars().all())
         if beat_index is not None:
             drafts = [b for b in drafts if b.beat_index == beat_index]
+        if max_chapter is None and getattr(project, "rolling_planning", None):
+            max_chapter = await written_upto(db, project_id) + FILL_LOOKAHEAD_CHAPTERS
+        if max_chapter is not None:
+            drafts = [b for b in drafts if bridge_chapter_range(b)[0] <= max_chapter]
         if not drafts:
-            yield {"type": "done", "filled": 0, "remaining_drafts": 0}
+            remaining = await db.execute(
+                select(PlotBridge.id).where(PlotBridge.project_id == project_id, PlotBridge.status == "draft")
+            )
+            yield {"type": "done", "filled": 0, "remaining_drafts": len(remaining.scalars().all())}
             return
 
         lines = await load_plot_line_data(db, project_id)
@@ -830,7 +969,6 @@ class BridgePlanningService:
         for b in drafts:
             by_beat.setdefault(b.beat_index, []).append(b)
 
-        project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
         template = resolve_template(getattr(project, "genre", None))
         c3_hook_style = normalize_c3_hook_style(getattr(project, "c3_hook_style", None))
         outline = (await db.execute(
@@ -883,13 +1021,17 @@ class BridgePlanningService:
                         bridge_shape(b.beat_coverage_end, b.beat_index, climax_index), b.bridge_number, template.payoff_label,
                     ))
                 )
+                rhythm_rules = tuple(dict.fromkeys(
+                    f"桥段 {b.bridge_number}（{RHYTHM_LABELS[b.rhythm_role]}）：{RHYTHM_FILL_RULES[b.rhythm_role]}"
+                    for b in chunk if getattr(b, "rhythm_role", None) in RHYTHM_FILL_RULES
+                ))
                 user_prompt = "\n\n".join([
                     prompt.user_prompt,
                     fill_ctx.text,
                     render_fill_task(
                         template, len(chunk),
                         self._slot_table(beat_bridges, chunk_numbers, phases, climax_index),
-                        shape_rules, c3_hook_style,
+                        shape_rules, c3_hook_style, rhythm_rules,
                     ),
                 ])
                 what = f"节点 {b_idx} 桥段 {chunk_numbers[0]}-{chunk_numbers[-1]} 填充"
@@ -942,6 +1084,9 @@ class BridgePlanningService:
                         limit = _FILL_SHORT_FIELDS.get(field_name)
                         setattr(b, field_name, value[:limit] if limit else value)
                     b.payoff_type = normalize_payoff_type(item.get("payoff_type"), template)
+                    plan = normalize_foreshadow_plan(item.get("foreshadow_plan"))
+                    if plan:
+                        b.foreshadow_plan = plan
                     b.generation_meta = meta_json
                     b.status = "ready"
                 await db.commit()
@@ -971,10 +1116,12 @@ class BridgePlanningService:
         bridge_id: str,
         model_name: Optional[str],
     ) -> list[ChapterOutline]:
-        """把一个 ready 桥段展开为第 4(n-1)+1 … 4n 章的 4 个 ChapterOutline。
+        """把一个 ready 桥段展开为其章号区间内的 N 个 ChapterOutline（变长桥段 3-12 章；旧数据 4 章）。
 
         前置：status == ready；前一桥段已 completed；目标章号未被占用。
-        产物：ChapterOutline(bridge_id/bridge_position) + PlotCard 场景卡 + ChapterOutlinePlotLineLink 账本。
+        上下文：所属节点（含上一卷复盘修正）、上一桥段实际收尾、下一桥段目标、已写正文的实际进展、
+        未回收伏笔清单（短编号）、本桥段伏笔计划。
+        产物：ChapterOutline(bridge_id/bridge_position/narrative_tasks) + PlotCard 场景卡 + ChapterOutlinePlotLineLink 账本。
         """
         bridge_result = await db.execute(select(PlotBridge).where(PlotBridge.id == bridge_id))
         bridge = bridge_result.scalar_one_or_none()
@@ -997,7 +1144,9 @@ class BridgePlanningService:
                     f"桥段 {bridge.bridge_number - 1} 尚未展开（状态 {prev_status}），必须按顺序展开"
                 )
 
-        c_start, c_end = chapter_range(bridge.bridge_number)
+        c_start, c_end = bridge_chapter_range(bridge)
+        count = c_end - c_start + 1
+        positions = positions_for(count)
         occupied = await db.execute(
             select(ChapterOutline.chapter_number).where(
                 ChapterOutline.project_id == bridge.project_id,
@@ -1026,15 +1175,23 @@ class BridgePlanningService:
         beat_block = await _load_beat_context_for_bridge(db, bridge)
         prev_block = await prev_bridge_last_chapter_block(db, bridge.project_id, bridge.bridge_number)
         next_block = await next_bridge_block(db, bridge.project_id, bridge.bridge_number)
+        progress_block = await actual_progress_block(db, bridge.project_id, before_chapter=c_start)
+        promise_block, promise_ids, open_promises = await open_promises_block(
+            db, bridge.project_id, before_chapter=c_start, limit=15, with_ids=True,
+        )
+        plan_block = foreshadow_plan_block(getattr(bridge, "foreshadow_plan", None))
+        default_words = default_chapter_words(getattr(project, "platform_preset", None))
 
         prompt_parts = [prompt.user_prompt]
-        for block in (beat_block, prev_block, next_block):
+        for block in (beat_block, progress_block, prev_block, next_block, promise_block, plan_block):
             if block:
                 prompt_parts.append(block)
         prompt_parts.append(render_expansion_task(
             template, bridge, c_start, pov_line(getattr(project, "narrative_perspective", None)),
             shape=await _bridge_shape_for(db, bridge),
             c3_hook_style=normalize_c3_hook_style(getattr(project, "c3_hook_style", None)),
+            positions=positions,
+            default_words=default_words,
         ))
         user_prompt = "\n\n".join(prompt_parts)
 
@@ -1047,8 +1204,8 @@ class BridgePlanningService:
         )
         content = _collected_json_text(resp, what=f"桥段 {bridge.bridge_number} 展开")
         chapters_data = safe_parse_json(content, default=[], expected_type="array", log_prefix="[BridgeExpansion]")
-        if not isinstance(chapters_data, list) or len(chapters_data) < CHAPTERS_PER_BRIDGE:
-            raise ValueError("展开的章纲少于 4 个或格式错误")
+        if not isinstance(chapters_data, list) or len(chapters_data) < count:
+            raise ValueError(f"展开的章纲少于 {count} 个或格式错误")
 
         try:
             secondary = json.loads(bridge.secondary_beats) if bridge.secondary_beats else []
@@ -1056,7 +1213,7 @@ class BridgePlanningService:
             secondary = []
         main_cov_per_chapter = (
             (bridge.beat_coverage_end or 0.0) - (bridge.beat_coverage_start or 0.0)
-        ) / CHAPTERS_PER_BRIDGE
+        ) / count
         # 副线账本按剧情线归并：同一支线的多个节点可能落在同一桥段（桥段边界切在相邻节点之间、
         # 或多个锚定节点挤进一个桥段），而账本表 (chapter_outline_id, plot_line_id) 唯一，
         # 所以每条线只建一条 link，多个节点合进 beats_covered
@@ -1064,17 +1221,17 @@ class BridgePlanningService:
         for t in secondary:
             if not isinstance(t, dict) or t.get("role", "primary") == "mention":
                 continue
-            cov = (float(t.get("coverage_end", 0)) - float(t.get("coverage_start", 0))) / CHAPTERS_PER_BRIDGE
+            cov = (float(t.get("coverage_end", 0)) - float(t.get("coverage_start", 0))) / count
             entry = sub_ledger.setdefault(t["plot_line_id"], {"role": t.get("line_type") or "sub", "beats_covered": []})
             entry["beats_covered"].append({"beat_index": int(t["beat_index"]), "coverage": cov})
 
-        positions = ("intro", "build", "payoff", "aftermath")
         created: list[ChapterOutline] = []
         plot_card_count = 0
-        for i, data in enumerate(chapters_data[:CHAPTERS_PER_BRIDGE]):
+        for i, data in enumerate(chapters_data[:count]):
             if not isinstance(data, dict):
                 raise ValueError(f"第 {i + 1} 个章纲不是对象")
             chapter_number = c_start + i
+            tasks = normalize_narrative_tasks(_map_task_ids(data.get("narrative_tasks"), promise_ids), open_promises)
             co = ChapterOutline(
                 project_id=bridge.project_id,
                 chapter_number=chapter_number,
@@ -1084,25 +1241,27 @@ class BridgePlanningService:
                 plot_points=data.get("plot_points"),
                 key_events=json.dumps(data.get("key_events", []), ensure_ascii=False),
                 characters_involved=json.dumps(data.get("characters_involved", []), ensure_ascii=False),
-                target_word_count=data.get("target_word_count") or 3000,
+                target_word_count=_valid_word_count(data.get("target_word_count"), default_words),
                 order_index=chapter_number,
                 bridge_id=bridge.id,
                 bridge_position=positions[i],
+                narrative_tasks=json.dumps(tasks, ensure_ascii=False) if has_tasks(tasks) else None,
             )
             db.add(co)
             await db.flush()
             created.append(co)
 
-            db.add(ChapterOutlinePlotLineLink(
-                chapter_outline_id=co.id,
-                plot_line_id=bridge.plot_line_id,
-                role="main",
-                order_index=0,
-                timeline_coverage=json.dumps(
-                    {"beats_covered": [{"beat_index": bridge.beat_index, "coverage": main_cov_per_chapter}]},
-                    ensure_ascii=False,
-                ),
-            ))
+            if bridge.plot_line_id:  # 自由模式桥段（不挂剧情线）没有主线账本
+                db.add(ChapterOutlinePlotLineLink(
+                    chapter_outline_id=co.id,
+                    plot_line_id=bridge.plot_line_id,
+                    role="main",
+                    order_index=0,
+                    timeline_coverage=json.dumps(
+                        {"beats_covered": [{"beat_index": bridge.beat_index, "coverage": main_cov_per_chapter}]},
+                        ensure_ascii=False,
+                    ),
+                ))
             for order, (line_id, entry) in enumerate(sub_ledger.items(), start=1):
                 db.add(ChapterOutlinePlotLineLink(
                     chapter_outline_id=co.id,
@@ -1159,6 +1318,8 @@ class BridgePlanningService:
     ) -> dict[str, Any]:
         """按 bridge_number 顺序展开全部 ready 桥段；首个失败即停止（后续桥段依赖前序 completed）。
 
+        滚动规划（项目 rolling_planning 开启）：只展开起始章 ≤ 已写章节 + EXPAND_LOOKAHEAD_CHAPTERS 的桥段，
+        其余留到写到附近再展开（届时带着实际进展），结果里 deferred = 延后的桥段数。
         on_bridge_done(bridge, created_chapters)：每个桥段成功后回调（后台任务用它实时推送翻卡事件）。
         每个桥段一个 stage（绑定了过程追踪时出现在前端时间线）。
         """
@@ -1166,14 +1327,19 @@ class BridgePlanningService:
         ready = sorted((b for b in bridges if b.status == "ready"), key=lambda b: b.bridge_number)
         if not ready:
             return {"total": 0, "succeeded": [], "failed": [], "created_chapter_count": 0}
+        project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
+        deferred: int | None = None
+        if getattr(project, "rolling_planning", None):
+            limit = await written_upto(db, project_id) + EXPAND_LOOKAHEAD_CHAPTERS
+            near = [b for b in ready if bridge_chapter_range(b)[0] <= limit]
+            deferred, ready = len(ready) - len(near), near
 
         succeeded: list[str] = []
         failed: list[dict[str, Any]] = []
         created_count = 0
         # 先取出标识：失败后 rollback 会让 ORM 对象过期，再访问属性会触发同步 IO
-        targets = [(b.id, b.bridge_number, b.title or "") for b in ready]
-        for bridge_id, bridge_number, title in targets:
-            c_start, c_end = chapter_range(bridge_number)
+        targets = [(b.id, b.bridge_number, b.title or "", bridge_chapter_range(b)) for b in ready]
+        for bridge_id, bridge_number, title, (c_start, c_end) in targets:
             label = f"展开桥段 {bridge_number}《{title}》→ 第 {c_start}-{c_end} 章"
             try:
                 async with stage_scope(f"bridge-{bridge_number}", label) as st:
@@ -1191,12 +1357,15 @@ class BridgePlanningService:
             if on_bridge_done is not None:
                 await on_bridge_done(await self.get_bridge(db, bridge_id), created)
 
-        return {
+        result = {
             "total": len(ready),
             "succeeded": succeeded,
             "failed": failed,
             "created_chapter_count": created_count,
         }
+        if deferred is not None:
+            result["deferred"] = deferred
+        return result
 
     # ---------------- CRUD ----------------
 

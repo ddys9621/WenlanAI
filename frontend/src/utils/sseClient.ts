@@ -4,7 +4,8 @@ export interface SSEMessage {
   type:
     | 'progress' | 'chunk' | 'result' | 'error' | 'done' | 'start' | 'content' | 'meta'
     | 'thinking' | 'partial' | 'bridges'
-    | 'stage' | 'tool_call' | 'reference' | 'llm';
+    | 'stage' | 'tool_call' | 'reference' | 'llm'
+    | 'batch_chapter';
   message?: string;
   progress?: number;
   word_count?: number;
@@ -230,6 +231,7 @@ class SSEPostClient<TResult = unknown, TRequest = unknown> {
       case 'thinking':
       case 'partial':
       case 'bridges':
+      case 'batch_chapter':
       case 'start':
       case 'stage':
       case 'tool_call':

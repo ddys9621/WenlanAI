@@ -94,6 +94,9 @@ def apply_config_to_env(config):
         os.environ['GEMINI_API_KEY'] = config.get('ai', 'gemini_api_key')
     if config.has_option('ai', 'gemini_base_url'):
         os.environ['GEMINI_BASE_URL'] = config.get('ai', 'gemini_base_url')
+    # 可选：自定义向量模型（需事先放进 embedding 目录），如 BAAI/bge-small-zh-v1.5
+    if config.has_option('ai', 'embedding_model') and config.get('ai', 'embedding_model').strip():
+        os.environ['EMBEDDING_MODEL'] = config.get('ai', 'embedding_model').strip()
     
     # 认证配置
     if config.has_option('auth', 'local_auth_enabled'):

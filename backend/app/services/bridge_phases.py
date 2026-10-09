@@ -103,7 +103,7 @@ def render_phase_block(phases: list[dict[str, Any]], current_index: int) -> str:
     return "\n".join(lines)
 
 
-PHASE_SPLIT_TASK_PROMPT = """请把主线节点 [节点 {beat_index}] {beat_title} 拆成 {count} 个递进阶段。该节点共 {bridge_count} 个桥段（第 {c_start}-{c_end} 章，每桥段 4 章），阶段与桥段的对应关系已由系统确定，**只填创意内容**：
+PHASE_SPLIT_TASK_PROMPT = """请把主线节点 [节点 {beat_index}] {beat_title} 拆成 {count} 个递进阶段。该节点共 {bridge_count} 个桥段（第 {c_start}-{c_end} 章），阶段与桥段的对应关系已由系统确定，**只填创意内容**：
 {ranges_table}
 
 # 阶段设计纪律（网文剧情单元）
@@ -131,14 +131,24 @@ PHASE_SPLIT_TASK_PROMPT = """请把主线节点 [节点 {beat_index}] {beat_titl
 """
 
 
-def render_phase_split_task(beat_index: int, beat_title: str, ranges: list[list[int]], payoff_label: str) -> str:
+def render_phase_split_task(
+    beat_index: int,
+    beat_title: str,
+    ranges: list[list[int]],
+    payoff_label: str,
+    chapter_ranges: dict[int, tuple[int, int]] | None = None,
+) -> str:
+    """chapter_ranges：桥段号 → 实际章号区间（变长桥段）；缺省按每桥段 4 章推算（旧数据）。"""
+    def _range(number: int) -> tuple[int, int]:
+        return (chapter_ranges or {}).get(number) or chapter_range(number)
+
     rows = []
     for i, numbers in enumerate(ranges, start=1):
-        c_start, c_end = chapter_range(numbers[0])[0], chapter_range(numbers[-1])[1]
+        c_start, c_end = _range(numbers[0])[0], _range(numbers[-1])[1]
         rows.append(f"- 阶段 {i}：桥段 {numbers[0]}-{numbers[-1]}（第 {c_start}-{c_end} 章）")
     all_numbers = [n for r in ranges for n in r]
     return PHASE_SPLIT_TASK_PROMPT.format(
         beat_index=beat_index, beat_title=beat_title, count=len(ranges), bridge_count=len(all_numbers),
-        c_start=chapter_range(all_numbers[0])[0], c_end=chapter_range(all_numbers[-1])[1],
+        c_start=_range(all_numbers[0])[0], c_end=_range(all_numbers[-1])[1],
         ranges_table="\n".join(rows), payoff_label=payoff_label,
     )

@@ -73,6 +73,7 @@ export default function Settings() {
     reasoning_enabled: false,
     reasoning_effort: 'medium',
     thinking_budget_tokens: null,
+    analysis_model: '',
     preferences: '',
   })
 
@@ -95,6 +96,7 @@ export default function Settings() {
           reasoning_enabled: data.reasoning_enabled ?? false,
           reasoning_effort: data.reasoning_effort ?? 'medium',
           thinking_budget_tokens: data.thinking_budget_tokens ?? null,
+          analysis_model: data.analysis_model || '',
           preferences: data.preferences || '',
         })
       } catch {
@@ -249,6 +251,7 @@ export default function Settings() {
         reasoning_enabled: settings.reasoning_enabled ?? false,
         reasoning_effort: settings.reasoning_effort ?? 'medium',
         thinking_budget_tokens: settings.thinking_budget_tokens ?? null,
+        analysis_model: settings.analysis_model || '',
         preferences: settings.preferences || '',
       })
     } else {
@@ -265,6 +268,7 @@ export default function Settings() {
         reasoning_enabled: false,
         reasoning_effort: 'medium',
         thinking_budget_tokens: null,
+        analysis_model: '',
         preferences: '',
       })
     }
@@ -470,6 +474,29 @@ export default function Settings() {
                     {models.find(m => m.value === form.llm_model)?.description}
                   </p>
                 )}
+              </div>
+
+              {/* 分析模型：章节分析 / 实体抽取 / 剧情摘要占每章约一半调用量，可用同一接口下更便宜的模型 */}
+              <div>
+                <label className={labelClass}>
+                  分析模型
+                  <span className="ml-2 text-content-tertiary font-normal">可选，留空 = 跟随上面的 LLM 模型</span>
+                </label>
+                <input
+                  className={selectClass + ' w-full'}
+                  list="analysis-model-options"
+                  value={form.analysis_model ?? ''}
+                  placeholder="如 deepseek-chat / gpt-4o-mini"
+                  onChange={e => updateField('analysis_model', e.target.value)}
+                />
+                <datalist id="analysis-model-options">
+                  {models.map(m => (
+                    <option key={m.value} value={m.value}>{m.label}</option>
+                  ))}
+                </datalist>
+                <p className="text-xs text-content-tertiary mt-1">
+                  章节分析、实体抽取、剧情单元 / 卷摘要会用这个模型（同一个接口和 Key）。长篇每章都要分析，换成便宜快的模型能省一半左右的费用。
+                </p>
               </div>
 
               {/* Temperature */}

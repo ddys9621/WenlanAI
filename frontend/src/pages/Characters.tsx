@@ -22,13 +22,14 @@ interface FormData {
   role_type: string;
   personality: string;
   background: string;
+  speech_style: string;
   is_organization: boolean;
   organization_type: string;
   organization_purpose: string;
   reason: string;
 }
 
-const EMPTY_FORM: FormData = { name: '', role_type: 'protagonist', personality: '', background: '', is_organization: false, organization_type: '', organization_purpose: '', reason: '' };
+const EMPTY_FORM: FormData = { name: '', role_type: 'protagonist', personality: '', background: '', speech_style: '', is_organization: false, organization_type: '', organization_purpose: '', reason: '' };
 
 export default function Characters() {
   const { currentProject, characters } = useStore();
@@ -131,6 +132,7 @@ export default function Characters() {
       role_type: normalizeRoleType(c.role_type, c.is_organization ? 'supporting' : 'protagonist'),
       personality: c.personality || '',
       background: c.background || '',
+      speech_style: c.speech_style || '',
       is_organization: c.is_organization,
       organization_type: c.organization_type || '',
       organization_purpose: c.organization_purpose || '',
@@ -166,6 +168,8 @@ export default function Characters() {
         payload.is_organization = true;
         payload.organization_type = form.organization_type;
         payload.organization_purpose = form.organization_purpose;
+      } else {
+        payload.speech_style = form.speech_style.trim() || null;
       }
       if (editingId) {
         await characterApi.updateCharacter(editingId, payload);
@@ -687,6 +691,19 @@ export default function Characters() {
                       onChange={(e) => setForm((p) => ({ ...p, personality: e.target.value }))}
                       placeholder="描述角色的性格特点…"
                       rows={3}
+                      className="hh-textarea"
+                    />
+                  </div>
+                  <div>
+                    <label className="hh-label">
+                      说话风格
+                      <span className="ml-1.5 text-xs font-normal text-content-tertiary">口头禅、语气、怎么称呼别人；写正文时按出场角色注入</span>
+                    </label>
+                    <textarea
+                      value={form.speech_style}
+                      onChange={(e) => setForm((p) => ({ ...p, speech_style: e.target.value }))}
+                      placeholder="如：嘴硬爱吐槽，口头禅“行吧”，管师父叫“老头子”"
+                      rows={2}
                       className="hh-textarea"
                     />
                   </div>

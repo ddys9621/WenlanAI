@@ -566,8 +566,11 @@ class PlotPromptTemplates:
         chapters_rule = ""
         if chapters:
             opening_cap = min(OPENING_BEAT_MAX_CHAPTERS, max(4, chapters // 10))
+            avg_lo, avg_hi = round(chapters / hi), round(chapters / lo)
+            avg_text = f"{avg_lo}" if avg_lo == avg_hi else f"{avg_lo}-{avg_hi}"
             length_block = f"""
-【全书体量】全书 {chapters} 章，约每 {CHAPTERS_PER_MAIN_BEAT} 章一个节点；每个节点 = 一个 10-30 章的剧情单元（一张地图 / 一个对手层级 / 一件大事），后续会被切成若干个 4 章桥段来写
+【全书体量】全书 {chapters} 章，共 {count_text}，平均每个节点约 {avg_text} 章（≈ 一卷：一张地图 / 一个对手层级 / 一件大事）；\
+超过 20 章的节点后续会再拆成若干阶段（每阶段 10-16 章一件事）和长短不一的桥段来写
 【篇幅纪律】
 - chapters 之和 = {chapters}；第一个节点（开篇：金手指到手 / 第一次冲突）≤ {opening_cap} 章，前 30 章内必须进入第一个正式冲突循环
 - weight 只表示重要性（高潮节点最高），不再代表篇幅；篇幅由 chapters 单独给出
@@ -585,7 +588,7 @@ class PlotPromptTemplates:
 【网文节奏要求】
 1. 每2-3个节点安排一个爽点（打脸/突破/收获）
 2. 每个节点结尾要有钩子（悬念/危机/期待）
-3. 冲突要持续升级，敌人越来越强：对手层级、赌注、舞台逐节点抬高，不得回落
+3. 冲突逐节点升级：对手层级、赌注、舞台一卷比一卷大；节点内部允许起伏（受挫、低谷、缓冲日常），不要一路平推
 {rhythm}
 
 【节点结构】

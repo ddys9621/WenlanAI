@@ -213,6 +213,7 @@ async def generate_character_for_project(
             personality=character_data.get("personality", ""),
             background=character_data.get("background", ""),
             appearance=character_data.get("appearance", ""),
+            speech_style=(str(character_data.get("speech_style") or "").strip() or None) if not is_organization else None,
             relationships=relationships_text,
             organization_type=character_data.get("organization_type") if is_organization else None,
             organization_purpose=character_data.get("organization_purpose") if is_organization else None,

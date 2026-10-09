@@ -56,6 +56,19 @@ _last_stream_finish_reason: ContextVar[Optional[str]] = ContextVar(
     "mumu_last_stream_finish_reason", default=None
 )
 
+
+def reset_stream_finish_reason() -> None:
+    """清空当前 context 记录的流式 finish_reason（直接消费流的调用方在开流前调用）。"""
+    _last_stream_finish_reason.set(None)
+
+
+def last_stream_finish_reason() -> Optional[str]:
+    """当前 context 最近一次流式调用的真实 finish_reason（"stop" / "length" …；未知为 None）。
+
+    正文生成据此判断"被 Max Tokens 截断"并自动续写，而不是把半截正文当成功落库。
+    """
+    return _last_stream_finish_reason.get()
+
 # 推理过程观察钩子：_generate_openai_stream 每收到 reasoning delta 就回调累计字符数。
 # 只给 generate_text_stream_events 用（桥段填充 UX 的"思考中 N 字"），不传思考文本本身。
 _stream_reasoning_sink: ContextVar[Optional[Callable[[int], None]]] = ContextVar(
@@ -559,6 +572,8 @@ class AIService:
     default_top_p: Optional[float] = None
     default_frequency_penalty: float = 0.0
     default_presence_penalty: float = 0.0
+    # 分析 / 抽取 / 摘要专用模型（用户设置 preferences.analysis_model）；None = 跟随 default_model
+    analysis_model: Optional[str] = None
 
     def __init__(
         self,
@@ -574,6 +589,7 @@ class AIService:
         default_top_p: Optional[float] = None,
         default_frequency_penalty: Optional[float] = None,
         default_presence_penalty: Optional[float] = None,
+        analysis_model: Optional[str] = None,
     ):
         """
         初始化AI客户端（优化并发性能）
@@ -631,6 +647,8 @@ class AIService:
             default_presence_penalty if default_presence_penalty is not None
             else app_settings.default_presence_penalty
         )
+        # 分析 / 抽取 / 摘要专用模型（同一接口）；空 = 跟随主模型
+        self.analysis_model = (analysis_model or "").strip() or None
 
         # 标记资源是否已关闭
         self._closed = False
@@ -725,14 +743,18 @@ class AIService:
             if self.api_provider == "anthropic":
                 logger.warning("⚠️ Anthropic API key未配置，但被设置为当前AI提供商")
 
-    def _apply_openai_sampling(self, payload: Dict[str, Any]) -> None:
+    def _apply_openai_sampling(self, payload: Dict[str, Any], creative: bool = False) -> None:
         """把采样多样性参数写入 OpenAI 兼容请求体（降低"AI 味"/困惑度）。
 
+        只对创作任务（正文 / 重写 / 场景 / 仿写，调用方传 creative=True）生效：分析、规划、JSON 抽取
+        走中性采样——频率 / 存在惩罚会压制 JSON 里反复出现的键名和长文里反复出现的人名。
         仅在偏离中性值时注入，避免个别兼容网关对未知/默认参数敏感：
         - top_p<1 才传（=1 等于不做核采样）
         - frequency_penalty / presence_penalty 非 0 才传（0 = 关闭）
         取值范围由 schema 层校验（top_p 0~1，penalty -2~2）。
         """
+        if not creative:
+            return
         top_p = self.default_top_p
         if top_p is not None and top_p < 1.0:
             payload["top_p"] = top_p
@@ -744,8 +766,10 @@ class AIService:
             payload["presence_penalty"] = self.default_presence_penalty
             logger.info(f"  - presence_penalty: {self.default_presence_penalty}")
 
-    def _anthropic_top_p(self) -> Optional[float]:
-        """Anthropic 只支持 top_p（不支持 frequency/presence_penalty）；<1 才返回。"""
+    def _anthropic_top_p(self, creative: bool = False) -> Optional[float]:
+        """Anthropic 只支持 top_p（不支持 frequency/presence_penalty）；仅创作任务且 <1 才返回。"""
+        if not creative:
+            return None
         top_p = self.default_top_p
         return top_p if (top_p is not None and top_p < 1.0) else None
 
@@ -759,6 +783,8 @@ class AIService:
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[str] = None,
         response_format: Optional[Dict[str, Any]] = None,
+        *,
+        creative: bool = False,
     ) -> Dict[str, Any]:
         """
         生成文本（支持工具调用）
@@ -775,6 +801,7 @@ class AIService:
             tool_choice: 工具选择策略 (auto/required/none)
             response_format: 响应格式约束，例如 {"type": "json_object"} 强制 JSON 输出
                              （DeepSeek/Qwen/OpenAI 兼容；Anthropic 会被忽略）
+            creative: 创作任务（正文 / 重写）才带采样多样性参数；默认中性采样
             
         Returns:
             Dict包含:
@@ -798,14 +825,14 @@ class AIService:
             if provider == "openai":
                 result = await self._generate_openai_with_tools(
                     prompt, model, temperature, max_tokens, system_prompt, tools, tool_choice,
-                    response_format=response_format,
+                    response_format=response_format, creative=creative,
                 )
             elif provider == "anthropic":
                 # Anthropic 不支持 response_format，需要 JSON 强制请使用 tool_use 模式
                 if response_format:
                     logger.debug("Anthropic provider 忽略 response_format 参数")
                 result = await self._generate_anthropic_with_tools(
-                    prompt, model, temperature, max_tokens, system_prompt, tools, tool_choice
+                    prompt, model, temperature, max_tokens, system_prompt, tools, tool_choice, creative=creative,
                 )
             else:
                 raise ValueError(f"不支持的AI提供商: {provider}")
@@ -827,7 +854,9 @@ class AIService:
         provider: Optional[str] = None,
         model: Optional[str] = None,
         temperature: Optional[float] = None,
-        system_prompt: Optional[str] = None
+        system_prompt: Optional[str] = None,
+        *,
+        creative: bool = False,
     ) -> AsyncGenerator[str, None]:
         """
         流式生成文本
@@ -840,6 +869,7 @@ class AIService:
             model: 模型名称
             temperature: 温度参数
             system_prompt: 系统提示词
+            creative: 创作任务（正文 / 重写）才带采样多样性参数；默认中性采样
             
         Yields:
             生成的文本片段
@@ -852,9 +882,13 @@ class AIService:
         max_tokens = self.default_max_tokens
 
         if provider == "openai":
-            inner = self._generate_openai_stream(prompt, model, temperature, max_tokens, system_prompt)
+            inner = self._generate_openai_stream(
+                prompt, model, temperature, max_tokens, system_prompt, creative=creative,
+            )
         elif provider == "anthropic":
-            inner = self._generate_anthropic_stream(prompt, model, temperature, max_tokens, system_prompt)
+            inner = self._generate_anthropic_stream(
+                prompt, model, temperature, max_tokens, system_prompt, creative=creative,
+            )
         else:
             raise ValueError(f"不支持的AI提供商: {provider}")
         async for chunk in _traced_stream(inner, model=model, prompt_chars=len(prompt) + len(system_prompt or "")):
@@ -868,6 +902,8 @@ class AIService:
         temperature: Optional[float] = None,
         system_prompt: Optional[str] = None,
         context: Optional[str] = None,
+        *,
+        creative: bool = False,
     ) -> Dict[str, Any]:
         """流式生成 + 累积内容 = 一次性返完整 content（取代 generate_text 用于长 JSON 输出）。
 
@@ -880,7 +916,7 @@ class AIService:
           （避免重复内容污染 JSON 解析）
 
         Args:
-            prompt / provider / model / temperature / system_prompt: 同 generate_text
+            prompt / provider / model / temperature / system_prompt / creative: 同 generate_text
             context: 仅用于日志标记（不影响逻辑），便于排查跨调用方的流式累积日志
 
         Returns:
@@ -900,12 +936,15 @@ class AIService:
         chunk_count = 0
         # 先清空，避免同一 context 内上一次调用的 finish_reason 残留到本次
         _last_stream_finish_reason.set(None)
+        # 只在创作任务时才多传 creative：不少测试桩 / 旧调用方的 generate_text_stream 不接受该参数
+        extra: Dict[str, Any] = {"creative": True} if creative else {}
         async for chunk in self.generate_text_stream(
             prompt=prompt,
             provider=provider,
             model=model,
             temperature=temperature,
             system_prompt=system_prompt,
+            **extra,
         ):
             if chunk:
                 accumulated_chunks.append(chunk)
@@ -932,6 +971,7 @@ class AIService:
         *,
         heartbeat_interval: float = 1.0,
         reasoning_min_interval: float = 0.5,
+        creative: bool = False,
     ) -> AsyncGenerator[StreamEvent, None]:
         """把底层流拆成事件：content / reasoning（节流）/ heartbeat（静默超时）/ done。
 
@@ -956,13 +996,15 @@ class AIService:
                 last_reasoning_emit = now
                 queue.put_nowait(("reasoning", total))
 
+        extra: Dict[str, Any] = {"creative": True} if creative else {}
+
         async def _producer() -> None:
             _stream_reasoning_sink.set(_sink)
             _last_stream_finish_reason.set(None)
             try:
                 async for chunk in self.generate_text_stream(
                     prompt=prompt, provider=provider, model=model,
-                    temperature=temperature, system_prompt=system_prompt,
+                    temperature=temperature, system_prompt=system_prompt, **extra,
                 ):
                     if chunk:
                         queue.put_nowait(("content", chunk))
@@ -1006,6 +1048,7 @@ class AIService:
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[str] = None,
         response_format: Optional[Dict[str, Any]] = None,
+        creative: bool = False,
     ) -> Dict[str, Any]:
         """使用OpenAI生成文本（支持工具调用）"""
         if not self.openai_http_client:
@@ -1032,7 +1075,7 @@ class AIService:
                 "temperature": temperature,
                 "max_tokens": max_tokens
             }
-            self._apply_openai_sampling(payload)
+            self._apply_openai_sampling(payload, creative=creative)
 
             # 思考/推理强度：启用时透传 reasoning_effort（仅推理模型 GPT-5 / o 系列生效）
             if self.reasoning_enabled:
@@ -1140,7 +1183,8 @@ class AIService:
         max_tokens: int,
         system_prompt: Optional[str],
         tools: Optional[List[Dict[str, Any]]] = None,
-        tool_choice: Optional[str] = None
+        tool_choice: Optional[str] = None,
+        creative: bool = False,
     ) -> Dict[str, Any]:
         """使用Anthropic生成文本（支持工具调用）"""
         if not self.anthropic_client:
@@ -1172,7 +1216,7 @@ class AIService:
                     )
                 kwargs["temperature"] = temperature
                 # top_p 仅在非思考模式下透传（思考模式要求默认采样）；penalty 不受 Anthropic 支持
-                _top_p = self._anthropic_top_p()
+                _top_p = self._anthropic_top_p(creative=creative)
                 if _top_p is not None:
                     kwargs["top_p"] = _top_p
 
@@ -1236,7 +1280,8 @@ class AIService:
         model: str,
         temperature: float,
         max_tokens: int,
-        system_prompt: Optional[str]
+        system_prompt: Optional[str],
+        creative: bool = False,
     ) -> AsyncGenerator[str, None]:
         """使用OpenAI流式生成文本（T2.3.2 已接入流式 retry）"""
         if not self.openai_http_client:
@@ -1264,7 +1309,7 @@ class AIService:
             "max_tokens": max_tokens,
             "stream": True
         }
-        self._apply_openai_sampling(payload)
+        self._apply_openai_sampling(payload, creative=creative)
 
         # 思考/推理强度：启用时透传 reasoning_effort（仅推理模型 GPT-5 / o 系列生效）
         if self.reasoning_enabled:
@@ -1403,7 +1448,8 @@ class AIService:
         model: str,
         temperature: float,
         max_tokens: int,
-        system_prompt: Optional[str]
+        system_prompt: Optional[str],
+        creative: bool = False,
     ) -> AsyncGenerator[str, None]:
         """使用Anthropic流式生成文本（T2.3.2 已接入流式 retry）"""
         if not self.anthropic_client:
@@ -1435,7 +1481,7 @@ class AIService:
                 )
             stream_kwargs["temperature"] = temperature
             # top_p 仅在非思考模式下透传（思考模式要求默认采样）；penalty 不受 Anthropic 支持
-            _top_p = self._anthropic_top_p()
+            _top_p = self._anthropic_top_p(creative=creative)
             if _top_p is not None:
                 stream_kwargs["top_p"] = _top_p
 
@@ -1695,6 +1741,7 @@ def create_user_ai_service(
     top_p: Optional[float] = None,
     frequency_penalty: Optional[float] = None,
     presence_penalty: Optional[float] = None,
+    analysis_model: Optional[str] = None,
 ) -> AIService:
     """
     根据用户设置创建AI服务实例
@@ -1729,4 +1776,5 @@ def create_user_ai_service(
         default_top_p=top_p,
         default_frequency_penalty=frequency_penalty,
         default_presence_penalty=presence_penalty,
+        analysis_model=analysis_model,
     )

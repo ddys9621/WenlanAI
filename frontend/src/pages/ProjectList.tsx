@@ -36,7 +36,7 @@ import {
   type ReferencePackSelectorValue,
 } from '@/components/ReferencePackSelector'
 import { BrandLogo } from '@/components/ui/BrandLogo'
-import type { Project } from '@/types'
+import type { PlatformPreset, Project } from '@/types'
 
 /* ─── 常量 ─── */
 
@@ -847,6 +847,10 @@ interface WizardForm {
   requirements: string
   /** 向导步骤 4：支线数量（主线固定 1 条并覆盖全书章节数） */
   sub_line_count: number
+  /** 目标平台（空 = 通用） */
+  platform_preset: PlatformPreset | ''
+  /** 长篇模式：变长桥段 + 滚动规划 */
+  longform_mode: boolean
 }
 
 const DEFAULT_WIZARD_FORM: WizardForm = {
@@ -860,7 +864,19 @@ const DEFAULT_WIZARD_FORM: WizardForm = {
   character_count: 5,
   requirements: '',
   sub_line_count: 2,
+  platform_preset: '',
+  longform_mode: false,
 }
+
+const PLATFORM_CHOICES: { value: PlatformPreset | ''; label: string }[] = [
+  { value: '', label: '通用' },
+  { value: 'qidian', label: '起点（付费）' },
+  { value: 'fanqie', label: '番茄（免费）' },
+  { value: 'jinjiang', label: '晋江（女频）' },
+  { value: 'qimao', label: '七猫（免费）' },
+]
+/** 章节数达到这个量级时向导默认打开长篇模式 */
+const LONGFORM_SUGGEST_CHAPTERS = 200
 
 const GENRE_OPTIONS = ['玄幻', '奇幻', '武侠', '仙侠', '都市', '现实', '历史', '军事', '游戏', '体育', '科幻', '悬疑', '灵异', '二次元', '言情', '现言', '古言']
 const PERSPECTIVE_OPTIONS = ['第一人称', '第三人称', '全知视角']
@@ -1055,6 +1071,9 @@ function WizardModal({
           selected_plugins: selectedPlugins,
           // V3.2-B：透传拆书参考包；项目创建成功后后端会自动挂载
           ...r8Payload(),
+          // 长篇设置：平台预设（选了平台会带出 C3 章末默认）+ 长篇模式（变长桥段 + 滚动规划）
+          ...(form.platform_preset ? { platform_preset: form.platform_preset } : {}),
+          ...(form.longform_mode ? { bridge_rhythm: 'varied' as const, rolling_planning: true } : {}),
         },
         {
           signal: controller.signal,
@@ -1420,7 +1439,11 @@ function WizardModal({
                   <input
                     type="number"
                     value={form.chapter_count}
-                    onChange={e => updateField('chapter_count', Number(e.target.value))}
+                    onChange={e => {
+                      const n = Number(e.target.value)
+                      updateField('chapter_count', n)
+                      if (n >= LONGFORM_SUGGEST_CHAPTERS && !form.longform_mode) updateField('longform_mode', true)
+                    }}
                     className="hh-field"
                   />
                 </div>
@@ -1433,6 +1456,33 @@ function WizardModal({
                     className="hh-field"
                   />
                 </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="hh-label">目标平台</label>
+                  <select
+                    value={form.platform_preset}
+                    onChange={e => updateField('platform_preset', e.target.value as PlatformPreset | '')}
+                    className="hh-field"
+                  >
+                    {PLATFORM_CHOICES.map(p => (
+                      <option key={p.value || 'generic'} value={p.value}>{p.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <label className="flex cursor-pointer items-start gap-2 pt-6 text-xs text-content-secondary">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={form.longform_mode}
+                    onChange={e => updateField('longform_mode', e.target.checked)}
+                  />
+                  <span className="leading-5">
+                    <span className="font-medium text-content">长篇模式</span>
+                    （变长桥段 + 滚动规划，写 {LONGFORM_SUGGEST_CHAPTERS} 章以上建议打开）
+                  </span>
+                </label>
               </div>
 
               <div>

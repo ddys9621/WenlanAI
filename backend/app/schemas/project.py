@@ -17,9 +17,15 @@ class ProjectBase(BaseModel):
     character_count: Optional[int] = Field(None, ge=1, description="character count")
 
 
+PLATFORM_PATTERN = "^(qidian|fanqie|jinjiang|qimao)$"
+RHYTHM_PATTERN = "^(varied|fixed4)$"
+
+
 class ProjectCreate(ProjectBase):
     """创建项目的请求模型"""
-    pass
+    platform_preset: Optional[str] = Field(None, pattern=PLATFORM_PATTERN, description="平台预设：qidian / fanqie / jinjiang / qimao")
+    bridge_rhythm: Optional[str] = Field(None, pattern=RHYTHM_PATTERN, description="桥段节奏：varied 变长 / fixed4 固定 4 章")
+    rolling_planning: Optional[bool] = Field(None, description="滚动规划：桥段填充 / 章纲展开只提前一段做")
 
 
 class ProjectUpdate(BaseModel):
@@ -40,6 +46,9 @@ class ProjectUpdate(BaseModel):
     narrative_perspective: Optional[str] = None
     character_count: Optional[int] = None
     c3_hook_style: Optional[str] = Field(None, pattern="^(none|soft)$", description="桥段 C3 章末：none 不留钩子 / soft 半钩")
+    platform_preset: Optional[str] = Field(None, pattern=PLATFORM_PATTERN, description="平台预设：qidian / fanqie / jinjiang / qimao")
+    bridge_rhythm: Optional[str] = Field(None, pattern=RHYTHM_PATTERN, description="桥段节奏：varied 变长 / fixed4 固定 4 章（只影响之后新规划的桥段）")
+    rolling_planning: Optional[bool] = Field(None, description="滚动规划：桥段填充 / 章纲展开只提前一段做")
     # current_words 由章节内容自动计算，不允许手动修改
 
 
@@ -59,6 +68,9 @@ class ProjectResponse(ProjectBase):
     narrative_perspective: Optional[str] = None
     character_count: Optional[int] = None
     c3_hook_style: Optional[str] = None
+    platform_preset: Optional[str] = None
+    bridge_rhythm: Optional[str] = None
+    rolling_planning: Optional[bool] = None
     created_at: datetime
     updated_at: datetime
     

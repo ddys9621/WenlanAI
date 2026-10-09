@@ -9,9 +9,8 @@ import { toast } from 'sonner';
 import { chapterApi, chapterOutlineLinkApi, type ChapterRegenerateRequest, type ChapterRegenerateResult, type ChapterWriteResult } from '@/services/api';
 import { AIJobError, runAIJob, useAIJob, useAIJobsStore, useRunningAIJobs, waitForAIJob } from '@/store/aiJobsStore';
 import type { SSEClientOptions } from '@/utils/sseClient';
-import { normalizeAnalysisData } from '@/utils/chapterAnalysis';
-import { selectBatchChapters } from '@/utils/chapterBatch';
-import type { Chapter, ChapterGenerateRequest, PlotCardWithLinks } from '@/types';
+import { countBatchTargets, describeBatchEvent, selectBatchChapters } from '@/utils/chapterBatch';
+import type { Chapter, ChapterBatchEvent, ChapterBatchResult, ChapterGenerateRequest, PlotCardWithLinks } from '@/types';
 
 export interface StreamState {
   chapterId: string;
@@ -39,7 +38,8 @@ type WriteJobKind = 'chapter_generate' | 'chapter_regenerate';
 
 /** 页面自带面板承担正文任务；横幅只兜底其它任务，面板隐藏（后台运行）时才把正文任务也放进横幅 */
 export const WRITE_JOB_KINDS = ['chapter_generate', 'chapter_regenerate'];
-export const OTHER_JOB_KINDS = ['chapter_analyze', 'scene_generate', 'chapter_imitate'];
+/** chapter_batch = 服务端批量（页面有批量进度条；横幅兜底展示，刷新 / 切页回来也能看到） */
+export const OTHER_JOB_KINDS = ['chapter_analyze', 'scene_generate', 'chapter_imitate', 'chapter_batch'];
 
 const abortError = () => new DOMException('Request aborted', 'AbortError');
 
@@ -60,7 +60,6 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
   const [showProcess, setShowProcess] = useState(true);
   const [streamDone, setStreamDone] = useState(false);
   const cancelJob = useAIJobsStore((s) => s.cancel);
-  const attachJob = useAIJobsStore((s) => s.attach);
   const runningWriteJobs = useRunningAIJobs(projectId, WRITE_JOB_KINDS);
   const runningAnalyses = useRunningAIJobs(projectId, ['chapter_analyze']);
   const [relatedCards, setRelatedCards] = useState<PlotCardWithLinks[]>([]);
@@ -68,6 +67,8 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
 
   const [batchStatus, setBatchStatus] = useState<BatchStatusState | null>(null);
   const batchCancelRef = useRef(false);
+  const batchJobIdRef = useRef<string | null>(null);
+  const runningBatchJobs = useRunningAIJobs(projectId, ['chapter_batch']);
   const [analyzingIds, setAnalyzingIds] = useState<Set<string>>(new Set());
 
   const onWrittenRef = useRef(onChapterWritten);
@@ -205,44 +206,6 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
     }
   }, [loadRelatedCardsForChapter, refreshChapters]);
 
-  /** 等待本章分析任务（正文任务 result 里带 analysis_job_id）结束；没有分析任务则直接返回 */
-  const waitForChapterAnalysis = useCallback(async (chapter: Chapter, analysisJobId: string | null | undefined) => {
-    if (!analysisJobId) return;
-    setAnalyzingIds((prev) => new Set(prev).add(chapter.id));
-    const unsubscribe = useAIJobsStore.getState().subscribe(analysisJobId, (m) => {
-      if (m.type !== 'progress' || typeof m.message !== 'string') return;
-      const waitingMessage = `正在分析第 ${chapter.chapter_number} 章：${m.message}`;
-      setBatchStatus((prev) => prev && prev.status === 'running' && prev.currentChapterId === chapter.id
-        ? { ...prev, message: waitingMessage }
-        : prev);
-      setStreamState((prev) => prev && prev.chapterId === chapter.id
-        ? { ...prev, message: waitingMessage, progress: 100 }
-        : prev);
-    });
-    try {
-      if (batchCancelRef.current) throw abortError();
-      await attachJob(analysisJobId).catch(() => { /* 已在 store 中 / 已过期 → 由 waitForAIJob 判定 */ });
-      await waitForAIJob(analysisJobId);
-      await refreshChapters();
-      onWrittenRef.current?.(chapter.id);
-      setBatchStatus((prev) => prev && prev.status === 'running' && prev.currentChapterId === chapter.id
-        ? { ...prev, message: `第 ${chapter.chapter_number} 章分析完成，开始整理记忆…` }
-        : prev);
-    } catch (error) {
-      if (error instanceof AIJobError) {
-        throw new Error(error.job.error || `第 ${chapter.chapter_number} 章分析失败`);
-      }
-      throw error;
-    } finally {
-      unsubscribe();
-      setAnalyzingIds((prev) => {
-        const next = new Set(prev);
-        next.delete(chapter.id);
-        return next;
-      });
-    }
-  }, [attachJob, refreshChapters]);
-
   const resetStreamView = useCallback(() => {
     setStreamState(null);
     setStreamJobId(null);
@@ -259,11 +222,56 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
   const cancelBatch = useCallback(() => {
     if (!batchStatus || batchStatus.status !== 'running') return;
     batchCancelRef.current = true;
+    if (batchJobIdRef.current) void cancelJob(batchJobIdRef.current);
     if (streamJobId) void cancelJob(streamJobId);
     resetStreamView();
-    setBatchStatus((prev) => (prev ? { ...prev, status: 'cancelled', message: '已取消批量生成' } : prev));
+    setBatchStatus((prev) => (prev ? { ...prev, status: 'cancelled', message: '已取消批量生成（已写完的章节已保存）' } : prev));
     toast.info('已取消批量生成');
   }, [batchStatus, streamJobId, cancelJob, resetStreamView]);
+
+  /** 刷新 / 切页回来：服务端批量仍在跑 → 接上进度条，结束后刷新章节列表 */
+  useEffect(() => {
+    if (batchStatus || runningBatchJobs.length === 0) return;
+    const job = runningBatchJobs[0];
+    batchJobIdRef.current = job.id;
+    setBatchStatus({
+      status: 'running',
+      total: Math.max(1, Number(job.meta.to_chapter ?? 0) - Number(job.meta.from_chapter ?? 0) + 1),
+      completed: 0,
+      progress: job.progress?.pct ?? 0,
+      currentChapterId: null,
+      currentChapterNumber: null,
+      currentChapterTitle: null,
+      message: job.progress?.message ?? '批量生成进行中…',
+      skippedCount: 0,
+    });
+    void waitForAIJob(job.id)
+      .then(async (finished) => {
+        await refreshChapters();
+        const result = finished.result as ChapterBatchResult | null;
+        setBatchStatus((prev) => prev ? {
+          ...prev,
+          status: result?.status === 'paused' ? 'cancelled' : result?.status === 'stopped' ? 'error' : 'completed',
+          completed: result?.completed.length ?? prev.completed,
+          progress: 100,
+          message: result?.message ?? '批量生成完成',
+        } : prev);
+      })
+      .catch(() => {
+        setBatchStatus((prev) => (prev ? { ...prev, status: 'cancelled', message: '批量生成已停止' } : prev));
+      });
+  }, [batchStatus, runningBatchJobs, refreshChapters]);
+
+  /** 运行中的批量任务把进度同步到进度条（接管后没有逐章事件订阅时也能动） */
+  useEffect(() => {
+    const job = runningBatchJobs[0];
+    if (!job || batchStatus?.status !== 'running') return;
+    setBatchStatus((prev) => prev && prev.status === 'running' ? {
+      ...prev,
+      progress: Math.max(prev.progress, Math.min(job.progress?.pct ?? 0, 99)),
+      message: job.progress?.message || prev.message,
+    } : prev);
+  }, [runningBatchJobs, batchStatus?.status]);
 
   const cancelStream = useCallback(() => {
     if (batchStatus?.status === 'running') {
@@ -274,16 +282,6 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
     resetStreamView();
     toast.info('已停止生成');
   }, [batchStatus, cancelBatch, streamJobId, cancelJob, resetStreamView]);
-
-  /** 拉取某章一致性审计中的严重问题数（失败按 0 处理，不阻塞批量流程） */
-  const fetchCriticalIssueCount = useCallback(async (chapterId: string): Promise<number> => {
-    try {
-      const data = await chapterApi.getAnalysis(chapterId);
-      return normalizeAnalysisData(data as unknown as Record<string, unknown>).consistency_audit.summary.critical;
-    } catch {
-      return 0;
-    }
-  }, []);
 
   /** 生成前检查：前面有「有正文但未分析（无记忆状态）」的章节则提醒用户是否继续。返回 true=继续。 */
   const confirmUnanalyzedPrevious = useCallback(async (chapter: Chapter): Promise<boolean> => {
@@ -296,105 +294,122 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
     return true;
   }, []);
 
-  const startBatch = useCallback(async ({ from, to, pauseOnCritical }: { from: number; to: number; pauseOnCritical: boolean }) => {
+  /**
+   * 服务端批量：整段范围交给后端队列（关掉页面也不停，刷新后托盘可接管）。
+   * 逐章事件 batch_chapter 驱动本地进度；暂停 / 失败的原因在 result.message 里。
+   */
+  const startBatch = useCallback(async ({
+    from, to, pauseOnCritical, qualityGate = true, pipeline = false, autoExpand = true,
+  }: { from: number; to: number; pauseOnCritical: boolean; qualityGate?: boolean; pipeline?: boolean; autoExpand?: boolean }) => {
     if (!projectId) return;
     const { toGenerate, skipped } = selectBatchChapters(chapters, from, to);
-    if (toGenerate.length === 0) {
+    const total = countBatchTargets(chapters, from, to);
+    if (total === 0) {
       toast.info('所选范围内没有待生成的章节');
       return;
     }
     // 批量生成前：以首个待生成章节为基准检查前置未分析章节，提醒用户是否继续
-    if (!(await confirmUnanalyzedPrevious(toGenerate[0]))) return;
+    if (toGenerate[0] && !(await confirmUnanalyzedPrevious(toGenerate[0]))) return;
 
     batchCancelRef.current = false;
+    let done = 0;
     setBatchStatus({
       status: 'running',
-      total: toGenerate.length,
+      total,
       completed: 0,
       progress: 0,
       currentChapterId: null,
       currentChapterNumber: null,
       currentChapterTitle: null,
-      message: skipped > 0 ? `已自动跳过 ${skipped} 章已有内容的章节` : '准备开始串行生成…',
+      message: skipped > 0 ? `已自动跳过 ${skipped} 章已有内容的章节` : '准备开始批量生成…',
       skippedCount: skipped,
     });
-    if (skipped > 0) toast.info(`已自动跳过 ${skipped} 章已有内容的章节`);
 
     try {
-      for (let index = 0; index < toGenerate.length; index += 1) {
-        const chapter = toGenerate[index];
-        if (batchCancelRef.current) break;
-
-        setBatchStatus((prev) => prev ? {
-          ...prev,
-          currentChapterId: chapter.id,
-          currentChapterNumber: chapter.chapter_number,
-          currentChapterTitle: chapter.title,
-          message: `正在生成第 ${chapter.chapter_number} 章`,
-          progress: (prev.completed / prev.total) * 100,
-        } : prev);
-
-        const result = await startStream({
-          chapter,
-          kind: 'chapter_generate',
-          requestBody: { target_word_count: 3000, enable_mcp: true, auto_analyze: true },
-          mode: 'batch',
-        });
-        await waitForChapterAnalysis(chapter, (result as ChapterWriteResult | null)?.analysis_job_id);
-        if (batchCancelRef.current) break;
-
-        // 一致性闸门：本章审计出严重问题时暂停批量，避免错误设定向后传播
-        if (pauseOnCritical) {
-          const criticalCount = await fetchCriticalIssueCount(chapter.id);
-          if (criticalCount > 0) {
-            const goOn = window.confirm(
-              `第 ${chapter.chapter_number} 章检测到 ${criticalCount} 个严重一致性问题（详见该章「叙事状态」面板）。\n\n` +
-              '继续批量生成可能让错误设定影响后续章节。\n' +
-              '「确定」继续生成后续章节；「取消」停止批量，先修复本章。',
-            );
-            if (!goOn) {
-              batchCancelRef.current = true;
-              setBatchStatus((prev) => prev ? {
-                ...prev,
-                status: 'cancelled',
-                message: `已在第 ${chapter.chapter_number} 章后暂停：${criticalCount} 个严重一致性问题待处理`,
-              } : prev);
-              toast.warning(`批量生成已暂停，请先处理第 ${chapter.chapter_number} 章的一致性问题`);
-              break;
+      const job = await runAIJob({
+        kind: 'chapter_batch',
+        title: `批量生成第 ${from}-${to} 章`,
+        projectId,
+        openModal: false,
+        meta: { from_chapter: from, to_chapter: to },
+        onStarted: (id: string) => { batchJobIdRef.current = id; },
+        connect: (options: SSEClientOptions<unknown>) => chapterApi.batchWriteStream(projectId, {
+          from_chapter: from,
+          to_chapter: to,
+          pause_on_critical: pauseOnCritical,
+          quality_gate: qualityGate,
+          pipeline,
+          auto_expand: autoExpand,
+        }, options as SSEClientOptions<ChapterBatchResult>),
+        onEvent: (m) => {
+          if (m.type === 'batch_chapter') {
+            const e = m as unknown as ChapterBatchEvent;
+            if (e.status === 'generated') done += 1;
+            const chapter = chapters.find((c) => c.chapter_number === e.chapter_number);
+            setBatchStatus((prev) => prev && prev.status === 'running' ? {
+              ...prev,
+              completed: done,
+              currentChapterId: e.chapter_id ?? chapter?.id ?? prev.currentChapterId,
+              currentChapterNumber: e.chapter_number,
+              currentChapterTitle: chapter?.title ?? prev.currentChapterTitle,
+              message: describeBatchEvent(e) || prev.message,
+            } : prev);
+            if (e.chapter_id) {
+              const id = e.chapter_id;
+              // 章节列表上的「分析中」标记跟着批量事件走
+              if (e.status === 'analyzing') setAnalyzingIds((prev) => new Set(prev).add(id));
+              if (['done', 'paused', 'analysis_failed'].includes(e.status)) {
+                setAnalyzingIds((prev) => {
+                  const next = new Set(prev);
+                  next.delete(id);
+                  return next;
+                });
+              }
+              if (e.status === 'generated' || e.status === 'done') onWrittenRef.current?.(id);
             }
+          } else if (m.type === 'progress' && typeof m.progress === 'number') {
+            const pct = m.progress;
+            const message = typeof m.message === 'string' ? m.message : undefined;
+            setBatchStatus((prev) => prev && prev.status === 'running'
+              ? { ...prev, progress: Math.min(pct, 99), message: message ?? prev.message }
+              : prev);
           }
-        }
-
+        },
+      });
+      await refreshChapters();
+      const result = job.result as ChapterBatchResult | null;
+      if (result?.status === 'paused') {
+        setBatchStatus((prev) => prev ? { ...prev, status: 'cancelled', completed: result.completed.length, message: result.message } : prev);
+        toast.warning(result.message);
+      } else if (result?.status === 'stopped') {
         setBatchStatus((prev) => prev ? {
-          ...prev,
-          completed: index + 1,
-          progress: ((index + 1) / prev.total) * 100,
-          message: `已完成 ${index + 1} / ${prev.total} 章`,
+          ...prev, status: 'error', completed: result.completed.length, errorMessage: result.message, message: result.message,
         } : prev);
+        toast.error(result.message);
+      } else {
+        const count = result?.completed.length ?? done;
+        setBatchStatus((prev) => prev ? {
+          ...prev, status: 'completed', completed: count, total: Math.max(prev.total, count), progress: 100,
+          message: `批量生成完成，共写了 ${count} 章`,
+        } : prev);
+        toast.success('批量生成完成');
       }
-
-      if (batchCancelRef.current) return;
-      setBatchStatus((prev) => prev ? {
-        ...prev,
-        status: 'completed',
-        completed: prev.total,
-        progress: 100,
-        message: `批量串行生成完成，共完成 ${prev.total} 章`,
-      } : prev);
-      toast.success('批量生成完成');
+      if (result?.warnings?.length) toast.warning(result.warnings.slice(0, 3).join('；'));
     } catch (error) {
-      if ((error as DOMException)?.name === 'AbortError') return;
+      if (error instanceof AIJobError && error.job.status === 'cancelled') {
+        setBatchStatus((prev) => (prev ? { ...prev, status: 'cancelled', message: '已取消批量生成（已写完的章节已保存）' } : prev));
+        await refreshChapters();
+        return;
+      }
       setBatchStatus((prev) => prev ? {
         ...prev,
         status: 'error',
         errorMessage: (error as Error)?.message || '批量生成失败',
-        message: prev.currentChapterNumber
-          ? `第 ${prev.currentChapterNumber} 章生成失败，批量任务已停止`
-          : '批量生成失败',
+        message: '批量生成失败',
       } : prev);
       toast.error((error as Error)?.message || '批量生成失败');
     }
-  }, [projectId, chapters, confirmUnanalyzedPrevious, startStream, waitForChapterAnalysis, fetchCriticalIssueCount]);
+  }, [projectId, chapters, confirmUnanalyzedPrevious, refreshChapters]);
 
   /** 触发分析（通用后台任务 + 弹窗：阶段 / 模型进度可见，可后台运行） */
   const handleAnalyze = useCallback(async (chapter: Chapter) => {

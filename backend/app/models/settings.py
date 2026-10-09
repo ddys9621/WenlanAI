@@ -21,6 +21,7 @@ class Settings(Base):
     top_p = Column(Float, default=0.95, comment="核采样 top_p，<1 收敛候选词分布")
     frequency_penalty = Column(Float, default=0.3, comment="频率惩罚 -2~2，越高越抑制重复用词")
     presence_penalty = Column(Float, default=0.3, comment="存在惩罚 -2~2，越高越鼓励引入新词/话题")
+    analysis_model = Column(String(100), nullable=True, comment="分析 / 抽取 / 摘要专用模型；空 = 跟随主模型")
     # 思考/推理强度（全局生效）：OpenAI 走 reasoning_effort，Anthropic 走 thinking.budget_tokens
     reasoning_enabled = Column(Boolean, nullable=False, default=False, comment="是否启用思考/推理模式")
     reasoning_effort = Column(String(20), default="medium", comment="统一思考强度档位/OpenAI reasoning_effort: none|minimal|low|medium|high|xhigh|max")

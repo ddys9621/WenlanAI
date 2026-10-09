@@ -26,6 +26,10 @@ class SettingsBase(BaseModel):
         default=None, ge=0,
         description="Anthropic 思考预算 budget_tokens；为空则按强度档位自动换算，须 ≥1024 且 < max_tokens",
     )
+    analysis_model: Optional[str] = Field(
+        default=None,
+        description="分析 / 实体抽取 / 剧情摘要专用模型（同一接口下的便宜快模型）；空 = 跟随主模型",
+    )
     preferences: Optional[str] = Field(default=None, description="其他偏好设置(JSON)")
 
 

@@ -39,6 +39,10 @@ class Project(Base):
         server_default="none",
         comment="桥段 C3 兑现章末尾：none 不留钩子（默认，付费文）/ soft 收束+半钩（免费平台章末钩子）",
     )
+    # ---- 长篇优化（NULL = 旧项目沿用原行为；新建项目由创建接口写入推荐值）----
+    platform_preset = Column(String(20), nullable=True, comment="平台预设：qidian / fanqie / jinjiang / qimao；NULL = 通用")
+    bridge_rhythm = Column(String(20), nullable=True, comment="桥段节奏：varied 变长（3-12 章）/ fixed4 固定 4 章；NULL = fixed4")
+    rolling_planning = Column(Boolean, nullable=True, comment="滚动规划：桥段填充 / 章纲展开只提前一段做；NULL = 关闭")
 
     # DEPRECATED：工程化桥段流水线固定进入桥段规划，业务代码不再读写此列；保留仅为兼容旧库（不做 DROP COLUMN）
     enable_bridge_planning = Column(

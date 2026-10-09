@@ -1,6 +1,6 @@
 """章纲相关的 Pydantic 模型"""
 from pydantic import BaseModel, Field, ConfigDict
-from typing import Optional, List, Dict
+from typing import Any, Optional, List, Dict
 from datetime import datetime
 
 
@@ -53,6 +53,9 @@ class ChapterOutlineResponse(ChapterOutlineBase):
     plot_line_id: Optional[str] = Field(None, description="关联的剧情线ID")
     key_events: Optional[List[str]] = Field(None, description="关键事件列表，最后一条为章末钩子")
     characters_involved: Optional[List[str]] = Field(None, description="涉及角色名称列表")
+    narrative_tasks: Optional[Dict[str, Any]] = Field(
+        None, description="本章叙事任务：{resolve:[{promise_id,title,how}], advance:[...], plant:[{title,content,payoff_after}]}",
+    )
     created_at: datetime = Field(..., description="创建时间")
     updated_at: datetime = Field(..., description="更新时间")
     # 关联统计字段 - 统一格式

@@ -14,6 +14,7 @@ class CharacterBase(BaseModel):
     personality: Optional[str] = Field(None, description="性格特点/组织特性")
     background: Optional[str] = Field(None, description="背景故事")
     appearance: Optional[str] = Field(None, description="外貌特征")
+    speech_style: Optional[str] = Field(None, description="说话风格 / 口头禅 / 称呼习惯（角色声音卡）")
     relationships: Optional[str] = Field(None, description="人际关系(JSON)")
     organization_type: Optional[str] = Field(None, description="组织类型")
     organization_purpose: Optional[str] = Field(None, description="组织目的")
@@ -32,6 +33,7 @@ class CharacterCreate(BaseModel):
     personality: Optional[str] = Field(None, description="性格特点/组织特性")
     background: Optional[str] = Field(None, description="背景故事")
     appearance: Optional[str] = Field(None, description="外貌特征")
+    speech_style: Optional[str] = Field(None, description="说话风格 / 口头禅 / 称呼习惯（角色声音卡）")
     relationships: Optional[str] = Field(None, description="人际关系(JSON)")
     organization_type: Optional[str] = Field(None, description="组织类型")
     organization_purpose: Optional[str] = Field(None, description="组织目的")
@@ -56,6 +58,7 @@ class CharacterUpdate(BaseModel):
     personality: Optional[str] = None
     background: Optional[str] = None
     appearance: Optional[str] = None
+    speech_style: Optional[str] = None
     relationships: Optional[str] = None
     organization_type: Optional[str] = None
     organization_purpose: Optional[str] = None

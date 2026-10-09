@@ -29,10 +29,40 @@ logger = get_logger(__name__)
 CHROMA_DIR = "data/chroma_db"
 PRIMARY_MODEL = 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2'
 FALLBACK_MODEL = 'sentence-transformers/all-MiniLM-L6-v2'
+BUILTIN_MODELS = (PRIMARY_MODEL, FALLBACK_MODEL)
 
 _client = None
 _model = None
+_model_name: str | None = None
 _model_attempted = False
+
+
+def configured_model_names() -> tuple[str, ...]:
+    """加载顺序：环境变量 EMBEDDING_MODEL（如 BAAI/bge-small-zh-v1.5、BAAI/bge-m3，需事先放进 embedding 目录）→ 主模型 → 备用。
+
+    MiniLM 只吃 128 个 token（中文一百多字就截断），长篇里检索章纲 / 摘要偏弱；换中文向量模型能明显提高召回。
+    """
+    custom = (os.environ.get("EMBEDDING_MODEL") or "").strip()
+    if not custom:
+        from app.config import settings as app_settings  # .env 里的 EMBEDDING_MODEL（pydantic 读取，不进 os.environ）
+
+        custom = (getattr(app_settings, "embedding_model", "") or "").strip()
+    return tuple(dict.fromkeys(n for n in (custom, PRIMARY_MODEL, FALLBACK_MODEL) if n))
+
+
+def get_embedding_model_name() -> str | None:
+    """实际加载成功的模型名（未加载 / 加载失败为 None）。"""
+    return _model_name
+
+
+def collection_suffix() -> str:
+    """自定义向量模型的维度可能和内置 MiniLM（384 维）不同，向量不能混存：换模型后集合名带上模型指纹。
+    内置主 / 备模型保持旧集合名（老数据不丢）。"""
+    import hashlib
+
+    if not _model_name or _model_name in BUILTIN_MODELS:
+        return ""
+    return "_e" + hashlib.sha256(_model_name.encode()).hexdigest()[:6]
 
 
 def get_chroma_client():
@@ -50,14 +80,14 @@ def get_embedding_model():
     仅从本地 embedding 目录加载（local_files_only + 上方 offline 环境变量）：
     缺模型时快速失败并给出下载指引，绝不在运行时静默联网。
     """
-    global _model, _model_attempted
+    global _model, _model_name, _model_attempted
     if _model_attempted:
         return _model
     _model_attempted = True
 
     os.makedirs(EMBEDDING_PATH, exist_ok=True)
     logger.info(f"🔄 正在加载Embedding模型... 模型目录: {os.path.abspath(EMBEDDING_PATH)}")
-    for name in (PRIMARY_MODEL, FALLBACK_MODEL):
+    for name in configured_model_names():
         try:
             _model = SentenceTransformer(
                 name,
@@ -66,6 +96,7 @@ def get_embedding_model():
                 trust_remote_code=False,  # 安全起见
                 local_files_only=True,  # 强制使用本地文件
             )
+            _model_name = name
             logger.info(f"✅ Embedding模型加载成功 ({name})")
             return _model
         except Exception as e:

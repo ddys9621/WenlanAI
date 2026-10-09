@@ -114,6 +114,8 @@ export interface Settings {
   reasoning_enabled: boolean;
   reasoning_effort: ReasoningEffort;
   thinking_budget_tokens?: number | null;
+  /** 分析 / 实体抽取 / 剧情摘要专用模型（同一接口下的便宜快模型）；空 = 跟随主模型 */
+  analysis_model?: string | null;
   preferences?: string;
   created_at: string;
   updated_at: string;
@@ -132,6 +134,7 @@ export interface SettingsUpdate {
   reasoning_enabled?: boolean;
   reasoning_effort?: ReasoningEffort;
   thinking_budget_tokens?: number | null;
+  analysis_model?: string | null;
   preferences?: string;
 }
 
@@ -170,6 +173,10 @@ export interface ProjectAIPreference {
 
 /** 桥段 C3 兑现章末尾：none 不留钩子（默认，付费文）/ soft 收束 + 半钩（免费平台章末钩子） */
 export type C3HookStyle = 'none' | 'soft';
+/** 平台预设：决定单章字数默认值、章末钩子默认值与正文写法提示 */
+export type PlatformPreset = 'qidian' | 'fanqie' | 'jinjiang' | 'qimao';
+/** 桥段节奏：varied 变长（3-12 章 + 卷内节奏曲线）/ fixed4 固定每桥段 4 章 */
+export type BridgeRhythm = 'varied' | 'fixed4';
 
 // 项目类型定义
 export interface Project {
@@ -192,6 +199,9 @@ export interface Project {
   narrative_perspective?: string;
   character_count?: number;
   c3_hook_style?: C3HookStyle | null;
+  platform_preset?: PlatformPreset | null;
+  bridge_rhythm?: BridgeRhythm | null;
+  rolling_planning?: boolean | null;
   created_at: string;
   updated_at: string;
 }
@@ -212,6 +222,9 @@ export interface ProjectCreate {
   world_location?: string;
   world_atmosphere?: string;
   world_rules?: string;
+  platform_preset?: PlatformPreset;
+  bridge_rhythm?: BridgeRhythm;
+  rolling_planning?: boolean;
 }
 
 export interface ProjectUpdate {
@@ -230,6 +243,10 @@ export interface ProjectUpdate {
   narrative_perspective?: string;
   character_count?: number;
   c3_hook_style?: C3HookStyle;
+  /** null = 通用（不套平台写法） */
+  platform_preset?: PlatformPreset | null;
+  bridge_rhythm?: BridgeRhythm;
+  rolling_planning?: boolean;
   // current_words 由章节内容自动计算，不在此接口中
 }
 
@@ -282,6 +299,8 @@ export interface Character {
   personality?: string;
   background?: string;
   appearance?: string;
+  /** 说话风格 / 口头禅 / 称呼习惯（角色声音卡，正文按出场角色注入） */
+  speech_style?: string | null;
   relationships?: string;
   organization_type?: string;
   organization_purpose?: string;
@@ -308,6 +327,7 @@ export interface CharacterUpdate {
   personality?: string;
   background?: string;
   appearance?: string;
+  speech_style?: string | null;
   relationships?: string;
   organization_type?: string;
   organization_purpose?: string;
@@ -365,6 +385,53 @@ export interface ChapterGenerateRequest {
   pack_ids?: string[];
   dimensions?: string[];
   strength?: 'light' | 'medium' | 'deep';
+}
+
+/** 服务端批量生成（后台任务，关掉浏览器也不停；已有正文的章节自动跳过 → 同范围重新发起即续跑） */
+export interface ChapterBatchRequest {
+  from_chapter: number;
+  to_chapter: number;
+  pause_on_critical?: boolean;
+  quality_gate?: boolean;
+  ai_flavor_threshold?: number;
+  max_retries?: number;
+  pipeline?: boolean;
+  auto_expand?: boolean;
+  style_id?: number;
+  enable_mcp?: boolean;
+  target_word_count?: number;
+}
+
+/** 批量任务里每章的状态事件 */
+export interface ChapterBatchEvent {
+  type: 'batch_chapter';
+  chapter_number: number;
+  chapter_id: string | null;
+  status: 'generating' | 'retrying' | 'quality_retry' | 'generated' | 'analyzing' | 'analysis_failed'
+    | 'done' | 'skipped' | 'failed' | 'paused' | 'no_outline';
+  attempt?: number;
+  error?: string;
+  reason?: string;
+  word_count?: number;
+  quality_score?: number;
+  critical?: number;
+}
+
+export interface ChapterBatchResult {
+  status: 'completed' | 'paused' | 'stopped';
+  completed: number[];
+  skipped: number[];
+  failed: { chapter_number: number; error: string }[];
+  paused_at: number | null;
+  warnings: string[];
+  message: string;
+}
+
+/** 本章叙事任务（章纲展开时规划：要回收 / 推进 / 埋下的伏笔） */
+export interface NarrativeTasks {
+  resolve: { promise_id: string | null; title: string; how?: string }[];
+  advance: { promise_id: string | null; title: string; how?: string }[];
+  plant: { title: string; content: string; payoff_after?: number | null }[];
 }
 
 // 章节生成检查响应
@@ -984,6 +1051,7 @@ export interface ChapterOutline {
   plot_points?: string;          // 剧情要点（含情感变化）
   key_events?: string[];         // 关键事件，最后一条为章末钩子
   characters_involved?: string[];
+  narrative_tasks?: NarrativeTasks | null;  // 本章叙事任务（伏笔 / 承诺）
   // 旧字段（保留兼容）
   summary?: string;              // 已废弃，保留兼容旧数据
   // 系统字段

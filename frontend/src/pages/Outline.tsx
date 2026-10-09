@@ -23,7 +23,7 @@ import type {
   PlotLineProgress, TimelineData, TimelineBeat,
   PlotCardGenerateRequest, PlotLineGenerateRequest,
   ChapterOutline, ChapterOutlineCreate, ChapterOutlineUpdate,
-  ChapterOutlineBatchCreateRequest,
+  ChapterOutlineBatchCreateRequest, NarrativeTasks,
 } from '@/types'
 
 type TabKey = 'outlines' | 'plotCards' | 'plotLines' | 'chapterOutlines' | 'overview'
@@ -1789,10 +1789,39 @@ function ChapterOutlinesView({ chapterOutlines, projectId, createChapterOutline,
                 </div>
               </div>
             )}
+            {viewingChapterOutline.narrative_tasks && (
+              <NarrativeTasksPanel tasks={viewingChapterOutline.narrative_tasks} chapterNumber={viewingChapterOutline.chapter_number} />
+            )}
           </div>
         </Modal>
       )}
     </section>
+  )
+}
+
+/** 章纲叙事任务：本章要回收 / 推进 / 埋下的伏笔（章纲展开时按未回收伏笔清单规划，写正文时进本章任务） */
+function NarrativeTasksPanel({ tasks, chapterNumber }: { tasks: NarrativeTasks; chapterNumber: number }) {
+  const rows = [
+    ...tasks.resolve.map((t) => ({ kind: '回收', text: `${t.title}${t.how ? `：${t.how}` : ''}` })),
+    ...tasks.advance.map((t) => ({ kind: '推进', text: `${t.title}${t.how ? `：${t.how}` : ''}` })),
+    ...tasks.plant.map((t) => ({
+      kind: '埋下',
+      text: `${t.title}：${t.content}${t.payoff_after ? `（计划第 ${chapterNumber + t.payoff_after} 章前后回收）` : ''}`,
+    })),
+  ]
+  if (rows.length === 0) return null
+  return (
+    <div className="hh-subpanel p-4">
+      <p className="text-xs font-medium text-content-tertiary">叙事任务（伏笔 / 承诺）</p>
+      <ul className="mt-2 space-y-1.5">
+        {rows.map((r, i) => (
+          <li key={`nt-${i}`} className="text-xs leading-5 text-content-secondary">
+            <span className="mr-1.5 bg-brand/10 px-1.5 py-px text-[10px] font-medium text-brand">{r.kind}</span>
+            {r.text}
+          </li>
+        ))}
+      </ul>
+    </div>
   )
 }
 // ==================== Tab 5: 关联总览 ====================

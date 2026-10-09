@@ -7,6 +7,7 @@ import json
 
 from app.database import get_db
 from app.logger import get_logger
+from app.services.narrative_tasks import parse_narrative_tasks
 
 logger = get_logger(__name__)
 from app.models import (
@@ -139,6 +140,7 @@ async def get_chapter_outlines(
             order_index=outline.order_index,
             key_events=key_events,
             characters_involved=characters_involved,
+            narrative_tasks=parse_narrative_tasks(outline.narrative_tasks) if outline.narrative_tasks else None,
             created_at=outline.created_at,
             updated_at=outline.updated_at,
             # 统一的关联统计

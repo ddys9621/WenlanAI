@@ -18,6 +18,8 @@ import { PROJECT_HEADER, getActiveProjectId } from '../utils/activeProject';
 import type { MemoryAnnotation } from '../utils/annotationSegments';
 import type { UpdateCheckResult, UpdateJobStatus } from '../types/system_update';
 import type {
+  BridgeRhythm,
+  PlatformPreset,
   User,
   AuthConfig,
   AuthSettingsView,
@@ -35,6 +37,8 @@ import type {
   Character,
   CharacterUpdate,
   Chapter,
+  ChapterBatchRequest,
+  ChapterBatchResult,
   ChapterCreate,
   ChapterGenerateRequest,
   ChapterUpdate,
@@ -98,11 +102,24 @@ import type {
 
 type ChapterListApiResponse = Chapter[] | { items?: Chapter[] };
 
+/** 正文生成后的去 AI 味质检指标（后端 ai_flavor_metrics，score 越高越像 AI） */
+export interface ChapterQualityMetrics {
+  score: number;
+  issues: string[];
+  flagged_paragraphs: number[];
+  dialogue_ratio?: number;
+  bookish_per_1k?: number;
+  word_count_ratio?: number | null;
+}
+
 /** 正文生成任务的 result 事件 data */
 export interface ChapterWriteResult {
   word_count: number;
   analysis_task_id: string | null;
   analysis_job_id: string | null;
+  /** 被 Max Tokens 截断后自动续写的次数 */
+  continuations?: number;
+  quality?: ChapterQualityMetrics;
 }
 
 /** 生成前预检查：前面「有正文但未分析（无记忆状态）」的章节 */
@@ -128,9 +145,13 @@ export interface DeaiPromptInput {
   content: string;
 }
 
-/** 去 AI 味重写请求：只带提示词 id（按勾选顺序），后端拼提示词 + 原文 */
+/** 去 AI 味重写请求：只带提示词 id（按勾选顺序），后端拼提示词 + 原文（附专有名词表防改名） */
 export interface ChapterRegenerateRequest {
   prompt_ids: string[];
+  /** full 全文重写；local 只重写检测出 AI 味重的段落，其余段落一字不动 */
+  mode?: 'full' | 'local';
+  /** local 模式下指定段落下标（0 起）；不传则自动检测 */
+  paragraph_indices?: number[];
 }
 
 /** GET /chapters/{id}/annotations：正文里可定位的记忆标注 */
@@ -147,6 +168,8 @@ export interface ChapterAnnotationsResponse {
 /** 去 AI 味重写任务的 result 事件 data */
 export interface ChapterRegenerateResult {
   word_count: number;
+  /** 局部重写时实际替换的段落数 */
+  rewritten_paragraphs?: number;
 }
 
 const api = axios.create({
@@ -521,7 +544,9 @@ export const chapterApi = {
   regenerateChapterStream: (chapterId: string, data: ChapterRegenerateRequest, options?: SSEClientOptions<ChapterRegenerateResult>) =>
     ssePost<ChapterRegenerateResult>(`/api/chapters/${chapterId}/regenerate-stream`, data, options),
 
-  // 批量生成章节
+  /** 服务端批量生成（后台任务 + SSE，关掉浏览器也不停）；事件 batch_chapter 逐章汇报，result = ChapterBatchResult */
+  batchWriteStream: (projectId: string, data: ChapterBatchRequest, options?: SSEClientOptions<ChapterBatchResult>) =>
+    ssePost<ChapterBatchResult>(`/api/chapters/project/${projectId}/batch-write-stream`, data, options),
 };
 
 export const deaiPromptApi = {
@@ -635,6 +660,10 @@ export const wizardStreamApi = {
       pack_ids?: string[];
       dimensions?: string[];
       strength?: 'light' | 'medium' | 'deep';
+      // 长篇设置（仅新建项目时生效）
+      platform_preset?: PlatformPreset;
+      bridge_rhythm?: BridgeRhythm;
+      rolling_planning?: boolean;
     },
     options?: SSEClientOptions<WorldBuildingResponse>
   ) => ssePost<WorldBuildingResponse>(

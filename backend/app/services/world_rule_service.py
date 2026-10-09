@@ -10,7 +10,7 @@ from app.models.world_rule import WorldRule
 from app.models.project import Project
 from app.logger import get_logger
 from app.services.ai_service import ai_service
-from app.services.embedding_runtime import get_chroma_client, get_embedding_model
+from app.services.embedding_runtime import collection_suffix, get_chroma_client, get_embedding_model
 from app.services.generation_trace import trace_reference
 
 logger = get_logger(__name__)
@@ -51,7 +51,7 @@ class WorldRuleService:
     def _get_collection_name(self, project_id: str) -> str:
         """生成项目专属的 collection 名称"""
         project_hash = hashlib.sha256(project_id.encode()).hexdigest()[:8]
-        return f"world_rules_p_{project_hash}"
+        return f"world_rules_p_{project_hash}{collection_suffix()}"  # 自定义向量模型另起集合（维度不同）
 
     def _get_or_create_collection(self, project_id: str):
         """获取或创建项目的世界规则 collection"""

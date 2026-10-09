@@ -23,6 +23,10 @@ class ChapterOutline(Base):
     plot_points = Column(Text, comment="剧情要点（含情感变化），300-400字")
     key_events = Column(Text, comment="关键事件，JSON格式，最后一条为章末钩子")
     characters_involved = Column(Text, comment="涉及角色，JSON格式")
+    narrative_tasks = Column(
+        Text,
+        comment="本章叙事任务 JSON：{resolve:[{promise_id,title,how}], advance:[...], plant:[{title,content,payoff_after}]}",
+    )
 
     # 旧字段（保留兼容）
     summary = Column(Text, comment="章节摘要（已废弃，保留兼容旧数据）")

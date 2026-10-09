@@ -32,6 +32,7 @@ class CharacterExportData(BaseModel):
     personality: Optional[str] = None
     background: Optional[str] = None
     appearance: Optional[str] = None
+    speech_style: Optional[str] = None
     traits: Optional[List[str]] = None
     organization_type: Optional[str] = None
     organization_purpose: Optional[str] = None
@@ -139,6 +140,7 @@ class ChapterOutlineExportData(BaseModel):
     pov: Optional[str] = None
     emotional_arc: Optional[str] = None
     chapter_hook: Optional[str] = None
+    narrative_tasks: Optional[Any] = None  # 本章叙事任务（伏笔 / 承诺），JSON 结构
     created_at: Optional[str] = None
 
 

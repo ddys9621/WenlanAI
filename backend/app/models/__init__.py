@@ -35,6 +35,7 @@ from app.models.chapter_continuity_signal import ChapterContinuitySignal
 from app.models.chapter_consistency_issue import ChapterConsistencyIssue
 from app.models.project_ai_preference import ProjectAIPreference
 from app.models.deai_prompt import DeaiPrompt
+from app.models.arc_summary import ArcSummary
 
 __all__ = [
     "Project",
@@ -78,4 +79,5 @@ __all__ = [
     "ChapterConsistencyIssue",
     "ProjectAIPreference",
     "DeaiPrompt",
+    "ArcSummary",
 ]

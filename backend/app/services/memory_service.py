@@ -5,9 +5,16 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 
 from app.logger import get_logger
-from app.services.embedding_runtime import EMBEDDING_PATH, get_chroma_client, get_embedding_model
+from app.services.embedding_runtime import EMBEDDING_PATH, collection_suffix, get_chroma_client, get_embedding_model
 
 logger = get_logger(__name__)
+
+
+def collection_name_for(user_id: str, project_id: str) -> str:
+    """u_{user_hash}_p_{project_hash}[_e{模型指纹}]：SHA256 压缩到 63 字符内；自定义向量模型另起集合（维度不同不能混存）。"""
+    user_hash = hashlib.sha256(user_id.encode()).hexdigest()[:8]
+    project_hash = hashlib.sha256(project_id.encode()).hexdigest()[:8]
+    return f"u_{user_hash}_p_{project_hash}{collection_suffix()}"
 
 
 class MemoryService:
@@ -75,9 +82,7 @@ class MemoryService:
 
         # 使用SHA256哈希压缩ID长度，确保不超过63字符
         # 格式: u_{user_hash}_p_{project_hash} (约30字符)
-        user_hash = hashlib.sha256(user_id.encode()).hexdigest()[:8]
-        project_hash = hashlib.sha256(project_id.encode()).hexdigest()[:8]
-        collection_name = f"u_{user_hash}_p_{project_hash}"
+        collection_name = collection_name_for(user_id, project_id)
         
         try:
             return self.client.get_or_create_collection(
@@ -143,8 +148,8 @@ class MemoryService:
                 }
                 metadatas.append(chroma_metadata)
             
-            # 批量添加
-            collection.add(
+            # upsert 而不是 add：Chroma 的 add 遇到已存在 id 会静默忽略，重新分析的章节会一直留着旧内容
+            collection.upsert(
                 ids=ids,
                 embeddings=embeddings,
                 documents=documents,
@@ -352,106 +357,121 @@ class MemoryService:
             logger.error(f"❌ 查找伏笔失败: {str(e)}")
             return []
     
+    # 角色相关记忆只查本章出场的前几个人：几十个名字拼成一个查询，嵌入模型 128 token 一截断就成了噪音
+    CHARACTER_QUERY_LIMIT = 4
+
+    async def get_important_plot_points(
+        self,
+        user_id: str,
+        project_id: str,
+        before_chapter: int,
+        limit: int = 5,
+        min_importance: float = 0.8,
+    ) -> List[Dict[str, Any]]:
+        """本章之前最重要的情节点：按重要性降序、同分取更近的章（不靠语义检索，长篇里的"锚点事件"）。"""
+        try:
+            collection = self.get_collection(user_id, project_id)
+            results = collection.get(
+                where={
+                    "$and": [
+                        {"memory_type": {"$in": ["plot_point", "hook"]}},
+                        {"importance": {"$gte": min_importance}},
+                        {"chapter_number": {"$lte": before_chapter - 1}},
+                    ]
+                },
+                limit=500,
+            )
+            items = [
+                {"id": results["ids"][i], "content": results["documents"][i], "metadata": results["metadatas"][i]}
+                for i in range(len(results.get("ids") or []))
+            ]
+            items.sort(
+                key=lambda m: (
+                    float(m["metadata"].get("importance", 0) or 0),
+                    int(m["metadata"].get("chapter_number", 0) or 0),
+                ),
+                reverse=True,
+            )
+            return items[:limit]
+        except Exception as e:
+            logger.error(f"❌ 获取重要情节点失败: {str(e)}")
+            return []
+
     async def build_context_for_generation(
         self,
         user_id: str,
         project_id: str,
         current_chapter: int,
         chapter_outline: str,
-        character_names: List[str] = None
+        character_names: List[str] = None,
+        query_text: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        为章节生成构建智能上下文
-        
-        这是核心功能: 结合多种检索策略,为AI生成提供最相关的记忆
-        
+        为章节生成构建向量记忆上下文（所有检索都限定在本章之前，重写中间章节时不会把"未来"漏进来）
+
+        - relevant_memories：按本章查询语句做语义检索（不含章节摘要——摘要已由前情脉络 / 相关旧事覆盖）
+        - character_states：本章出场的前几个角色各自的近事
+        - plot_points：本章之前最重要的情节点（按重要性 + 时间）
+        - recent_context / foreshadows：保留键位但置空——近期剧情已由最近章节摘要与全文覆盖，
+          未回收伏笔以 DB 承诺表为唯一真相（向量库里的伏笔回收后不会更新状态）
+
         Args:
             user_id: 用户ID
             project_id: 项目ID
             current_chapter: 当前章节号
-            chapter_outline: 本章大纲
-            character_names: 涉及的角色名列表
-        
-        Returns:
-            包含各种上下文信息的字典
+            chapter_outline: 本章大纲（未给 query_text 时用作检索语句）
+            character_names: 本章涉及的角色名（按重要性排序，只取前 CHARACTER_QUERY_LIMIT 个）
+            query_text: 精简检索语句（标题 + 关键事件 + 出场人物），优先于整段章纲
         """
-        logger.info(f"🧠 开始构建章节{current_chapter}的智能上下文...")
-        
-        # 1. 获取最近章节上下文(时间连续性)
-        recent = await self.get_recent_memories(
-            user_id, project_id, current_chapter, 
-            recent_count=3, min_importance=0.5
-        )
-        
-        # 2. 语义搜索相关记忆
-        relevant = await self.search_memories(
-            user_id=user_id,
-            project_id=project_id,
-            query=chapter_outline,
-            limit=10,
-            min_importance=0.4
-        )
-        
-        # 3. 查找未完结伏笔
-        foreshadows = await self.find_unresolved_foreshadows(
-            user_id, project_id, current_chapter
-        )
-        
-        # 4. 如果有指定角色,获取角色相关记忆
-        character_memories = []
-        if character_names:
-            character_query = " ".join(character_names) + " 角色 状态 关系"
-            character_memories = await self.search_memories(
+        logger.info(f"🧠 开始构建章节{current_chapter}的向量记忆上下文...")
+        chapter_range = (0, max(current_chapter - 1, 0))
+        query = (query_text or chapter_outline or "").strip()[:300]
+
+        relevant: List[Dict[str, Any]] = []
+        if query:
+            relevant = await self.search_memories(
                 user_id=user_id,
                 project_id=project_id,
-                query=character_query,
-                memory_types=["character_event", "plot_point"],
-                limit=8
+                query=query,
+                memory_types=["plot_point", "hook", "character_event", "foreshadow"],
+                limit=8,
+                min_importance=0.4,
+                chapter_range=chapter_range,
             )
-        
-        # 5. 获取重要情节点
-        # 注意：ChromaDB的where条件需要特殊处理，不能同时使用多个顶层条件
-        try:
-            plot_points = await self.search_memories(
+
+        character_memories: List[Dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for name in [n for n in (character_names or []) if n][: self.CHARACTER_QUERY_LIMIT]:
+            for mem in await self.search_memories(
                 user_id=user_id,
                 project_id=project_id,
-                query="重要 转折 高潮 关键",
-                memory_types=["plot_point", "hook"],
-                limit=5,
-                min_importance=0.7
-            )
-        except Exception as e:
-            logger.error(f"❌ 搜索记忆失败: {str(e)}")
-            # 降级处理：分别查询
-            plot_points = []
-            try:
-                plot_points = await self.search_memories(
-                    user_id=user_id,
-                    project_id=project_id,
-                    query="重要 转折 高潮 关键",
-                    memory_types=["plot_point", "hook"],
-                    limit=5
-                )
-            except Exception as e2:
-                logger.warning(f"⚠️ 降级查询也失败: {str(e2)}")
-                plot_points = []
-        
+                query=f"{name} 状态 处境",
+                memory_types=["character_event"],
+                limit=3,
+                chapter_range=chapter_range,
+            ):
+                if mem["id"] not in seen_ids:
+                    seen_ids.add(mem["id"])
+                    character_memories.append(mem)
+
+        plot_points = await self.get_important_plot_points(user_id, project_id, before_chapter=current_chapter)
+
         context = {
-            "recent_context": self._format_memories(recent, "最近章节记忆"),
-            "relevant_memories": self._format_memories(relevant, "语义相关记忆"),
-            "character_states": self._format_memories(character_memories, "角色相关记忆"),
-            "foreshadows": self._format_memories(foreshadows[:5], "未完结伏笔"),
-            "plot_points": self._format_memories(plot_points, "重要情节点"),
+            "recent_context": "",
+            "relevant_memories": self._format_memories(relevant, "语义相关记忆") if relevant else "",
+            "character_states": self._format_memories(character_memories[:8], "角色近事") if character_memories else "",
+            "foreshadows": "",
+            "plot_points": self._format_memories(plot_points, "关键情节锚点") if plot_points else "",
             "stats": {
-                "recent_count": len(recent),
                 "relevant_count": len(relevant),
                 "character_count": len(character_memories),
-                "foreshadow_count": len(foreshadows),
-                "plot_point_count": len(plot_points)
+                "plot_point_count": len(plot_points),
             }
         }
-        
-        logger.info(f"✅ 上下文构建完成: 最近{len(recent)}条, 相关{len(relevant)}条, 伏笔{len(foreshadows)}个")
+
+        logger.info(
+            f"✅ 向量记忆上下文完成: 相关{len(relevant)}条, 角色近事{len(character_memories)}条, 锚点{len(plot_points)}条"
+        )
         return context
     def _format_memories(self, memories: List[Dict], section_title: str = "记忆") -> str:
         """
@@ -541,9 +561,7 @@ class MemoryService:
         """
         try:
             # 生成collection名称
-            user_hash = hashlib.sha256(user_id.encode()).hexdigest()[:8]
-            project_hash = hashlib.sha256(project_id.encode()).hexdigest()[:8]
-            collection_name = f"u_{user_hash}_p_{project_hash}"
+            collection_name = collection_name_for(user_id, project_id)
             
             # 删除整个collection(这会清理所有向量数据)
             try:

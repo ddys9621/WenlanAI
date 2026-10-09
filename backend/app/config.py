@@ -89,6 +89,11 @@ class Settings(BaseSettings):
     # 软目标区间：生成的章节字数应尽量落在 [target * (1 - soft_range), target * (1 + soft_range)] 内
     # 此参数仅用于生成 Prompt 中的字数范围提示，不会截断输出
     chapter_word_soft_range: float = 0.10  # ±10%
+    # 正文提示词的上下文总预算（字符）：前情 / 角色 / 账本 / 参考 / 上一章正文等按优先级裁剪进这个预算，
+    # 本章任务不计入裁剪。长篇写到几百章也恒定在这个量级，不随章数增长
+    chapter_context_budget_chars: int = 36000
+    # 自定义向量模型（需事先放进 embedding 目录，如 BAAI/bge-small-zh-v1.5）；空 = 内置 MiniLM
+    embedding_model: str = ""
 
     # 以下参数暂不使用（保留以备将来需要）
     # API max_tokens 乘数：根据目标字数计算 max_tokens 上限（中文约 1字≈1token）

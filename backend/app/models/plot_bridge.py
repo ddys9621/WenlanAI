@@ -72,6 +72,19 @@ class PlotBridge(Base):
         nullable=False,
         comment="桥段序号（项目内全局递增）",
     )
+    # ---- 变长桥段（节奏变奏）：3-12 章不等；NULL = 旧数据按每桥段 4 章推算 ----
+    chapter_start = Column(Integer, nullable=True, comment="起始章号；NULL 时按 4(n-1)+1 推算（旧数据）")
+    chapter_end = Column(Integer, nullable=True, comment="结束章号；NULL 时按 4n 推算（旧数据）")
+    rhythm_role = Column(
+        String(20),
+        nullable=True,
+        comment="卷内节奏角色：opening 开篇 / rise 升温 / mid_climax 中段高潮 / dip 低谷 / finale 卷末收官 / standard",
+    )
+    foreshadow_plan = Column(
+        Text,
+        nullable=True,
+        comment="桥段伏笔计划 JSON：{plant:[{title,content,payoff_after}], payoff:[title]}（填充时规划，展开时落到章纲）",
+    )
     title = Column(
         String(200),
         nullable=False,

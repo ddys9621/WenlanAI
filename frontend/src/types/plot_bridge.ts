@@ -155,6 +155,24 @@ export interface LineBudget {
 
 export const isPrimaryTask = (t: SecondaryBeatTask) => (t.role ?? 'primary') !== 'mention';
 
+export type BridgeRhythmRole = 'opening' | 'rise' | 'mid_climax' | 'dip' | 'finale' | 'climax_finale' | 'standard';
+
+/** 节奏角色 → 展示标签（与后端 bridge_rhythm.RHYTHM_LABELS 一致；standard / rise 不显眼展示） */
+export const RHYTHM_ROLE_LABELS: Record<BridgeRhythmRole, string> = {
+  opening: '开篇',
+  rise: '升温',
+  mid_climax: '卷中高潮',
+  dip: '低谷·受挫',
+  finale: '卷末收官',
+  climax_finale: '全书高潮',
+  standard: '',
+};
+
+export interface BridgeForeshadowPlan {
+  plant: { title: string; content: string; payoff_after?: number | null }[];
+  payoff: string[];
+}
+
 export interface PlotBridge {
   id: string;
   project_id: string;
@@ -179,9 +197,15 @@ export interface PlotBridge {
   beat_coverage_end: number | null;
   /** 副线任务列表 */
   secondary_beats: SecondaryBeatTask[];
-  /** 确定性章号范围：第 4(n-1)+1 … 4n 章 */
+  /** 确定性章号范围：变长桥段按规划落库（3-12 章）；旧数据按第 4(n-1)+1 … 4n 章推算 */
   chapter_start: number;
   chapter_end: number;
+  /** 本桥段章数（变长桥段 3-12；旧数据 4） */
+  chapter_count?: number;
+  /** 卷内节奏角色：opening / rise / mid_climax / dip / finale / climax_finale；旧数据为 null */
+  rhythm_role?: BridgeRhythmRole | null;
+  /** 填充时规划的伏笔：要埋的（计划多少章后回收）与要回收的旧伏笔 */
+  foreshadow_plan?: BridgeForeshadowPlan | null;
   /** 最近一次 LLM 填充的溯源；draft / 旧数据为 null */
   generation_meta?: BridgeGenerationMeta | null;
   /** 填充时使用的题材模板 key；null 时按 showoff 展示 */
@@ -207,6 +231,8 @@ export interface BridgeSlotPreview {
     chapter_start: number;
     chapter_end: number;
     secondary: SecondaryBeatTask[];
+    /** 变长桥段的卷内节奏角色（固定 4 章模式为 standard） */
+    rhythm_role?: BridgeRhythmRole;
   }>;
   /** 每条副线的预算账 */
   line_budgets: LineBudget[];

@@ -303,6 +303,8 @@ async def build_bridge_position(db: AsyncSession, ctx: Any) -> str:
         prev_bridge_hook=ctx.bridge_context.get("prev_bridge_hook") or "",
         shape=ctx.bridge_context.get("shape") or "standard",
         c3_hook_style=ctx.bridge_context.get("c3_hook_style") or "none",
+        positions=ctx.bridge_context.get("positions"),
+        index_in_bridge=ctx.bridge_context.get("index_in_bridge"),
     )
     primary_secondary = ctx.bridge_context.get("primary_secondary")
     if text and primary_secondary:

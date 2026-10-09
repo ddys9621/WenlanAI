@@ -525,6 +525,31 @@ async def ensure_chapter_outline_bridge_columns(engine: AsyncEngine):
     await _ensure_columns(engine, "chapter_outlines", CHAPTER_OUTLINE_BRIDGE_COLUMNS, "V4 P2-1")
 
 
+# 长篇优化（上下文预算 / 角色声音卡 / 变长桥段 / 滚动规划 / 伏笔规划 / 平台预设）新增列：旧库启动时补齐，均可空
+LONGFORM_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
+    "characters": (("speech_style", "TEXT"),),
+    "chapter_outlines": (("narrative_tasks", "TEXT"),),
+    "plot_bridges": (
+        ("chapter_start", "INTEGER"),
+        ("chapter_end", "INTEGER"),
+        ("rhythm_role", "VARCHAR(20)"),
+        ("foreshadow_plan", "TEXT"),
+    ),
+    "projects": (
+        ("platform_preset", "VARCHAR(20)"),
+        ("bridge_rhythm", "VARCHAR(20)"),
+        ("rolling_planning", "BOOLEAN"),
+    ),
+    "settings": (("analysis_model", "VARCHAR(100)"),),
+}
+
+
+async def ensure_longform_columns(engine: AsyncEngine):
+    """长篇优化各表新增列（ArcSummary 等新表由 create_all 建）。"""
+    for table, columns in LONGFORM_COLUMNS.items():
+        await _ensure_columns(engine, table, columns, "长篇优化")
+
+
 PROJECT_ID_INDEX_TABLES: tuple[str, ...] = (
     "chapters", "chapter_outlines", "plot_lines", "plot_cards", "characters",
     "story_outlines", "generation_history", "writing_styles", "project_default_styles",
@@ -615,6 +640,7 @@ async def run_auto_migrations(engine: AsyncEngine):
         await ensure_character_aliases_column(engine)  # 角色曾用名（改名级联兜底）
         await ensure_settings_reasoning_columns(engine)  # 思考强度全局设置字段
         await ensure_settings_sampling_columns(engine)  # 采样多样性字段（降低 AI 味）
+        await ensure_longform_columns(engine)  # 长篇优化：声音卡 / 变长桥段 / 滚动规划 / 伏笔规划 / 平台预设
         await ensure_project_id_indexes(engine)  # 热表 project_id 索引（旧库补建）
         logger.info("✅ Auto migrations finished")
     except Exception as exc:

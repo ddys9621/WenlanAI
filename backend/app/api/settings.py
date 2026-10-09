@@ -84,7 +84,12 @@ async def get_user_ai_service(
     pref = await load_project_ai_preference(db, request.headers.get(PROJECT_HEADER), user.user_id)
     if pref is not None:
         logger.debug(f"用户 {user.user_id} 项目 {pref.project_id} 启用 AI 偏好覆盖: model={pref.llm_model!r}")
-    return create_user_ai_service(**merge_ai_overrides(settings, pref))
+    service = create_user_ai_service(**merge_ai_overrides(settings, pref))
+    # 分析模型只取全局设置（项目偏好只换主模型和参数）；章节分析 / 实体抽取 / 剧情摘要走它
+    analysis_model = (getattr(settings, "analysis_model", None) or "").strip()
+    if analysis_model and hasattr(service, "analysis_model"):
+        service.analysis_model = analysis_model
+    return service
 
 
 @router.get("", response_model=SettingsResponse)
