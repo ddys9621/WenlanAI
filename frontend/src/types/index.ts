@@ -111,6 +111,8 @@ export interface Settings {
   top_p: number;
   frequency_penalty: number;
   presence_penalty: number;
+  /** 采样多样性开关：关闭后不传 top_p / 频率惩罚 / 存在惩罚（模型不支持这些参数时关闭） */
+  sampling_enabled?: boolean;
   reasoning_enabled: boolean;
   reasoning_effort: ReasoningEffort;
   thinking_budget_tokens?: number | null;
@@ -131,6 +133,7 @@ export interface SettingsUpdate {
   top_p?: number;
   frequency_penalty?: number;
   presence_penalty?: number;
+  sampling_enabled?: boolean;
   reasoning_enabled?: boolean;
   reasoning_effort?: ReasoningEffort;
   thinking_budget_tokens?: number | null;
@@ -150,6 +153,8 @@ export interface ProjectAIOverrides {
   llm_model: string | null;
   temperature: number | null;
   max_tokens: number | null;
+  /** 本项目的采样多样性开关（项目单独换了不支持 top_p / 惩罚参数的模型时关闭） */
+  sampling_enabled: boolean | null;
   top_p: number | null;
   frequency_penalty: number | null;
   presence_penalty: number | null;

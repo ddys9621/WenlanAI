@@ -16,6 +16,7 @@ class AIOverrideFields(BaseModel):
     top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     frequency_penalty: Optional[float] = Field(default=None, ge=-2.0, le=2.0)
     presence_penalty: Optional[float] = Field(default=None, ge=-2.0, le=2.0)
+    sampling_enabled: Optional[bool] = None
     reasoning_enabled: Optional[bool] = None
     reasoning_effort: Optional[ReasoningEffort] = None
     thinking_budget_tokens: Optional[int] = Field(default=None, ge=0)
@@ -43,6 +44,7 @@ class EffectiveAIConfig(BaseModel):
     top_p: Optional[float] = None
     frequency_penalty: Optional[float] = None
     presence_penalty: Optional[float] = None
+    sampling_enabled: Optional[bool] = None
     reasoning_enabled: Optional[bool] = None
     reasoning_effort: Optional[str] = None
     thinking_budget_tokens: Optional[int] = None

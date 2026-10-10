@@ -572,6 +572,8 @@ class AIService:
     default_top_p: Optional[float] = None
     default_frequency_penalty: float = 0.0
     default_presence_penalty: float = 0.0
+    # 采样多样性开关：关闭后创作任务也不传 top_p / 频率惩罚 / 存在惩罚（模型不支持这些参数时关）
+    sampling_enabled: bool = True
     # 分析 / 抽取 / 摘要专用模型（用户设置 preferences.analysis_model）；None = 跟随 default_model
     analysis_model: Optional[str] = None
 
@@ -590,6 +592,7 @@ class AIService:
         default_frequency_penalty: Optional[float] = None,
         default_presence_penalty: Optional[float] = None,
         analysis_model: Optional[str] = None,
+        sampling_enabled: Optional[bool] = None,
     ):
         """
         初始化AI客户端（优化并发性能）
@@ -646,6 +649,10 @@ class AIService:
         self.default_presence_penalty = (
             default_presence_penalty if default_presence_penalty is not None
             else app_settings.default_presence_penalty
+        )
+        self.sampling_enabled = bool(
+            sampling_enabled if sampling_enabled is not None
+            else app_settings.default_sampling_enabled
         )
         # 分析 / 抽取 / 摘要专用模型（同一接口）；空 = 跟随主模型
         self.analysis_model = (analysis_model or "").strip() or None
@@ -752,8 +759,9 @@ class AIService:
         - top_p<1 才传（=1 等于不做核采样）
         - frequency_penalty / presence_penalty 非 0 才传（0 = 关闭）
         取值范围由 schema 层校验（top_p 0~1，penalty -2~2）。
+        设置里关掉「采样多样性」开关（模型不支持这些参数，如报 only 0 is allowed）时一律不传。
         """
-        if not creative:
+        if not creative or not self.sampling_enabled:
             return
         top_p = self.default_top_p
         if top_p is not None and top_p < 1.0:
@@ -767,8 +775,8 @@ class AIService:
             logger.info(f"  - presence_penalty: {self.default_presence_penalty}")
 
     def _anthropic_top_p(self, creative: bool = False) -> Optional[float]:
-        """Anthropic 只支持 top_p（不支持 frequency/presence_penalty）；仅创作任务且 <1 才返回。"""
-        if not creative:
+        """Anthropic 只支持 top_p（不支持 frequency/presence_penalty）；仅创作任务、开关开启且 <1 才返回。"""
+        if not creative or not self.sampling_enabled:
             return None
         top_p = self.default_top_p
         return top_p if (top_p is not None and top_p < 1.0) else None
@@ -1742,6 +1750,7 @@ def create_user_ai_service(
     frequency_penalty: Optional[float] = None,
     presence_penalty: Optional[float] = None,
     analysis_model: Optional[str] = None,
+    sampling_enabled: Optional[bool] = None,
 ) -> AIService:
     """
     根据用户设置创建AI服务实例
@@ -1759,6 +1768,7 @@ def create_user_ai_service(
         top_p: 核采样 top_p（<1 生效；Anthropic 非思考模式也生效）
         frequency_penalty: 频率惩罚（OpenAI 兼容；抑制重复用词）
         presence_penalty: 存在惩罚（OpenAI 兼容；鼓励新词/话题）
+        sampling_enabled: 采样多样性开关（关 = 上面三项一律不传，模型不支持时用）
         
     Returns:
         AIService实例
@@ -1777,4 +1787,5 @@ def create_user_ai_service(
         default_frequency_penalty=frequency_penalty,
         default_presence_penalty=presence_penalty,
         analysis_model=analysis_model,
+        sampling_enabled=sampling_enabled,
     )

@@ -26,6 +26,7 @@ class ProjectAIPreference(Base):
     top_p = Column(Float, nullable=True, comment="覆盖核采样 top_p；NULL=跟随全局")
     frequency_penalty = Column(Float, nullable=True, comment="覆盖频率惩罚；NULL=跟随全局")
     presence_penalty = Column(Float, nullable=True, comment="覆盖存在惩罚；NULL=跟随全局")
+    sampling_enabled = Column(Boolean, nullable=True, comment="覆盖采样多样性开关；NULL=跟随全局")
     reasoning_enabled = Column(Boolean, nullable=True, comment="覆盖思考开关；NULL=跟随全局")
     reasoning_effort = Column(String(20), nullable=True, comment="覆盖思考强度档位；NULL=跟随全局")
     thinking_budget_tokens = Column(Integer, nullable=True, comment="覆盖 Anthropic 思考预算；NULL=跟随全局")

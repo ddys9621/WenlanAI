@@ -39,6 +39,7 @@ def read_env_defaults() -> Dict[str, Any]:
         "top_p": app_settings.default_top_p,
         "frequency_penalty": app_settings.default_frequency_penalty,
         "presence_penalty": app_settings.default_presence_penalty,
+        "sampling_enabled": app_settings.default_sampling_enabled,
         "reasoning_enabled": app_settings.default_reasoning_enabled,
         "reasoning_effort": app_settings.default_reasoning_effort,
         "thinking_budget_tokens": app_settings.default_thinking_budget_tokens,

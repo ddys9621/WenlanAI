@@ -20,7 +20,7 @@ PROJECT_HEADER = "X-Project-Id"
 
 # 允许按项目覆盖的字段（与 Settings 同名）；顺序即接口 / 前端展示顺序
 OVERRIDE_FIELDS: tuple[str, ...] = (
-    "llm_model", "temperature", "max_tokens", "top_p", "frequency_penalty",
+    "llm_model", "temperature", "max_tokens", "sampling_enabled", "top_p", "frequency_penalty",
     "presence_penalty", "reasoning_enabled", "reasoning_effort", "thinking_budget_tokens",
 )
 
@@ -49,6 +49,7 @@ def merge_ai_overrides(settings: Settings, pref: Optional[ProjectAIPreference]) 
         "top_p": v["top_p"],
         "frequency_penalty": v["frequency_penalty"],
         "presence_penalty": v["presence_penalty"],
+        "sampling_enabled": v["sampling_enabled"],
         "reasoning_enabled": v["reasoning_enabled"],
         "reasoning_effort": v["reasoning_effort"],
         "thinking_budget_tokens": v["thinking_budget_tokens"],

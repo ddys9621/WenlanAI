@@ -70,6 +70,7 @@ export default function Settings() {
     top_p: 0.95,
     frequency_penalty: 0.3,
     presence_penalty: 0.3,
+    sampling_enabled: true,
     reasoning_enabled: false,
     reasoning_effort: 'medium',
     thinking_budget_tokens: null,
@@ -93,6 +94,7 @@ export default function Settings() {
           top_p: data.top_p ?? 0.95,
           frequency_penalty: data.frequency_penalty ?? 0.3,
           presence_penalty: data.presence_penalty ?? 0.3,
+          sampling_enabled: data.sampling_enabled ?? true,
           reasoning_enabled: data.reasoning_enabled ?? false,
           reasoning_effort: data.reasoning_effort ?? 'medium',
           thinking_budget_tokens: data.thinking_budget_tokens ?? null,
@@ -248,6 +250,7 @@ export default function Settings() {
         top_p: settings.top_p ?? 0.95,
         frequency_penalty: settings.frequency_penalty ?? 0.3,
         presence_penalty: settings.presence_penalty ?? 0.3,
+        sampling_enabled: settings.sampling_enabled ?? true,
         reasoning_enabled: settings.reasoning_enabled ?? false,
         reasoning_effort: settings.reasoning_effort ?? 'medium',
         thinking_budget_tokens: settings.thinking_budget_tokens ?? null,
@@ -265,6 +268,7 @@ export default function Settings() {
         top_p: 0.95,
         frequency_penalty: 0.3,
         presence_penalty: 0.3,
+        sampling_enabled: true,
         reasoning_enabled: false,
         reasoning_effort: 'medium',
         thinking_budget_tokens: null,
@@ -541,14 +545,29 @@ export default function Settings() {
 
               {/* 采样多样性（降低 AI 味） */}
               <div className="border-t border-surface-border pt-4">
-                <h3 className="text-sm font-semibold text-content">采样多样性（降低「AI 味」）</h3>
+                <div className="flex items-start justify-between gap-4">
+                  <h3 className="text-sm font-semibold text-content">采样多样性（降低「AI 味」）</h3>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <span className="text-sm text-content-secondary">{form.sampling_enabled !== false ? '已启用' : '关闭'}</span>
+                    <Switch
+                      checked={form.sampling_enabled !== false}
+                      onChange={v => updateField('sampling_enabled', v)}
+                      label="启用采样多样性"
+                    />
+                  </div>
+                </div>
                 <p className="mt-1 text-xs text-content-tertiary">
-                  提高用词与句式多样性、抑制重复套路句，可显著降低被 AI 检测器（如朱雀）判定的概率。
-                  全局生效——对世界观 / 角色等 JSON 结构化生成也会应用，建议惩罚值保持温和（0.3~0.6）。
+                  提高用词与句式多样性、抑制重复套路句，可降低被 AI 检测器（如朱雀）判定的概率。
+                  只用于写正文、去 AI 味重写等创作任务；分析、规划、JSON 结构化生成不受影响。
                   推荐正文创作：top_p≈0.9、frequency≈0.4、presence≈0.4。
+                </p>
+                <p className="mt-1 text-xs text-content-tertiary">
+                  模型不支持这些参数（报错「only 0 is allowed for this model」之类，如 Kimi K2.5 及以后、OpenAI 推理模型）时关闭开关，
+                  就不再传 Top P / 频率惩罚 / 存在惩罚。只有某个项目换了这类模型的话，在该项目顶栏的「模型」里单独关闭即可。
                 </p>
               </div>
 
+              {form.sampling_enabled !== false && (<>
               {/* Top P */}
               <div>
                 <label className={labelClass}>
@@ -614,6 +633,7 @@ export default function Settings() {
                 </div>
                 <p className="mt-1 text-xs text-content-tertiary">越高越鼓励引入新词与话题。仅 OpenAI 兼容接口生效，Anthropic 忽略。</p>
               </div>
+              </>)}
             </div>
           </section>
 

@@ -182,6 +182,7 @@ function ProjectModelDialog({
   const effectiveMaxTokens = form.max_tokens ?? g.max_tokens ?? 4096
   const effort = (form.reasoning_effort ?? g.reasoning_effort ?? 'medium') as ReasoningEffort
   const reasoningOn = form.reasoning_enabled ?? g.reasoning_enabled ?? false
+  const samplingOn = form.sampling_enabled ?? g.sampling_enabled ?? true
   const budgetAuto = autoBudget(effort, effectiveMaxTokens)
 
   return createPortal(
@@ -245,8 +246,22 @@ function ProjectModelDialog({
             />
           </OverrideField>
 
+          {/* 采样多样性开关：模型不支持 top_p / 惩罚参数（报 only 0 is allowed）时关闭 */}
+          <OverrideField
+            label="采样多样性"
+            following={form.sampling_enabled === null}
+            globalText={fmt(g.sampling_enabled ?? true)}
+            onToggle={(follow) => set('sampling_enabled', follow ? null : (g.sampling_enabled ?? true))}
+            hint="关闭后写正文 / 重写时不再传 Top P、频率惩罚、存在惩罚。本项目换的模型不支持这些参数时关掉。"
+          >
+            <div className="flex items-center gap-3">
+              <Switch checked={samplingOn} onChange={(v) => set('sampling_enabled', v)} label="本项目启用采样多样性" />
+              <span className="text-sm text-content-secondary">{samplingOn ? '已启用' : '关闭'}</span>
+            </div>
+          </OverrideField>
+
           {/* Top P / 惩罚 */}
-          {SLIDERS.slice(1).map((s) => (
+          {samplingOn && SLIDERS.slice(1).map((s) => (
             <SliderField key={s.key} s={s} value={form[s.key]} globalValue={g[s.key]} set={set} />
           ))}
 

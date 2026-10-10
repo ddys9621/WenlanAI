@@ -541,6 +541,8 @@ LONGFORM_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
         ("rolling_planning", "BOOLEAN"),
     ),
     "settings": (("analysis_model", "VARCHAR(100)"),),
+    # 项目级覆盖采样多样性开关（NULL = 跟随全局）
+    "project_ai_preferences": (("sampling_enabled", "BOOLEAN"),),
 }
 
 
@@ -583,15 +585,17 @@ async def ensure_settings_reasoning_columns(engine: AsyncEngine):
 async def ensure_settings_sampling_columns(engine: AsyncEngine):
     """Ensure sampling diversity columns exist on settings table（降低 AI 味 / 困惑度检测）。
 
-    新增 3 列（旧库升级，均带默认值，零数据迁移风险）：
+    新增 4 列（旧库升级，均带默认值，零数据迁移风险）：
     - top_p             REAL DEFAULT 0.95  核采样
     - frequency_penalty REAL DEFAULT 0.3   频率惩罚（抑制重复用词）
     - presence_penalty  REAL DEFAULT 0.3   存在惩罚（鼓励新词/话题）
+    - sampling_enabled  BOOLEAN NOT NULL DEFAULT 1  开关（模型不支持上面三项时关闭；旧用户保持开启）
     """
     sampling_columns = [
         ("top_p", "REAL DEFAULT 0.95"),
         ("frequency_penalty", "REAL DEFAULT 0.3"),
         ("presence_penalty", "REAL DEFAULT 0.3"),
+        ("sampling_enabled", "BOOLEAN NOT NULL DEFAULT 1"),
     ]
     async with engine.begin() as conn:
         for col_name, col_def in sampling_columns:

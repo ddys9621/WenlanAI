@@ -80,6 +80,8 @@ class Settings(BaseSettings):
     default_top_p: float = 0.95
     default_frequency_penalty: float = 0.3
     default_presence_penalty: float = 0.3
+    # 采样多样性开关：关 = 上面三项一律不传（模型锁死这些参数、报 "only 0 is allowed" 时关闭）
+    default_sampling_enabled: bool = True
     # 思考/推理强度默认值（新用户首次同步到 Settings；默认关闭以兼容非推理模型）
     default_reasoning_enabled: bool = False
     default_reasoning_effort: str = "medium"  # none|minimal|low|medium|high|xhigh|max
