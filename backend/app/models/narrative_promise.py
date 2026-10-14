@@ -1,6 +1,6 @@
 """Narrative promise tracker for foreshadows, promises, mysteries and conflicts."""
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.sql import func
 
 from app.db_base import Base
@@ -34,6 +34,8 @@ class NarrativePromise(Base):
     resolution_note = Column(Text, nullable=True)
 
     evidence_text = Column(Text, nullable=True)
+    # 埋设章被重新分析 / 整章替换后待对账：按标题匹配复用原 ID（后面章节的回收记录、章纲任务引用都不断）
+    needs_reconcile = Column(Boolean, default=False)
 
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

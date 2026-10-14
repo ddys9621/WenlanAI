@@ -221,9 +221,9 @@ export default function Relationships() {
 
   return (
     <div className="animate-fade-in space-y-6">
-      <section className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
+      <section className="lj-page-header">
         <div className="min-w-0">
-          <h1 className="text-[28px] font-semibold tracking-tight text-content md:text-[32px]">关系管理</h1>
+          <h1 className="lj-page-title">关系管理</h1>
           <p className="mt-2 max-w-[560px] text-sm leading-6 text-content-secondary">
             记录角色两两之间的关系类型、亲密度与当前状态，理清人物脉络。
             {hasRelationships && `当前共 ${relationships.length} 条关系。`}

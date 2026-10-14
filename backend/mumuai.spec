@@ -23,7 +23,7 @@ datas = [
     (str(project_root / 'config.ini.template'), '.'),
     # 配置加载器
     (str(backend_dir / 'config_loader.py'), '.'),
-    # 品牌图标（启动控制台窗口运行时加载；由 scripts/make_icon.py 从 logo.svg 生成）
+    # 品牌图标（桌面窗口运行时加载；由 scripts/make_icon.py 从 logo.svg 生成）
     (str(backend_dir / 'assets'), 'assets'),
     # MCP 商城内置目录（app/mcp/marketplace.py 按 __file__ 同目录读取，非 .py 文件需显式打包）
     (str(backend_dir / 'app' / 'mcp' / 'marketplace_catalog.json'), 'app/mcp'),
@@ -90,7 +90,7 @@ excludes = [
 ]
 
 a = Analysis(
-    ['start_app.py'],  # 使用 start_app.py 作为入口点（包含数据库检查和自动打开浏览器）
+    ['start_app.py'],  # 入口：桌面窗口（启动画面 → 主界面，运行日志另开窗口）；desktop/ 包经导入自动收集
     pathex=[str(backend_dir)],
     binaries=[],
     datas=datas,

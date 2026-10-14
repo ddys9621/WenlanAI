@@ -27,6 +27,8 @@ class RelationshipEvent(Base):
     new_intimacy_level = Column(Integer, nullable=True)
     old_status = Column(String(20), nullable=True)
     new_status = Column(String(20), nullable=True)
+    # 分析显式给出的新状态（"" = 没给，沿用上一状态）；按章重放关系时用它，不用回放算出的 new_status
+    requested_status = Column(String(20), nullable=True)
     created_relationship = Column(Integer, default=0)  # 0/1 for sqlite compatibility
 
     created_at = Column(DateTime, server_default=func.now())

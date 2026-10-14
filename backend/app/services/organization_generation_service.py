@@ -24,6 +24,7 @@ from app.services.ai_service import AIService
 from app.services.generation_trace import stage_scope
 from app.services.prompt_service import prompt_service
 from app.utils.json_cleaner import clean_and_parse_json
+from app.utils.prompt_safety import quote_untrusted
 
 logger = get_logger(__name__)
 
@@ -153,7 +154,7 @@ async def generate_organization_for_project(
 【参考资料】
 以下是通过MCP工具收集的相关参考资料，可以作为灵感来源：
 
-{used_reference}
+{quote_untrusted(used_reference, "MCP 检索结果")}
 """)
 
     prompt = prompt_service.get_single_organization_prompt(

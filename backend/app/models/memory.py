@@ -162,7 +162,10 @@ class PlotAnalysis(Base):
     word_count = Column(Integer, comment="章节字数")
     dialogue_ratio = Column(Float, comment="对话占比 0.0-1.0")
     description_ratio = Column(Float, comment="描写占比 0.0-1.0")
-    
+
+    # 分析时的正文指纹：正文改了（指纹不一致）分析结果才算过期；旧记录为空时退回按时间判断
+    content_hash = Column(String(64), nullable=True, comment="分析时的正文指纹")
+
     created_at = Column(DateTime, server_default=func.now(), comment="分析时间")
     
     def __repr__(self):

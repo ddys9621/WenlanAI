@@ -1,7 +1,8 @@
 """服务端批量写作队列（跑在 ai_jobs 上：关掉浏览器也不停，刷新可接管）。
 
-每章：[缺章纲 → 自动滚动规划（填充 / 展开覆盖本章的桥段）] → 生成正文（带截断续写，失败自动重试）→
-质量闸门（AI 味分过高 / 字数严重不足 → 重写一次）→ 分析（记忆 / 状态卡 / 伏笔结算）→ 一致性闸门（严重问题暂停）。
+每章：[缺章纲 → 自动滚动规划（填充 / 展开覆盖本章的桥段）] → 生成候选稿（带截断续写，失败自动重试）→
+质量闸门（AI 味分过高 / 字数严重不足 → 重写一次）→ 自动采用最后一稿写入正文 → 分析（记忆 / 状态卡 / 伏笔结算）→
+一致性闸门（严重问题暂停）。
 
 - 续跑：已有正文的章节直接跳过；中断后用同样的范围重新发起即可接着写
 - 流水线：pipeline=True 时第 N 章分析与第 N+1 章生成重叠（第 N+1 章本来就带着第 N 章全文，不依赖其分析结果；
@@ -24,6 +25,7 @@ from app.models.analysis_task import AnalysisTask
 from app.models.chapter import Chapter
 from app.models.chapter_consistency_issue import ChapterConsistencyIssue
 from app.models.chapter_outline import ChapterOutline
+from app.services.adherence_review_service import failure_reason as adherence_failure_reason
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,7 @@ CANCELLED_MESSAGE = "已停止批量生成；已写完的章节已保存，重�
 Generate = Callable[..., Awaitable[dict[str, Any]]]
 Analyze = Callable[..., Awaitable[None]]
 Expand = Callable[..., Awaitable[bool]]
+Adopt = Callable[[str], Awaitable[None]]
 
 
 @dataclass
@@ -50,6 +53,8 @@ class BatchOptions:
     style_id: Optional[int] = None
     enable_mcp: bool = False
     target_word_count: Optional[int] = None
+    require_confirmed_outline: bool = False  # 只写作者确认过的章纲：遇到 AI 草拟 / 上游已改的章纲就停
+    adherence_gate: bool = True  # 章纲遵循度审校不通过（漏写关键事件 / 抢跑 / 新增设定…）时重写一次
 
 
 @dataclass
@@ -87,6 +92,17 @@ def _default_generate() -> Generate:
     from app.api.chapters import run_chapter_generation  # 延迟导入：api 层依赖本模块
 
     return run_chapter_generation
+
+
+def _default_adopt(session_factory: Callable[[], Any]) -> Adopt:
+    """批量：过了闸门的候选稿直接采用（批量只写没有正文的章，不存在覆盖作者修改的问题）。"""
+    from app.services.chapter_candidate_service import adopt_candidate_by_id
+
+    async def adopt(candidate_id: str) -> None:
+        async with session_factory() as db:
+            await adopt_candidate_by_id(db, candidate_id, force=True)
+
+    return adopt
 
 
 def _default_analyze() -> Analyze:
@@ -181,6 +197,8 @@ def _quality_failed(result: dict[str, Any], options: BatchOptions) -> Optional[s
         return f"AI 味分 {score}（阈值 {options.ai_flavor_threshold}）"
     if isinstance(ratio, (int, float)) and ratio < options.min_word_ratio:
         return f"字数只有目标的 {ratio:.0%}"
+    if options.adherence_gate:
+        return adherence_failure_reason((result or {}).get("adherence"))
     return None
 
 
@@ -195,20 +213,25 @@ async def run_batch(
     generate: Optional[Generate] = None,
     analyze: Optional[Analyze] = None,
     expand: Optional[Expand] = None,
+    adopt: Optional[Adopt] = None,
     analysis_session_factory: Optional[Callable[[], Any]] = None,
     analyze_kwargs: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    """analysis_session_factory / analyze_kwargs：分析用的独立连接（流水线模式必需，见模块说明）。"""
+    """analysis_session_factory / analyze_kwargs：分析用的独立连接（流水线模式必需，见模块说明）。
+
+    generate 返回 candidate_id 时，过闸门的那一稿由 adopt 写入正文（重写前的那稿随之作废）。
+    """
     from app.api.chapters import ChapterGenerateOptions
 
     generate = generate or _default_generate()
     analyze = analyze or _default_analyze()
     expand = expand or default_expand
+    adopt = adopt or _default_adopt(session_factory)
     analysis_sessions = analysis_session_factory or session_factory
     extra_analyze = dict(analyze_kwargs or {})
     gen_options = ChapterGenerateOptions(
-        style_id=options.style_id, target_word_count=options.target_word_count,
-        enable_mcp=options.enable_mcp, auto_analyze=False,
+        style_id=options.style_id, target_word_count=options.target_word_count, enable_mcp=options.enable_mcp,
+        adherence_review=options.adherence_gate,
     )
     state = _State()
     numbers = list(range(options.from_chapter, options.to_chapter + 1))
@@ -275,10 +298,20 @@ async def run_batch(
                     emit(number, None, "no_outline")
                     break
                 chapter_id, has_content = chapter.id, bool((chapter.content or "").strip())
+                outline_row = await db.get(ChapterOutline, chapter.chapter_outline_id)
+                outline_unconfirmed = outline_row is not None and (
+                    outline_row.review_status == "draft" or bool(outline_row.upstream_stale)
+                )
             if has_content:
                 state.skipped.append(number)
                 emit(number, chapter_id, "skipped")
                 continue
+            if options.require_confirmed_outline and outline_unconfirmed:
+                state.message = (
+                    f"第 {number} 章章纲未确认（AI 草拟或上游已改），批量在此停止：确认章纲后用同样范围重新发起即可接着写"
+                )
+                emit(number, chapter_id, "outline_unconfirmed")
+                break
 
             view = _ChapterJobView(job, number, base, 100 / total)
             result: dict[str, Any] = {}
@@ -311,6 +344,15 @@ async def run_batch(
                 break
             if state.failed and state.failed[-1]["chapter_number"] == number:
                 break
+            candidate_id = (result or {}).get("candidate_id")
+            if candidate_id:
+                try:
+                    await adopt(candidate_id)
+                except Exception as exc:  # noqa: BLE001 - 采用失败按生成失败处理，批量停在这一章
+                    state.failed.append({"chapter_number": number, "error": f"采用候选稿失败：{exc}"})
+                    state.message = f"第 {number} 章候选稿采用失败：{exc}"
+                    emit(number, chapter_id, "failed", error=str(exc))
+                    break
 
             quality = (result or {}).get("quality") or {}
             emit(number, chapter_id, "generated", word_count=result.get("word_count"), quality_score=quality.get("score"))

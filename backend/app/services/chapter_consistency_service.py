@@ -23,6 +23,26 @@ from app.utils.character_names import build_name_index
 
 logger = get_logger(__name__)
 
+_EVIDENCE_NOISE = re.compile(r"[\s\u3000，。！？、；：,.!?;:\"'“”‘’「」『』（）()《》<>〈〉…—\-·~～]+")
+_EVIDENCE_GRAM = 6
+
+
+def _evidence_key(text: Optional[str]) -> str:
+    return _EVIDENCE_NOISE.sub("", text or "")
+
+
+def evidence_supported(evidence: Optional[str], content: Optional[str]) -> bool:
+    """依据能否在正文里找到：去掉空白标点后整句命中；或按 6 字切片过半命中（容许模型改动个别字）。"""
+    key = _evidence_key(evidence)
+    if len(key) < 4:
+        return False
+    body = _evidence_key(content)
+    if key in body:
+        return True
+    grams = [key[i:i + _EVIDENCE_GRAM] for i in range(0, max(len(key) - _EVIDENCE_GRAM + 1, 1), 3)]
+    hits = sum(1 for gram in grams if gram in body)
+    return hits * 2 >= len(grams) and hits > 0
+
 
 class ChapterConsistencyService:
     LIFE_SIGNAL_VALUES = {"dead", "missing", "revived", "survived"}
@@ -50,7 +70,11 @@ class ChapterConsistencyService:
         chapter: Chapter,
         analysis: dict[str, Any],
     ) -> dict[str, int]:
-        signals = self._extract_continuity_signals(analysis)
+        # 生死 / 境界 / 能力丧失这类会改写后续章节硬约束的信号，必须能在正文里找到依据（防模型臆造）
+        signals = [
+            s for s in self._extract_continuity_signals(analysis)
+            if not self._needs_evidence(s) or evidence_supported(s.get("evidence_text"), chapter.content)
+        ]
         # AI 可能沿用角色曾用名；信号按名字串链，落库前统一归到正式名
         canonical_names = await self._load_canonical_names(db, project_id)
         for signal in signals:
@@ -492,6 +516,11 @@ class ChapterConsistencyService:
 
         return issues
 
+    @staticmethod
+    def _needs_evidence(signal: dict[str, Optional[str]]) -> bool:
+        kind, value = signal.get("signal_type"), signal.get("signal_value")
+        return kind in ("life_state", "realm") or (kind == "ability" and value in ("lost", "forgotten"))
+
     def _extract_continuity_signals(self, analysis: dict[str, Any]) -> list[dict[str, Optional[str]]]:
         continuity = analysis.get("continuity_signals") or {}
         signals: list[dict[str, Optional[str]]] = []
@@ -551,8 +580,8 @@ class ChapterConsistencyService:
 
         for item in analysis.get("timeline_events", []) or []:
             if (item.get("event_type") or "").strip().lower() == "death":
-                names = item.get("target_names") or item.get("actor_names") or []
-                for name in names:
+                # 只记受影响的人：缺 target 时不能退回 actor（「张三杀了李四」漏填 target 会把张三记成死亡）
+                for name in item.get("target_names") or []:
                     append_signal("life_state", name, None, "dead", item.get("evidence") or item.get("description"))
 
         for item in continuity.get("realm_updates", []) or []:

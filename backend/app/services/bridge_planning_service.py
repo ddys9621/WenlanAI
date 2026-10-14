@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import asdict, dataclass
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional
@@ -310,7 +311,8 @@ BRIDGE_FILL_TASK_PROMPT = """请为下面 {count} 个桥段槽位填写内容。
 - 标「保温」的支线：只需一句话带过其现状，不得展开新事件
 - 金手指使用方式在相邻桥段间不得重复
 - payoff_type 只能从列表中选：{payoff_types}；相邻桥段不得同型，参考账本里的「兑现方式累计」优先选全书用得少的
-- 人名、地名、势力名只能使用【本书角色】【世界规则表】里已有的；确需新角色时在 goal 里用“新角色：身份”标注
+- 人名、地名、势力名只能使用【本书角色】【世界规则表】【世界地图】里已有的；确需新角色时在 goal 里用“新角色：身份”标注
+- 有【世界地图】时，桥段之间换地点要合乎图上的方位远近：去很远的地方要留出赶路的篇幅
 - 最后一个桥段的 next_bridge_hook 要为下一节点开头留引子
 - foreshadow_plan（可空）：plant = 本桥段要埋下的长线伏笔（最多 2 条，payoff_after = 计划多少章后回收，长线可以几十上百章）；payoff = 本桥段要回收的旧伏笔标题（只能来自【当前未回收的伏笔】，标了"临近 / 超期"的优先）
 - 已有【实际剧情进展】时以它为准：已经发生的事不能改，计划与实际冲突时顺着实际往下规划
@@ -425,6 +427,21 @@ def _valid_word_count(raw: Any, default: int) -> int:
     return value if 500 <= value <= 10000 else default
 
 
+def _contract_text(raw: Any) -> Optional[str]:
+    text = str(raw).strip() if raw is not None else ""
+    return text[:1000] or None
+
+
+def _contract_list(raw: Any) -> Optional[str]:
+    """模型给的禁止事项（列表或一段文字）→ JSON 列表文本，最多 5 条。"""
+    if isinstance(raw, str):
+        raw = [part for part in re.split(r"[\n；;]", raw)]
+    if not isinstance(raw, list):
+        return None
+    items = [str(x).strip()[:200] for x in raw if str(x).strip()][:5]
+    return json.dumps(items, ensure_ascii=False) if items else None
+
+
 def _map_task_ids(raw: Any, mapping: dict[str, str]) -> Any:
     """章纲 narrative_tasks 里的短编号（P3）→ 真实承诺 id；其余原样（normalize 时按未回收清单过滤）。"""
     if not isinstance(raw, dict):
@@ -511,11 +528,17 @@ CHAPTER_EXPANSION_TASK_PROMPT = """请把下面这个桥段展开为 {count} 个
 - {c1_rule}
 - {pov_rule}
 - 人名只能使用【本书角色】里的名字；`characters_involved` / `pov` 不得出现新名字
+- 有【世界地图】时，`scene` 尽量用图上的地点名；相邻章节换地点要合乎图上的方位远近，去很远的地方要交代赶路（写进 entry_state / exit_state）
 {shape_block}
 # 叙事任务（伏笔 / 承诺）
 - 每章可带 `narrative_tasks`：resolve = 本章回收的旧承诺（promise_id 填【当前未回收的伏笔】里的编号，如 P3，how 写怎么回收）；\
 advance = 本章顺带推进 / 提一句的旧承诺（保温，不解决）；plant = 本章新埋的伏笔（payoff_after = 计划多少章后回收）
 - 【本桥段伏笔计划】里的条目要落到具体某一章；清单里标了"临近计划回收 / 已超期"的优先安排回收；没有合适的就留空，不要硬塞
+
+# 章节契约（给正文的硬边界，防止写跑题、抢跑下一章）
+- `entry_state`：本章开头人物在哪、刚发生什么、局势如何，必须承接上一章的 `exit_state`（第一章承接桥段开场）
+- `exit_state`：本章写完时停在哪 = 最后一个关键事件（章末落点）完成后的状态；下一章的 `entry_state` 从这里接
+- `forbidden`：1-3 条本章绝不能发生 / 揭晓的事，通常是本桥段后面几章或下一桥段才发生的关键事件、还没到揭晓时机的秘密
 
 # 场景卡片设计要求
 - 每章 3-5 张，按章内时间顺序排列
@@ -534,7 +557,10 @@ advance = 本章顺带推进 / 提一句的旧承诺（保温，不解决）；p
     "scene": "场景地点",
     "pov": "视角角色名",
     "plot_points": "详细剧情要点 300-400 字",
+    "entry_state": "本章开头的人物位置 / 刚发生的事 / 局势（承接上一章结尾）",
     "key_events": ["事件1", "事件2", "章末落点事件"],
+    "exit_state": "章末落点事件完成后停在哪",
+    "forbidden": ["本章不能提前发生的事"],
     "characters_involved": ["角色1", "角色2"],
     "target_word_count": {default_words},
     "narrative_tasks": {{"resolve": [{{"promise_id": "P1", "how": "怎么回收"}}], "advance": [], "plant": [{{"title": "伏笔名", "content": "怎么埋", "payoff_after": 40}}]}},
@@ -1246,6 +1272,10 @@ class BridgePlanningService:
                 bridge_id=bridge.id,
                 bridge_position=positions[i],
                 narrative_tasks=json.dumps(tasks, ensure_ascii=False) if has_tasks(tasks) else None,
+                entry_state=_contract_text(data.get("entry_state")),
+                exit_state=_contract_text(data.get("exit_state")),
+                forbidden=_contract_list(data.get("forbidden")),
+                review_status="draft",  # AI 草拟：作者确认前在列表 / 生成预检里提示
             )
             db.add(co)
             await db.flush()

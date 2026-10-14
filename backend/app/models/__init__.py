@@ -36,6 +36,10 @@ from app.models.chapter_consistency_issue import ChapterConsistencyIssue
 from app.models.project_ai_preference import ProjectAIPreference
 from app.models.deai_prompt import DeaiPrompt
 from app.models.arc_summary import ArcSummary
+from app.models.chapter_version import ChapterVersion
+from app.models.chapter_candidate import ChapterCandidate
+from app.models.world_map import WorldMap, WorldMapLocation
+from app.models.assistant import AssistantFieldCandidate, AssistantMessage, AssistantRun, AssistantSession
 
 __all__ = [
     "Project",
@@ -80,4 +84,12 @@ __all__ = [
     "ProjectAIPreference",
     "DeaiPrompt",
     "ArcSummary",
+    "ChapterVersion",
+    "ChapterCandidate",
+    "WorldMap",
+    "WorldMapLocation",
+    "AssistantSession",
+    "AssistantMessage",
+    "AssistantRun",
+    "AssistantFieldCandidate",
 ]

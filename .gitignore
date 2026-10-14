@@ -151,3 +151,5 @@ backend/embedding.zip
 /.history/
 # Devin CLI 本地配置与内部设计草稿
 .devin/
+# 内部开发备忘（不推送）
+/AGENTS.md

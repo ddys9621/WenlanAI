@@ -148,7 +148,7 @@ export default function ReferencePackLibrary() {
             <Library className="h-3.5 w-3.5" />
             仿写资料库
           </div>
-          <h1 className="mt-2 text-2xl font-semibold text-content">参考包</h1>
+          <h1 className="lj-page-title mt-2">参考包</h1>
           <p className="mt-1 text-sm text-content-secondary">
             从拆书任务沉淀的"如何写"指南，可挂载到多个项目，用于一键仿写章节。
           </p>

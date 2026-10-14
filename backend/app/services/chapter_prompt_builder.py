@@ -6,17 +6,18 @@
 这里：
 - system：人设 + 视角 / 类型指导 + 文风 + 平台写法 + 项目风格 + 写作优先级（只说一次）+ 输出要求——跨章稳定，
   可命中各家的前缀缓存
-- user：作品设定 → 前情脉络（层级摘要）→ 近期剧情 → 相关旧事 → 出场角色与状态 → 叙事账本 → 参考资料 →
+- user：作品设定 → 前情脉络（层级摘要）→ 近期剧情 → 相关旧事 → 出场角色与状态 → 地图与方位 → 叙事账本 → 参考资料 →
   上一章正文 → 本段章纲 → 本章任务（章纲 / 剧情卡 / 叙事任务 / 结构要求 / 字数 / 用户微调）→ 收尾
 - 全部上下文过预算器（context_budget），本章任务与收尾永不裁剪
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from app.services.context_budget import ContextSection, budget_report, clip_text, fit_sections, render_sections
 from app.services.prompt_service import CHAPTER_OUTPUT_INSTRUCTION, CHAPTER_STYLE_RULES, CHAPTER_WRITER_PERSONA, PromptService
+from app.utils.prompt_safety import UNTRUSTED_DATA_RULE, quote_untrusted
 
 DEFAULT_BUDGET_CHARS = 36_000
 CONTINUATION_TAIL_CHARS = 1500
@@ -73,6 +74,7 @@ class ChapterPromptInput:
     absent_characters: str = ""
     organizations: str = ""
     story_time: str = ""
+    world_map: str = ""
     ledger_blocks: dict[str, str] = field(default_factory=dict)
     references: str = ""
     style_content: str = ""
@@ -113,6 +115,7 @@ def _system_prompt(inp: ChapterPromptInput) -> str:
         inp.platform_block.strip(),
         inp.style_content.strip(),
         PRIORITY_RULES,
+        UNTRUSTED_DATA_RULE,
         f"## 输出\n{CHAPTER_OUTPUT_INSTRUCTION}",
     ]
     return "\n\n".join(p for p in parts if p)
@@ -173,6 +176,11 @@ def _task_text(inp: ChapterPromptInput, closing: str) -> str:
     return "\n\n".join(parts)
 
 
+def _quote_reference_section(sections: list[ContextSection]) -> list[ContextSection]:
+    """参考资料过完预算器再包起止标记：裁剪不会把结束标记裁掉，区块总是闭合的。"""
+    return [replace(s, text=quote_untrusted(s.text, "参考资料")) if s.key == "references" else s for s in sections]
+
+
 def build_chapter_prompt(inp: ChapterPromptInput) -> ChapterPrompt:
     closing = build_chapter_closing(inp.hook_policy)
     task = _task_text(inp, closing)
@@ -183,13 +191,15 @@ def build_chapter_prompt(inp: ChapterPromptInput) -> ChapterPrompt:
         ContextSection("recent_summaries", "近期剧情", inp.recent_summaries, priority=7, max_chars=3_500, min_chars=600, keep="tail"),
         ContextSection("relevant_history", "相关旧事", inp.relevant_history, priority=2, max_chars=2_000),
         ContextSection("characters", "出场角色与状态", _characters_text(inp), priority=9, max_chars=4_000, min_chars=1_200),
+        ContextSection("world_map", "地图与方位", inp.world_map, priority=4, max_chars=1_200, min_chars=300),
         ContextSection("ledger", "叙事账本", _ledger_text(inp), priority=5, max_chars=3_500, min_chars=800),
         ContextSection("references", "参考资料", inp.references, priority=1, max_chars=3_000),
         ContextSection("recent_full", "上一章正文", inp.recent_full, priority=8, max_chars=7_000, min_chars=1_500, keep="tail"),
         ContextSection("outline_window", "本段章纲", inp.outline_window, priority=7, max_chars=2_000, min_chars=400),
     ], total_chars=budget)
-    user = render_sections([*sections, ContextSection("task", "本章任务", task, priority=10, max_chars=0, required=True)])
     report = budget_report(sections)
+    sections = _quote_reference_section(sections)
+    user = render_sections([*sections, ContextSection("task", "本章任务", task, priority=10, max_chars=0, required=True)])
     report["task"] = {"chars": len(task), "trimmed": False}
     return ChapterPrompt(system=_system_prompt(inp), user=user, task=task, closing=closing, report=report)
 

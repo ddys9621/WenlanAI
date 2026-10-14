@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Layers, X } from 'lucide-react';
 import type { Chapter } from '@/types';
+import { countBatchTargets, selectBatchChapters } from '@/utils/chapterBatch';
 
 export interface BatchStartArgs {
   from: number;
@@ -11,6 +12,8 @@ export interface BatchStartArgs {
   qualityGate: boolean;
   pipeline: boolean;
   autoExpand: boolean;
+  adherenceGate: boolean;
+  requireConfirmedOutline: boolean;
 }
 
 interface BatchGenerateModalProps {
@@ -33,6 +36,10 @@ export function BatchGenerateModal({ open, chapters, onClose, onStart }: BatchGe
   const [qualityGate, setQualityGate] = useState(true);
   const [pipeline, setPipeline] = useState(false);
   const [autoExpand, setAutoExpand] = useState(true);
+  const [adherenceGate, setAdherenceGate] = useState(true);
+  const [requireConfirmedOutline, setRequireConfirmedOutline] = useState(false);
+  const { toGenerate, skipped } = selectBatchChapters(chapters, from, to);
+  const targets = countBatchTargets(chapters, from, to);
 
   useEffect(() => {
     if (!open) return;
@@ -67,13 +74,17 @@ export function BatchGenerateModal({ open, chapters, onClose, onStart }: BatchGe
         </div>
         <div className="hh-modal-body space-y-4">
           <div className="hh-subpanel px-4 py-3 text-xs leading-6 text-content-secondary">
-            批量任务在服务端运行：关掉页面也不会停，回来后会自动接上进度。每章依次「生成 → 质检 → 分析 → 一致性检查」，
-            失败自动重试；已有正文的章节自动跳过，中断后用同样的范围重新开始即可接着写。
+            批量任务在服务端运行：关掉页面也不会停，回来后会自动接上进度。每章依次「生成候选稿 → 质检 / 章纲审校 → 自动采用 → 分析 → 一致性检查」，
+            失败自动重试；已有正文的章节（包括手写的草稿）自动跳过，中断后用同样的范围重新开始即可接着写。
           </div>
           {option(pauseOnCritical, setPauseOnCritical, '遇严重一致性问题时暂停',
             '（每章分析完检查审计结果，发现 critical 问题先停下，避免错误设定影响后续章节）')}
           {option(qualityGate, setQualityGate, '质量闸门',
             '（AI 味分过高或字数严重不足时自动重写一次）')}
+          {option(adherenceGate, setAdherenceGate, '章纲遵循度审校',
+            '（漏写关键事件、没写到章末落点、抢跑下一章、新增未确认设定时重写一次；每章多一次模型调用）')}
+          {option(requireConfirmedOutline, setRequireConfirmedOutline, '只写已确认的章纲',
+            '（遇到 AI 草拟未确认、或上游桥段 / 剧情线 / 大纲改过的章纲就停下，先去确认）')}
           {option(autoExpand, setAutoExpand, '缺章纲时自动规划',
             '（写到还没展开的桥段时，先自动填充 / 展开再写；配合「滚动规划」使用）')}
           {option(pipeline, setPipeline, '流水线加速',
@@ -89,12 +100,21 @@ export function BatchGenerateModal({ open, chapters, onClose, onStart }: BatchGe
               <input type="number" min={from} max={last + MAX_LOOKAHEAD} value={to} onChange={(e) => setTo(Number(e.target.value))} className="hh-field" />
             </div>
           </div>
+          <p className="text-xs text-content-secondary">
+            将写 <span className="font-semibold text-content tabular-nums">{targets}</span> 章
+            {skipped > 0 && <>，跳过 <span className="tabular-nums">{skipped}</span> 章已有正文的</>}
+            {targets > toGenerate.length && <>（其中 <span className="tabular-nums">{targets - toGenerate.length}</span> 章需要先自动规划章纲）</>}
+          </p>
         </div>
         <div className="hh-modal-foot">
           <button onClick={onClose} className="hh-btn-ghost">
             取消
           </button>
-          <button onClick={() => onStart({ from, to, pauseOnCritical, qualityGate, pipeline, autoExpand })} className="hh-btn-primary">
+          <button
+            onClick={() => onStart({ from, to, pauseOnCritical, qualityGate, pipeline, autoExpand, adherenceGate, requireConfirmedOutline })}
+            disabled={targets === 0}
+            className="hh-btn-primary"
+          >
             <Layers className="h-4 w-4" />
             开始生成
           </button>

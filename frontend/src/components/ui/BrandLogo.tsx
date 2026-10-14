@@ -7,9 +7,9 @@ interface BrandLogoProps {
 }
 
 const SIZE_MAP = {
-  sm: 'h-9 w-9 rounded-2xl',
-  md: 'h-10 w-10 rounded-2xl',
-  lg: 'h-12 w-12 rounded-[20px]',
+  sm: 'h-9 w-9 rounded',
+  md: 'h-10 w-10 rounded',
+  lg: 'h-12 w-12 rounded-lg',
 } as const
 
 // 翻开的两页书 + 一道从左页起笔、越过书脊、右上提笔出页的笔迹（viewBox 256）
@@ -26,13 +26,14 @@ export function BrandLogo({ size = 'md', className }: BrandLogoProps) {
   return (
     <span
       className={cn(
-        'relative inline-flex items-center justify-center overflow-hidden bg-gradient-to-br from-[#007aff] via-[#3a95ff] to-[#8ec3ff] text-white shadow-[0_12px_28px_-12px_rgba(0,122,255,0.6)]',
+        'relative inline-flex items-center justify-center overflow-hidden bg-gradient-to-br from-brand-600 via-brand to-brand-400 text-white ring-1 ring-inset ring-white/10',
         SIZE_MAP[size],
         className,
       )}
       aria-hidden="true"
     >
-      <span className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.34),transparent_34%)]" />
+      <span className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.22),transparent_38%)]" />
+      <span className="absolute bottom-0 right-0 h-1 w-1/3 bg-signal" />
       <svg viewBox="0 0 256 256" fill="none" className="relative h-[66%] w-[66%]">
         <defs>
           <mask id={notStroke} maskUnits="userSpaceOnUse" x="0" y="0" width="256" height="256">

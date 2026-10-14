@@ -544,8 +544,12 @@ class WorldRuleService:
                 db.add(rule)
                 created_rules.append(rule)
 
-            # 处理地图/地点系统
+            # 处理地图/地点系统（同名只留第一条：每个地点在世界地图上只对应一条规则）
+            place_names = set()
             for rule_data in rules_data.get("map_location", []):
+                if rule_data["name"] in place_names:
+                    continue
+                place_names.add(rule_data["name"])
                 rule = WorldRule(
                     id=str(uuid.uuid4()),
                     project_id=project.id,

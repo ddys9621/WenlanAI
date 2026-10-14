@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.chapter_continuity_signal import ChapterContinuitySignal
 from app.models.character import Character
 from app.models.relationship import CharacterRelationship
+from app.services.relationship_timeline import relationship_states_before
 
 STATE_SIGNAL_TYPES: tuple[str, ...] = (
     "life_state", "location", "ability", "realm", "item", "injury", "goal", "presence",
@@ -227,42 +228,53 @@ def select_relevant_organizations(organizations: Iterable[Any], text: str, invol
     return out[:limit]
 
 
-async def load_related_ids(db: AsyncSession, project_id: str, character_id: Optional[str]) -> set[str]:
-    if not character_id:
-        return set()
+async def _relationship_states(
+    db: AsyncSession, project_id: str, character_id: str, before_chapter: Optional[int],
+) -> list[tuple[CharacterRelationship, Optional[int], Optional[str]]]:
+    """某角色的关系及其状态：给 before_chapter 时按写第 N 章时（之后才出现 / 变化的不算），否则取现状。"""
+    if before_chapter is not None:
+        return await relationship_states_before(db, project_id, character_id, before_chapter)
     rows = (await db.execute(
-        select(CharacterRelationship.character_from_id, CharacterRelationship.character_to_id).where(
+        select(CharacterRelationship).where(
             CharacterRelationship.project_id == project_id,
             or_(CharacterRelationship.character_from_id == character_id,
                 CharacterRelationship.character_to_id == character_id),
         )
-    )).all()
-    return {cid for pair in rows for cid in pair if cid and cid != character_id}
+    )).scalars().all()
+    return [(rel, rel.intimacy_level, rel.status) for rel in rows]
+
+
+async def load_related_ids(
+    db: AsyncSession, project_id: str, character_id: Optional[str], before_chapter: Optional[int] = None,
+) -> set[str]:
+    if not character_id:
+        return set()
+    states = await _relationship_states(db, project_id, character_id, before_chapter)
+    return {
+        cid
+        for rel, _intimacy, _status in states
+        for cid in (rel.character_from_id, rel.character_to_id)
+        if cid and cid != character_id
+    }
 
 
 async def load_protagonist_relations(
     db: AsyncSession, project_id: str, protagonist: Optional[Any], characters: Iterable[Any],
+    before_chapter: Optional[int] = None,
 ) -> dict[str, str]:
-    """角色名 → 与主角的关系一句话（自定义关系名 / 状态 / 亲密度）。"""
+    """角色名 → 与主角的关系一句话（自定义关系名 / 状态 / 亲密度）；给 before_chapter 时取写第 N 章时的状态。"""
     if protagonist is None:
         return {}
     by_id = {c.id: c for c in characters if getattr(c, "id", None)}
-    rows = (await db.execute(
-        select(CharacterRelationship).where(
-            CharacterRelationship.project_id == project_id,
-            or_(CharacterRelationship.character_from_id == protagonist.id,
-                CharacterRelationship.character_to_id == protagonist.id),
-        )
-    )).scalars().all()
     out: dict[str, str] = {}
-    for rel in rows:
+    for rel, intimacy, status in await _relationship_states(db, project_id, protagonist.id, before_chapter):
         other_id = rel.character_to_id if rel.character_from_id == protagonist.id else rel.character_from_id
         other = by_id.get(other_id)
         if other is None or other.name in out:
             continue
-        parts = [p for p in (rel.relationship_name, rel.status if rel.status and rel.status != "active" else None) if p]
-        if rel.intimacy_level is not None:
-            parts.append(f"亲密度{rel.intimacy_level}")
+        parts = [p for p in (rel.relationship_name, status if status and status != "active" else None) if p]
+        if intimacy is not None:
+            parts.append(f"亲密度{intimacy}")
         out[other.name] = "，".join(parts)
     return out
 

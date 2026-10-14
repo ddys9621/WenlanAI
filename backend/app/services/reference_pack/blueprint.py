@@ -69,6 +69,7 @@ BUSINESS_SLOT_TOKENS: dict[ModelTier, dict[str, int]] = {
         "system_role": 100, "system_base_style": 700,
         "project_skeleton": 600, "chapter_outline": 400,
         "project_characters": 400, "world_rules_table": 300,
+        "world_map": 120,  # bridge_planning 的 S 档离 60% 窗口只剩 150
         "bridge_position": 500,
         "plot_lines_with_beats": 1200,  # V4.1 方案 C：主线+节点+配额，S 档紧
         "history_full": 400, "history_normal": 200, "history_brief": 160,
@@ -78,7 +79,7 @@ BUSINESS_SLOT_TOKENS: dict[ModelTier, dict[str, int]] = {
     "M": {
         "system_role": 100, "system_base_style": 700,
         "project_skeleton": 1200, "chapter_outline": 500,
-        "project_characters": 600, "world_rules_table": 400,
+        "project_characters": 600, "world_rules_table": 400, "world_map": 400,
         "bridge_position": 600,
         "plot_lines_with_beats": 1800,  # V4.1 方案 C：M 档允许多节点展开
         "history_full": 400, "history_normal": 400, "history_brief": 240,
@@ -88,7 +89,7 @@ BUSINESS_SLOT_TOKENS: dict[ModelTier, dict[str, int]] = {
     "L": {
         "system_role": 100, "system_base_style": 700,
         "project_skeleton": 1500, "chapter_outline": 500,
-        "project_characters": 800, "world_rules_table": 600,
+        "project_characters": 800, "world_rules_table": 600, "world_map": 600,
         "bridge_position": 600,
         "plot_lines_with_beats": 2500,  # V4.1 方案 C：L 档可装完整其他主个节点描述
         "history_full": 400, "history_normal": 400, "history_brief": 560,
@@ -98,7 +99,7 @@ BUSINESS_SLOT_TOKENS: dict[ModelTier, dict[str, int]] = {
     "XL": {
         "system_role": 100, "system_base_style": 700,
         "project_skeleton": 2000, "chapter_outline": 500,
-        "project_characters": 1200, "world_rules_table": 800,
+        "project_characters": 1200, "world_rules_table": 800, "world_map": 800,
         "bridge_position": 600,
         "plot_lines_with_beats": 3500,  # V4.1 方案 C：XL 档全量装入节点描述 + 附加上下文
         "history_full": 800, "history_normal": 1000, "history_brief": 800,
@@ -175,7 +176,7 @@ SCENE_BUSINESS_TEMPLATES: dict[str, list[str]] = {
     ],
     "chapter_outline": [
         "system_role", "system_base_style",
-        "project_skeleton", "project_characters", "world_rules_table", "output_spec",
+        "project_skeleton", "project_characters", "world_rules_table", "world_map", "output_spec",
     ],
     "story_outline": [
         "system_role", "system_base_style",
@@ -184,8 +185,8 @@ SCENE_BUSINESS_TEMPLATES: dict[str, list[str]] = {
     "bridge_planning": [
         # system 段：基础规则
         "system_role", "system_base_style",
-        # user 段：项目骨架 → 本书角色 → 世界规则表 → V4.1 方案 C 剩情线节点配额 → 输出要求
-        "project_skeleton", "project_characters", "world_rules_table",
+        # user 段：项目骨架 → 本书角色 → 世界规则表 → 世界地图 → V4.1 方案 C 剩情线节点配额 → 输出要求
+        "project_skeleton", "project_characters", "world_rules_table", "world_map",
         "plot_lines_with_beats", "output_spec",
     ],
     "scene_generation": [
@@ -236,7 +237,7 @@ def _make_business_slot(slot_name: str, tier: ModelTier) -> Slot:
         # V4.1 方案 C：项目级缓存（同一项目 bridge_planning 调用间剩情线不变）
         return Slot(slot_name, max_tokens, "user",
                     cacheable=True, cache_tier="project")
-    if slot_name in ("project_characters", "world_rules_table"):
+    if slot_name in ("project_characters", "world_rules_table", "world_map"):
         # 项目自有资料：同一项目内不变 → 项目级缓存；空表 → 跳过
         return Slot(slot_name, max_tokens, "user",
                     cacheable=True, cache_tier="project")

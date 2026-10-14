@@ -36,6 +36,7 @@ import {
   type ReferencePackSelectorValue,
 } from '@/components/ReferencePackSelector'
 import { BrandLogo } from '@/components/ui/BrandLogo'
+import { parseServerTime } from '@/utils/serverTime'
 import type { PlatformPreset, Project } from '@/types'
 
 /* ─── 常量 ─── */
@@ -48,10 +49,10 @@ const STATUS_MAP: Record<Project['status'], { label: string; color: string }> = 
 }
 
 const COVER_STYLES = [
-  'from-[#007aff] to-[#63b3ff]',
-  'from-[#3a95ff] to-[#8ec3ff]',
-  'from-[#0a5fd6] to-[#3a95ff]',
-  'from-[#4f8cff] to-[#a7cdff]',
+  'from-[#204a3e] to-[#4f8a76]',
+  'from-[#8f483e] to-[#c06a57]',
+  'from-[#4d657b] to-[#7d93a8]',
+  'from-[#80601e] to-[#b8913f]',
 ] as const
 
 /* ─── 工具函数 ─── */
@@ -62,7 +63,7 @@ function formatWords(n: number) {
 }
 
 function formatDate(iso: string) {
-  const d = new Date(iso)
+  const d = parseServerTime(iso) ?? new Date(iso)
   const now = new Date()
   const diff = now.getTime() - d.getTime()
   const mins = Math.floor(diff / 60000)
@@ -170,7 +171,7 @@ function ModeCard({
       <span
         className={cn(
           'flex h-11 w-11 shrink-0 items-center justify-center transition-colors',
-          primary ? 'bg-brand text-white shadow-[0_12px_28px_-12px_rgba(0,122,255,0.55)]' : 'bg-brand/10 text-brand',
+          primary ? 'bg-brand text-white' : 'bg-brand/10 text-brand',
         )}
       >
         <Icon className="h-5 w-5" />
@@ -242,7 +243,7 @@ function ProjectCard({
       <div className="pb-5">
         <div className="flex items-start justify-between gap-3">
           <div
-            className={`flex h-12 w-12 shrink-0 items-center justify-center bg-gradient-to-br ${cover} text-lg font-semibold text-white shadow-[0_12px_28px_-12px_rgba(0,122,255,0.55)]`}
+            className={`flex h-12 w-12 shrink-0 items-center justify-center bg-gradient-to-br ${cover} text-lg font-semibold text-white`}
           >
             {coverLetter}
           </div>
@@ -740,9 +741,9 @@ export default function ProjectList() {
 
   return (
     <div className="animate-fade-in space-y-6">
-      <section className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
+      <section className="lj-page-header">
         <div className="min-w-0">
-          <h1 className="text-[28px] font-semibold tracking-tight text-content md:text-[32px]">我的项目</h1>
+          <h1 className="lj-page-title">我的项目</h1>
           <p className="mt-2 max-w-[560px] text-sm leading-6 text-content-secondary">
             在这里管理全部小说项目，随时回到最近推进的作品。
           </p>
@@ -1414,7 +1415,7 @@ function WizardModal({
                         onClick={() => updateField('narrative_perspective', p)}
                         className={cn(
                           'px-3.5 py-1.5 text-xs font-medium transition-colors',
-                          selected ? 'bg-brand text-white shadow-[0_8px_20px_-12px_rgba(0,122,255,0.6)]' : 'text-content-secondary hover:text-content',
+                          selected ? 'bg-brand text-white' : 'text-content-secondary hover:text-content',
                         )}
                       >
                         {p}

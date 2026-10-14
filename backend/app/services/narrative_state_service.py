@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import inspect
+import re
 from typing import Any, Dict, Iterable, Optional
 
-from sqlalchemy import delete, or_, select
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.logger import get_logger
@@ -18,9 +19,12 @@ from app.models.plot_line import PlotLine
 from app.models.relationship import CharacterRelationship, Organization, OrganizationMember
 from app.models.relationship_event import RelationshipEvent
 from app.models.timeline_event import TimelineEvent
+from app.services import relationship_timeline as rt
 from app.utils.character_names import build_name_index
 
 logger = get_logger(__name__)
+
+_CHAPTER_MARKER = re.compile(r"^第\s*(\d+)\s*章")
 
 
 class NarrativeStateService:
@@ -68,6 +72,7 @@ class NarrativeStateService:
 
         causal_count = await self._store_causal_links(db, project_id, chapter, analysis, characters, plot_lines)
         promise_count = await self._store_promises(db, project_id, chapter, analysis, characters, plot_lines)
+        await self._finish_promise_reconcile(db, chapter)
         relationship_count = await self._store_relationship_events(db, project_id, chapter, analysis, characters)
         timeline_count = await self._store_timeline_events(db, project_id, chapter, analysis, characters, plot_lines)
         knowledge_count = await self._store_known_info(db, project_id, chapter, analysis, characters)
@@ -93,7 +98,7 @@ class NarrativeStateService:
 
         重新结算前（settle_chapter_state）与「重写覆盖正文」（api/chapters._purge_chapter_analysis_and_memory）都走这里。
         """
-        await self._rollback_relationship_events(db, chapter_id)
+        await self._remove_chapter_relationship_events(db, chapter_id)
         await self._clear_chapter_records(db, chapter_id)
         await self._clear_promise_resolutions(db, chapter_id)
 
@@ -126,7 +131,7 @@ class NarrativeStateService:
         )
 
         affiliation_records = await self._maybe_await(
-            self._get_affiliation_dynamics(db, project_id)
+            self._get_affiliation_dynamics(db, project_id, current_chapter)
         )
         if character_names is not None:
             wanted = {self._normalize_key(name) for name in character_names if name}
@@ -176,42 +181,30 @@ class NarrativeStateService:
     async def _find_relationship(
         self, db: AsyncSession, project_id: str, from_id: str, to_id: str,
     ) -> Optional[CharacterRelationship]:
-        """同一对角色间可能有多条关系（手动建关系接口不查重），取最早的一条作为结算 / 回滚目标。"""
-        result = await db.execute(
-            select(CharacterRelationship)
-            .where(
-                CharacterRelationship.project_id == project_id,
-                CharacterRelationship.character_from_id == from_id,
-                CharacterRelationship.character_to_id == to_id,
-            )
-            .order_by(CharacterRelationship.created_at, CharacterRelationship.id)
-        )
-        return result.scalars().first()
+        """同一对角色间可能有多条关系（手动建关系接口不查重），取最早的一条作为结算目标。"""
+        return await rt.find_relationship(db, project_id, from_id, to_id)
 
-    async def _rollback_relationship_events(self, db: AsyncSession, chapter_id: str) -> None:
-        result = await db.execute(
+    async def _remove_chapter_relationship_events(self, db: AsyncSession, chapter_id: str) -> None:
+        """删掉本章的关系事件后整对重放：后面章节的关系变化保留（不再把关系回滚到本章之前、冲掉后续章）。"""
+        events = list((await db.execute(
             select(RelationshipEvent).where(RelationshipEvent.chapter_id == chapter_id)
-        )
-        for event in result.scalars().all():
-            relationship = await self._find_relationship(
-                db, event.project_id, event.character_from_id, event.character_to_id
-            )
-            if relationship is None:
-                continue
-
-            if event.created_relationship and event.old_intimacy_level is None:
-                await db.delete(relationship)
-                continue
-
-            relationship.intimacy_level = event.old_intimacy_level if event.old_intimacy_level is not None else 50
-            relationship.status = event.old_status or "active"
+        )).scalars().all())
+        if not events:
+            return
+        bases = {key: rt.base_state(await rt.pair_events(db, *key)) for key in rt.pair_keys(events)}
+        for event in events:
+            await db.delete(event)
+        await rt.replay_pairs(db, bases)
 
     async def _clear_chapter_records(self, db: AsyncSession, chapter_id: str) -> None:
         await db.execute(delete(ChapterCausalLink).where(ChapterCausalLink.chapter_id == chapter_id))
         await db.execute(delete(TimelineEvent).where(TimelineEvent.chapter_id == chapter_id))
         await db.execute(delete(CharacterKnownInfo).where(CharacterKnownInfo.chapter_id == chapter_id))
         await db.execute(delete(RelationshipEvent).where(RelationshipEvent.chapter_id == chapter_id))
-        await db.execute(delete(NarrativePromise).where(NarrativePromise.source_chapter_id == chapter_id))
+        # 本章埋下的伏笔不删：标记待对账，重新分析时按标题复用原 ID（见 _reconcile_planted / _finish_promise_reconcile）
+        await db.execute(
+            update(NarrativePromise).where(NarrativePromise.source_chapter_id == chapter_id).values(needs_reconcile=True)
+        )
 
     async def _clear_promise_resolutions(self, db: AsyncSession, chapter_id: str) -> None:
         result = await db.execute(
@@ -352,6 +345,26 @@ class NarrativeStateService:
                 matched.resolution_note = content[:1000]
                 return 1
 
+        reconciled = await self._reconcile_planted(db, chapter, title, content)
+        if reconciled is not None:
+            # 同一条伏笔：更新描述，保留 ID 与后面章节对它的推进 / 回收记录
+            reconciled.promise_type = promise_type
+            reconciled.title = title
+            reconciled.content = content
+            reconciled.owner_character_id = self._match_character_id(item.get("owner_character_name"), characters)
+            reconciled.target_character_id = self._match_character_id(item.get("target_character_name"), characters)
+            reconciled.plot_line_id = self._match_plot_line_id(item.get("plot_line_hint"), plot_lines) or reconciled.plot_line_id
+            reconciled.priority = self._normalize_priority(item.get("priority"))
+            reconciled.deadline_chapter = self._safe_int(item.get("deadline_chapter")) or reconciled.deadline_chapter
+            reconciled.evidence_text = (item.get("evidence") or "").strip() or reconciled.evidence_text
+            reconciled.needs_reconcile = False
+            if status == "resolved" and reconciled.status != "resolved":
+                reconciled.status = "resolved"
+                reconciled.resolved_chapter_id = chapter.id
+                reconciled.resolved_chapter_number = chapter.chapter_number
+                reconciled.resolution_note = content[:1000]
+            return 1
+
         db.add(
             NarrativePromise(
                 project_id=project_id,
@@ -374,6 +387,49 @@ class NarrativeStateService:
             )
         )
         return 1
+
+    async def _reconcile_planted(
+        self, db: AsyncSession, chapter: Chapter, title: str, content: str,
+    ) -> Optional[NarrativePromise]:
+        """本章待对账的旧伏笔里找同一条：标题相同 > 标题互相包含 > 内容开头相同。"""
+        candidates = list((await db.execute(
+            select(NarrativePromise).where(
+                NarrativePromise.source_chapter_id == chapter.id,
+                NarrativePromise.needs_reconcile.is_(True),
+            )
+        )).scalars().all())
+        if not candidates:
+            return None
+        key_title = self._normalize_key(title)
+        key_content = self._normalize_key(content)[:20]
+        for candidate in candidates:
+            if key_title and self._normalize_key(candidate.title) == key_title:
+                return candidate
+        for candidate in candidates:
+            other = self._normalize_key(candidate.title)
+            if key_title and other and (key_title in other or other in key_title):
+                return candidate
+        for candidate in candidates:
+            if key_content and key_content in self._normalize_key(candidate.content):
+                return candidate
+        return None
+
+    async def _finish_promise_reconcile(self, db: AsyncSession, chapter: Chapter) -> None:
+        """对账收尾：新稿里没再出现的旧伏笔，后面章节推进 / 回收过的保留，其余删除。"""
+        leftovers = (await db.execute(
+            select(NarrativePromise).where(
+                NarrativePromise.source_chapter_id == chapter.id,
+                NarrativePromise.needs_reconcile.is_(True),
+            )
+        )).scalars().all()
+        for promise in leftovers:
+            used_later = (promise.resolved_chapter_number or 0) > chapter.chapter_number or (
+                (promise.last_activated_chapter or 0) > chapter.chapter_number
+            )
+            if used_later:
+                promise.needs_reconcile = False
+            else:
+                await db.delete(promise)
 
     async def _find_resolvable_promise(
         self,
@@ -432,6 +488,8 @@ class NarrativeStateService:
         characters: dict[str, Character],
     ) -> int:
         count = 0
+        bases: dict[tuple[str, str, str], rt.BaseState] = {}
+        reasons: dict[tuple[str, str, str], str] = {}
         for item in analysis.get("relationship_deltas", []) or []:
             from_id = self._match_character_id(item.get("from_character_name"), characters)
             to_id = self._match_character_id(item.get("to_character_name"), characters)
@@ -442,29 +500,13 @@ class NarrativeStateService:
             if delta == 0:
                 continue
 
-            relationship = await self._find_relationship(db, project_id, from_id, to_id)
-            created_relationship = 0
-
-            if relationship is None:
-                relationship = CharacterRelationship(
-                    project_id=project_id,
-                    character_from_id=from_id,
-                    character_to_id=to_id,
-                    intimacy_level=50,
-                    status="active",
-                    source="ai",
-                )
-                db.add(relationship)
-                created_relationship = 1
-                old_intimacy = None
-                old_status = None
-            else:
-                old_intimacy = relationship.intimacy_level
-                old_status = relationship.status
-            relationship.intimacy_level = max(-100, min(100, (relationship.intimacy_level or 50) + delta))
-            relationship.status = self._normalize_relationship_status(item.get("new_status"), fallback=old_status or "active")
-            relationship.description = (item.get("reason") or relationship.description or "")[:1000]
-
+            key = (project_id, from_id, to_id)
+            if key not in bases:
+                bases[key] = await rt.base_state_for_new_events(db, project_id, from_id, to_id)
+            reason = (item.get("reason") or "").strip()
+            if reason:
+                reasons[key] = reason[:1000]
+            # 只记本章增量与显式状态；old / new 由按章重放统一算（乱序重新分析也不会冲掉后面章节）
             db.add(
                 RelationshipEvent(
                     project_id=project_id,
@@ -474,17 +516,18 @@ class NarrativeStateService:
                     character_to_id=to_id,
                     delta=delta,
                     reason_type=(item.get("reason_type") or "other")[:50],
-                    reason_text=(item.get("reason") or "").strip()[:1000] or None,
+                    reason_text=reason or None,
                     evidence_text=(item.get("evidence") or "").strip()[:500] or None,
-                    old_intimacy_level=old_intimacy,
-                    new_intimacy_level=relationship.intimacy_level,
-                    old_status=old_status,
-                    new_status=relationship.status,
-                    created_relationship=created_relationship,
+                    requested_status=self.RELATION_STATUS_MAP.get((item.get("new_status") or "").strip().lower(), ""),
                 )
             )
             count += 1
 
+        await rt.replay_pairs(db, bases)
+        for (pid, from_id, to_id), reason in reasons.items():
+            relationship = await rt.find_relationship(db, pid, from_id, to_id)
+            if relationship is not None:
+                relationship.description = reason
         return count
 
     async def _store_timeline_events(
@@ -560,12 +603,21 @@ class NarrativeStateService:
         focus_ids: Optional[set[str]] = None,
         limit: int = 8,
     ) -> list[NarrativePromise]:
-        """未回收承诺排序：本章计划处理的 > 超期 / 临近计划回收 > 优先级 > 掉线 > 最近活跃。"""
+        """写第 current_chapter 章时仍未回收的承诺（按当时状态：本章或之后才回收的也算未回收）。
+
+        排序：本章计划处理的 > 超期 / 临近计划回收 > 优先级 > 掉线 > 最近活跃。
+        """
         result = await db.execute(
             select(NarrativePromise).where(
                 NarrativePromise.project_id == project_id,
                 NarrativePromise.source_chapter_number < current_chapter,
-                NarrativePromise.status.in_(self.ACTIVE_STATUSES),
+                or_(
+                    NarrativePromise.status.in_(self.ACTIVE_STATUSES),
+                    and_(
+                        NarrativePromise.status == "resolved",
+                        NarrativePromise.resolved_chapter_number >= current_chapter,
+                    ),
+                ),
             )
         )
         promises = list(result.scalars().all())
@@ -701,10 +753,20 @@ class NarrativeStateService:
         lines = ["【叙事承诺清单】"]
         for item in items:
             flag = self._promise_flag(item, current_chapter)
+            status = self._promise_status_as_of(item, current_chapter)
             lines.append(
-                f"- [{item.promise_type}/{item.priority}/{item.status}] {item.title}（起于第{item.source_chapter_number}章）{flag}: {item.content[:120]}"
+                f"- [{item.promise_type}/{item.priority}/{status}] {item.title}（起于第{item.source_chapter_number}章）{flag}: {item.content[:120]}"
             )
         return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _promise_status_as_of(item: Any, current_chapter: int) -> str:
+        """本章或之后才回收的承诺，对本章来说仍是未回收。"""
+        status = getattr(item, "status", None) or "open"
+        resolved_at = getattr(item, "resolved_chapter_number", None)
+        if status == "resolved" and resolved_at is not None and resolved_at >= current_chapter:
+            return "open"
+        return status
 
     def _format_relationship_events(
         self, items: Iterable[RelationshipEvent], names: Optional[dict[str, str]] = None,
@@ -757,7 +819,44 @@ class NarrativeStateService:
             )
         return "\n".join(lines) + "\n"
 
-    async def _get_affiliation_dynamics(self, db: AsyncSession, project_id: str) -> list[dict[str, Any]]:
+    async def _get_affiliation_dynamics(
+        self, db: AsyncSession, project_id: str, current_chapter: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        """组织归属记录（带角色名 / 组织名）。给 current_chapter 时按写第 N 章时的状态：
+        之后才加入的不列；之后才离开 / 被逐出的仍算在职；之后的备注与晋升不外泄。"""
+        records = await self._load_affiliation_records(db, project_id)
+        if current_chapter is None:
+            return records
+        out = []
+        for record in records:
+            as_of = self._affiliation_as_of(record, current_chapter)
+            if as_of is not None:
+                out.append(as_of)
+        return out
+
+    @staticmethod
+    def _chapter_marker(value: Optional[str]) -> Optional[int]:
+        match = _CHAPTER_MARKER.match((value or "").strip())
+        return int(match.group(1)) if match else None
+
+    def _affiliation_as_of(self, record: dict[str, Any], current_chapter: int) -> Optional[dict[str, Any]]:
+        joined = self._chapter_marker(record.get("joined_at"))
+        if joined is not None and joined >= current_chapter:
+            return None
+        notes = [line for line in (record.get("notes") or "").strip().split("\n") if line.strip()]
+        past_notes = [line for line in notes if (self._chapter_marker(line) or 0) < current_chapter]
+        future_notes = [line for line in notes if (self._chapter_marker(line) or 0) >= current_chapter]
+        record = {**record, "notes": "\n".join(past_notes) or None}
+        if any("晋升为" in line for line in future_notes):
+            promoted = [line.split("晋升为", 1)[1].split("（", 1)[0].strip() for line in past_notes if "晋升为" in line]
+            record["position"] = promoted[-1] if promoted and promoted[-1] else "成员"
+        left = self._chapter_marker(record.get("left_at"))
+        if left is not None and left >= current_chapter and record.get("status") in ("left", "expelled"):
+            record["status"] = "active"
+            record["left_at"] = None
+        return record
+
+    async def _load_affiliation_records(self, db: AsyncSession, project_id: str) -> list[dict[str, Any]]:
         """Get all organization membership records with character and org names."""
         # Get all organizations for this project
         org_result = await db.execute(

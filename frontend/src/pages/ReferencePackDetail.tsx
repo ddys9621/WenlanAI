@@ -93,7 +93,7 @@ function Header({ pack }: { pack: ReferencePackDetail }) {
           <ArrowLeft className="h-3 w-3" />
           返回参考库
         </Link>
-        <h1 className="mt-1 flex flex-wrap items-center gap-2 text-2xl font-semibold text-content">
+        <h1 className="mt-1 flex flex-wrap items-center gap-2 font-serif text-2xl font-semibold text-content">
           <BookOpen className="h-6 w-6 text-brand" />
           {pack.source_book_title}
           <span className={`inline-flex items-center rounded-pill px-2 py-0.5 text-xs font-medium ${STATUS_CLASS[pack.status]}`}>

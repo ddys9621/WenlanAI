@@ -1,4 +1,15 @@
 /** @type {import('tailwindcss').Config} */
+// 设计系统：参考岚笺「青舟」配色 —— 墨绿主色、纸色界面、朱砂信号色、扁平线框（小圆角、轻阴影）
+
+// 页面里直接用的 Tailwind 默认色板（emerald / red / amber / blue / violet / gray …）统一换成岚笺的低饱和色，
+// 语义不变（绿 = 成功、红 = 危险、琥珀 = 提醒），整站色调一致
+const jade = { 50: '#eef6f2', 100: '#d9ebe2', 200: '#b5d6c6', 300: '#86b9a2', 400: '#4f9579', 500: '#2f7a5f', 600: '#2a6a55', 700: '#22574a', 800: '#1c463c', 900: '#15352e' }
+const cinnabarScale = { 50: '#fbefec', 100: '#f6dcd6', 200: '#ecb8ad', 300: '#de8f80', 400: '#cc6a58', 500: '#b8513f', 600: '#a84337', 700: '#8a362c', 800: '#6e2b24', 900: '#55211c' }
+const amberScale = { 50: '#fbf5e9', 100: '#f5e7c8', 200: '#ecd092', 300: '#e2b660', 400: '#d69c3c', 500: '#c0832a', 600: '#9c6a1f', 700: '#80561a', 800: '#654416', 900: '#4d3412' }
+const inkBlue = { 50: '#f0f4f7', 100: '#dde6ed', 200: '#bccbd8', 300: '#94aabd', 400: '#6d88a0', 500: '#536f88', 600: '#4d657b', 700: '#3e5265', 800: '#31404f', 900: '#25303c' }
+const plum = { 50: '#f6f0f4', 100: '#ebdde6', 200: '#d7bccd', 300: '#bd95ad', 400: '#a2708e', 500: '#8a5878', 600: '#744866', 700: '#5e3a53', 800: '#4a2e42', 900: '#382331' }
+const neutral = { 50: '#f6f7f6', 100: '#eceeec', 200: '#dde1de', 300: '#c5ccc7', 400: '#9aa39d', 500: '#737d76', 600: '#59635d', 700: '#46534b', 800: '#2f3833', 900: '#1d2420' }
+
 export default {
   content: [
     './index.html',
@@ -7,80 +18,102 @@ export default {
   theme: {
     borderRadius: {
       none: '0px',
-      sm: '0px',
-      DEFAULT: '0px',
-      md: '0px',
-      lg: '0px',
-      xl: '0px',
-      '2xl': '0px',
-      '3xl': '0px',
-      full: '0px',
-      btn: '0px',
-      card: '0px',
-      modal: '0px',
-      pill: '0px',
+      sm: '2px',
+      DEFAULT: '4px',
+      md: '4px',
+      lg: '6px',
+      xl: '8px',
+      '2xl': '10px',
+      '3xl': '12px',
+      full: '9999px',
+      btn: '4px',
+      card: '4px',
+      modal: '6px',
+      pill: '9999px',
     },
     extend: {
       colors: {
+        emerald: jade, green: jade, teal: jade,
+        red: cinnabarScale, rose: cinnabarScale,
+        amber: amberScale, yellow: amberScale, orange: amberScale,
+        blue: inkBlue, sky: inkBlue, indigo: inkBlue, cyan: inkBlue,
+        violet: plum, purple: plum, pink: plum, fuchsia: plum,
+        gray: neutral, slate: neutral, zinc: neutral, stone: neutral,
+        // 主色：墨绿（jade）
         brand: {
-          DEFAULT: '#007aff',
-          50: '#f0f6ff',
-          100: '#dcebff',
-          200: '#b9d7ff',
-          300: '#8ec3ff',
-          400: '#3a95ff',
-          500: '#007aff',
-          600: '#0070eb',
-          700: '#005ecc',
-          800: '#004ba3',
-          900: '#003a7a',
+          DEFAULT: '#285b4d',
+          50: '#f0f6f3',
+          100: '#ddebe5',
+          200: '#bdd8cc',
+          300: '#8fbaa8',
+          400: '#4f8a76',
+          500: '#285b4d',
+          600: '#204a3e',
+          700: '#1b3e34',
+          800: '#15322a',
+          900: '#0f251f',
         },
+        // 暖色强调：琥珀
         gold: {
-          DEFAULT: '#f2b35d',
-          50: '#fff7e8',
-          100: '#ffedc7',
-          200: '#ffd891',
-          300: '#f2b35d',
-          400: '#dd9137',
-          500: '#bb7123',
+          DEFAULT: '#e99a35',
+          50: '#fdf5e8',
+          100: '#fae7c8',
+          200: '#f5cf92',
+          300: '#efa348',
+          400: '#e99a35',
+          500: '#c47a1e',
         },
+        // 信号色：朱砂（选中条 / 标题下划线 / 需要注意）
+        signal: {
+          DEFAULT: '#d15b3d',
+          soft: '#f6e1da',
+        },
+        cinnabar: {
+          DEFAULT: '#a84337',
+          deep: '#87362c',
+          wash: '#faeae7',
+        },
+        // 墨绿图标栏
         sidebar: {
-          DEFAULT: '#311713',
-          hover: '#47231d',
-          active: '#5b2b23',
-          border: '#5d3229',
-          text: '#f0d7c8',
-          'text-active': '#fffdf8',
+          DEFAULT: '#202825',
+          hover: '#28322e',
+          active: '#2f3a35',
+          border: '#323d38',
+          text: '#b4c1b9',
+          'text-active': '#f3f5f3',
         },
         surface: {
-          DEFAULT: '#f6f9fd',
+          DEFAULT: '#f3f5f3',
           card: '#ffffff',
-          hover: '#eef4fc',
-          border: '#d9e4f3',
-          'border-light': '#e8eff8',
+          hover: '#e9eeea',
+          border: '#d4dad6',
+          'border-light': '#e4e9e5',
+          paper: '#faf9f5',
+          muted: '#e9eeea',
         },
         content: {
-          DEFAULT: '#0b1a33',
-          secondary: '#5f7090',
-          tertiary: '#93a4be',
+          DEFAULT: '#1d2420',
+          secondary: '#46534b',
+          tertiary: '#7d8780',
           inverse: '#ffffff',
         },
       },
       fontFamily: {
         sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'sans-serif'],
+        serif: ['"Noto Serif SC"', '"Source Han Serif SC"', '"Songti SC"', '"STSong"', '"SimSun"', 'serif'],
       },
       boxShadow: {
-        xs: '0 1px 2px rgba(15, 43, 96, 0.04), 0 4px 12px rgba(15, 43, 96, 0.04)',
-        card: '0 18px 40px -28px rgba(15, 43, 96, 0.28)',
-        md: '0 24px 60px -34px rgba(15, 43, 96, 0.32)',
-        lg: '0 32px 80px -36px rgba(15, 43, 96, 0.35)',
-        xl: '0 40px 120px -44px rgba(15, 43, 96, 0.42)',
+        xs: '0 1px 2px rgba(29, 36, 32, 0.06)',
+        card: '0 1px 2px rgba(29, 36, 32, 0.05), 0 10px 24px -18px rgba(29, 36, 32, 0.22)',
+        md: '0 12px 32px -20px rgba(29, 36, 32, 0.28)',
+        lg: '0 20px 48px -28px rgba(29, 36, 32, 0.32)',
+        xl: '0 28px 72px -36px rgba(29, 36, 32, 0.38)',
       },
       animation: {
-        'fade-in': 'fadeIn 0.3s ease-out',
-        'slide-up': 'slideUp 0.35s ease-out',
-        'slide-down': 'slideDown 0.3s ease-out',
-        'scale-in': 'scaleIn 0.2s ease-out',
+        'fade-in': 'fadeIn 0.2s ease-out',
+        'slide-up': 'slideUp 0.25s ease-out',
+        'slide-down': 'slideDown 0.2s ease-out',
+        'scale-in': 'scaleIn 0.16s ease-out',
         'float-soft': 'floatSoft 6s ease-in-out infinite',
       },
       keyframes: {
@@ -89,15 +122,15 @@ export default {
           '100%': { opacity: '1' },
         },
         slideUp: {
-          '0%': { opacity: '0', transform: 'translateY(10px)' },
+          '0%': { opacity: '0', transform: 'translateY(8px)' },
           '100%': { opacity: '1', transform: 'translateY(0)' },
         },
         slideDown: {
-          '0%': { opacity: '0', transform: 'translateY(-8px)' },
+          '0%': { opacity: '0', transform: 'translateY(-6px)' },
           '100%': { opacity: '1', transform: 'translateY(0)' },
         },
         scaleIn: {
-          '0%': { opacity: '0', transform: 'scale(0.96)' },
+          '0%': { opacity: '0', transform: 'scale(0.98)' },
           '100%': { opacity: '1', transform: 'scale(1)' },
         },
         floatSoft: {

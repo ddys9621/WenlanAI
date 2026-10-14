@@ -28,6 +28,7 @@ from app.api.ai_jobs import job_sse_response
 from app.api.settings import get_user_ai_service
 from app.database import get_db
 from app.models.project import Project
+from app.services import outline_review_service as outline_review
 from app.services.ai_jobs import job_session_factory
 from app.services.ai_service import AIService
 from app.services.bridge_expand_jobs import start_bridge_expand
@@ -271,7 +272,7 @@ async def update_bridge_endpoint(
     db: AsyncSession = Depends(get_db),
     service: BridgePlanningService = Depends(get_bridge_service),
 ):
-    """用户手工编辑桥段卡片内容。"""
+    """用户手工编辑桥段卡片内容；内容真改了 → 已展开的章纲标「上游已改」，等作者核对确认。"""
     bridge = await service.get_bridge(db, bridge_id)
     if not bridge:
         raise HTTPException(status_code=404, detail="桥段不存在")
@@ -280,9 +281,12 @@ async def update_bridge_endpoint(
     await verify_project_access(bridge.project_id, user_id, db)
 
     updates = payload.model_dump(exclude_unset=True)
+    changed = outline_review.content_changed(bridge, updates, outline_review.BRIDGE_CONTENT_FIELDS)
     for key, value in updates.items():
         if value is not None:
             setattr(bridge, key, value)
+    if changed:
+        await outline_review.mark_bridge_outlines(db, bridge)
     await db.commit()
     await db.refresh(bridge)
     return BridgeResponse(**bridge_to_dict(bridge))

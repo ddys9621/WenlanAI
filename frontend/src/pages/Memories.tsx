@@ -43,9 +43,9 @@ export default function MemoriesPage() {
 
   return (
     <div className="animate-fade-in space-y-6">
-      <section className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
+      <section className="lj-page-header">
         <div className="min-w-0">
-          <h1 className="text-[28px] font-semibold tracking-tight text-content md:text-[32px]">记忆系统</h1>
+          <h1 className="lj-page-title">记忆系统</h1>
           <p className="mt-2 max-w-[560px] text-sm leading-6 text-content-secondary">
             章节分析后自动沉淀的钩子、伏笔、情节点与角色状态，供后续生成时检索引用。
           </p>
@@ -58,7 +58,7 @@ export default function MemoriesPage() {
               className={cn(
                 'inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium transition-colors',
                 activeTab === tab.key
-                  ? 'bg-brand text-white shadow-[0_8px_20px_-12px_rgba(0,122,255,0.6)]'
+                  ? 'bg-brand text-white'
                   : 'text-content-secondary hover:text-content'
               )}
             >

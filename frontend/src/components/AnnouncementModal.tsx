@@ -14,7 +14,7 @@ export function AnnouncementModal({ announcement, onClose, preview = false }: Pr
 
   return (
     <div
-      className={`fixed inset-0 ${preview ? 'z-[120]' : 'z-[80]'} flex items-center justify-center bg-[#2d130d]/55 px-4 py-6 backdrop-blur-sm`}
+      className={`fixed inset-0 ${preview ? 'z-[120]' : 'z-[80]'} flex items-center justify-center bg-content/40 px-4 py-6`}
       onClick={onClose}
     >
       <div

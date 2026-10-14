@@ -186,6 +186,9 @@ const AI_JOB_KIND_LABELS: Record<string, string> = {
   wizard_plot_lines: '向导·剧情线',
   inspiration_options: '灵感候选',
   inspiration_quick: '灵感补全',
+  assistant_run: '智能助笔',
+  chapter_assistant: '智能助笔·单章',
+  world_map_generate: '地图布局',
 };
 
 export const kindLabel = (kind: string) => AI_JOB_KIND_LABELS[kind] ?? kind;

@@ -64,6 +64,8 @@ Write-Host "`n[4/6] Copying backend files..." -ForegroundColor Yellow
 
 # Copy backend app directory
 Copy-Item -Recurse "backend\app" "$RELEASE_DIR\backend\" -Force
+# Desktop shell (start_app.py imports it)
+Copy-Item -Recurse "backend\desktop" "$RELEASE_DIR\backend\" -Force
 # Remove __pycache__ directories
 Get-ChildItem -Path "$RELEASE_DIR\backend" -Recurse -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force
 

@@ -54,6 +54,11 @@ class ChapterListItem(BaseModel):
     status: str
     created_at: datetime
     updated_at: datetime
+    # 写作链路状态（列表页标记用）
+    outline_changed: bool = False  # 正文写完（采用）后章纲又改过
+    outline_review_status: Optional[str] = None  # 关联章纲：draft = AI 草拟待确认
+    outline_upstream_stale: bool = False  # 关联章纲的上游（桥段 / 剧情线 / 故事大纲）已改
+    pending_candidates: int = 0  # 待采用的候选稿数
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -74,7 +79,7 @@ class ChapterGenerateRequest(BaseModel):
         le=10000  # 最大10000字
     )
     enable_mcp: bool = Field(True, description="是否启用MCP工具增强（搜索参考资料）")
-    auto_analyze: bool = Field(False, description="生成后是否自动排队分析（批量生成传True以累积记忆；单章默认False手动分析）")
+    adherence_review: bool = Field(True, description="写完后另起一次模型调用审校章纲遵循度，报告附在候选稿上")
     selected_plugins: Optional[List[str]] = Field(
         None,
         description="本次章节生成选择使用的MCP插件列表"
@@ -98,3 +103,5 @@ class ChapterBatchRequest(BaseModel):
     style_id: Optional[int] = Field(None, description="写作风格ID")
     enable_mcp: bool = Field(False, description="是否启用 MCP 参考资料（批量默认关闭：慢且容易失败）")
     target_word_count: Optional[int] = Field(None, ge=500, le=10000, description="统一字数；不传按章纲 / 平台预设")
+    require_confirmed_outline: bool = Field(False, description="只写已确认的章纲：遇到 AI 草拟 / 上游已改的章纲就停")
+    adherence_gate: bool = Field(True, description="章纲遵循度审校不通过（漏写关键事件 / 抢跑 / 新增设定）时重写一次")

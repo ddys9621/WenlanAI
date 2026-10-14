@@ -305,7 +305,7 @@ export default function Settings() {
       {/* 吸顶操作栏：标题 + 保存/重置 */}
       <div className="sticky top-0 z-20 mb-6 flex flex-wrap items-center justify-between gap-3 border-b border-surface-border bg-surface/85 py-4 backdrop-blur-sm">
         <div>
-          <h1 className="text-xl font-bold text-content md:text-2xl">设置</h1>
+          <h1 className="lj-page-title">设置</h1>
           <p className="mt-0.5 text-sm text-content-secondary">配置 AI 接口、模型参数与思考强度（保存后全局生效）</p>
         </div>
         <div className="flex items-center gap-2">

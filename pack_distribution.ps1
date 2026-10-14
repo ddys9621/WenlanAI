@@ -158,6 +158,9 @@ foreach ($File in $BackendFiles) {
 Copy-TreeClean -Source (Join-Path $BackendDir 'app') -Destination (Join-Path $OutputDir 'backend')
 Write-Ok 'Copied backend/app'
 
+Copy-TreeClean -Source (Join-Path $BackendDir 'desktop') -Destination (Join-Path $OutputDir 'backend')
+Write-Ok 'Copied backend/desktop'
+
 Copy-TreeClean -Source (Join-Path $BackendDir 'static') -Destination (Join-Path $OutputDir 'backend')
 Write-Ok 'Copied backend/static'
 

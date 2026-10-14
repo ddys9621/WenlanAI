@@ -291,7 +291,7 @@ export default function BookDissect() {
               <BookOpen className="h-5 w-5 text-brand" />
             </div>
             <div>
-              <h1 className="text-xl font-bold text-content">拆书参考</h1>
+              <h1 className="lj-page-title">拆书参考</h1>
               <p className="mt-0.5 text-sm text-content-secondary">
                 上传一本 txt/md 参考小说，反向拆解为创作素材，可一键填充新建项目向导。
               </p>

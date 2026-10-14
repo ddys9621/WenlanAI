@@ -89,9 +89,9 @@ export default function WritingStyles() {
 
   return (
     <div className="animate-fade-in space-y-6">
-      <section className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
+      <section className="lj-page-header">
         <div className="min-w-0">
-          <h1 className="text-[28px] font-semibold tracking-tight text-content md:text-[32px]">写作风格</h1>
+          <h1 className="lj-page-title">写作风格</h1>
           <p className="mt-2 max-w-[560px] text-sm leading-6 text-content-secondary">
             定义叙述语气与遣词习惯，AI 生成正文时会按默认风格执行。
           </p>

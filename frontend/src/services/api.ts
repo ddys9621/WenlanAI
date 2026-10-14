@@ -18,6 +18,31 @@ import { PROJECT_HEADER, getActiveProjectId } from '../utils/activeProject';
 import type { MemoryAnnotation } from '../utils/annotationSegments';
 import type { UpdateCheckResult, UpdateJobStatus } from '../types/system_update';
 import type {
+  AssistantAnswer,
+  AssistantChecks,
+  AssistantFieldCandidate,
+  AssistantPageContext,
+  AssistantPreview,
+  AssistantRunResult,
+  AssistantRunView,
+  AssistantSessionInfo,
+  AssistantSessionView,
+} from '../types/assistant';
+import type {
+  AdherenceReport,
+  CandidateAdoptRequest,
+  CandidateAdoptResult,
+  CandidateDetail,
+  CandidateSummary,
+  ChapterVersionDetail,
+  ChapterVersionRestoreResult,
+  ChapterVersionSummary,
+  MapLayoutCandidate,
+  MapLocation,
+  MapLocationDossier,
+  WorldMapView,
+} from '../types/writing';
+import type {
   BridgeRhythm,
   PlatformPreset,
   User,
@@ -112,20 +137,25 @@ export interface ChapterQualityMetrics {
   word_count_ratio?: number | null;
 }
 
-/** 正文生成任务的 result 事件 data */
+/** 正文生成任务的 result 事件 data：结果存为候选稿，采用后才写入正文 */
 export interface ChapterWriteResult {
   word_count: number;
-  analysis_task_id: string | null;
-  analysis_job_id: string | null;
+  candidate_id: string;
+  adopted: boolean;
+  /** 生成期间章纲被改过 */
+  outline_changed?: boolean;
   /** 被 Max Tokens 截断后自动续写的次数 */
   continuations?: number;
   quality?: ChapterQualityMetrics;
+  adherence?: AdherenceReport | null;
 }
 
-/** 生成前预检查：前面「有正文但未分析（无记忆状态）」的章节 */
-interface ChapterGenerationPrecheck {
+/** 生成前预检查：前面未分析 / 分析已过期的章节，本章章纲未确认 / 上游已改 */
+export interface ChapterGenerationPrecheck {
   count: number;
   chapters: Array<{ id: string; chapter_number: number; title: string }>;
+  stale_chapters?: Array<{ id: string; chapter_number: number; title: string }>;
+  outline_warnings?: string[];
   message: string;
 }
 
@@ -165,9 +195,11 @@ export interface ChapterAnnotationsResponse {
   summary: { total_annotations: number; hooks: number; foreshadows: number; plot_points: number; character_events: number };
 }
 
-/** 去 AI 味重写任务的 result 事件 data */
+/** 去 AI 味重写任务的 result 事件 data：结果存为整章候选稿 */
 export interface ChapterRegenerateResult {
   word_count: number;
+  candidate_id: string;
+  quality?: ChapterQualityMetrics;
   /** 局部重写时实际替换的段落数 */
   rewritten_paragraphs?: number;
 }
@@ -433,9 +465,14 @@ export const projectApi = {
   fixMemberCounts: (projectId: string) =>
     api.post<unknown, { success: boolean; message: string; fixed_count: number; total_count: number }>(`/projects/${projectId}/fix-member-counts`),
 
-  // 导出为TXT
+  // 导出为TXT：同源下载链接（桌面版里 window.open 会被转给系统浏览器，那里没有登录态）
   exportTxt: (projectId: string) => {
-    window.open(`/api/projects/${projectId}/export`, '_blank');
+    const link = document.createElement('a');
+    link.href = `/api/projects/${projectId}/export`;
+    link.setAttribute('download', '');
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
   },
 };
 
@@ -536,17 +573,100 @@ export const chapterApi = {
   generationPrecheck: (chapterId: string) =>
     api.get<unknown, ChapterGenerationPrecheck>(`/chapters/${chapterId}/generation-precheck`),
 
-  /** AI 创作正文：后台任务 + SSE；result = { word_count, analysis_task_id, analysis_job_id } */
+  /** AI 创作正文：后台任务 + SSE；结果存为候选稿（result.candidate_id），采用后才写入正文 */
   generateChapterStream: (chapterId: string, data: ChapterGenerateRequest, options?: SSEClientOptions<ChapterWriteResult>) =>
     ssePost<ChapterWriteResult>(`/api/chapters/${chapterId}/generate-stream`, data, options),
 
-  /** 按去 AI 味提示词重写并覆盖正文：后台任务 + SSE；result = { word_count } */
+  /** 按去 AI 味提示词重写：后台任务 + SSE；结果存为整章候选稿（result.candidate_id） */
   regenerateChapterStream: (chapterId: string, data: ChapterRegenerateRequest, options?: SSEClientOptions<ChapterRegenerateResult>) =>
     ssePost<ChapterRegenerateResult>(`/api/chapters/${chapterId}/regenerate-stream`, data, options),
 
   /** 服务端批量生成（后台任务 + SSE，关掉浏览器也不停）；事件 batch_chapter 逐章汇报，result = ChapterBatchResult */
   batchWriteStream: (projectId: string, data: ChapterBatchRequest, options?: SSEClientOptions<ChapterBatchResult>) =>
     ssePost<ChapterBatchResult>(`/api/chapters/project/${projectId}/batch-write-stream`, data, options),
+};
+
+/** 候选稿：AI 输出先成候选，作者采用才写入正文（旧稿自动进历史版本） */
+export const chapterCandidateApi = {
+  list: (chapterId: string, status: 'pending' | 'all' = 'pending') =>
+    api.get<unknown, { total: number; items: CandidateSummary[] }>(`/chapters/${chapterId}/candidates`, { params: { status } }),
+  get: (chapterId: string, candidateId: string) =>
+    api.get<unknown, CandidateDetail>(`/chapters/${chapterId}/candidates/${candidateId}`),
+  /** 409 = 正文在生成后被改过（需 force 确认覆盖）或候选已处理过；silent 交给调用方提示 */
+  adopt: (chapterId: string, candidateId: string, data: CandidateAdoptRequest = {}) =>
+    api.post<unknown, CandidateAdoptResult>(`/chapters/${chapterId}/candidates/${candidateId}/adopt`, data, { silent: true }),
+  discard: (chapterId: string, candidateId: string) =>
+    api.post<unknown, { id: string; status: string }>(`/chapters/${chapterId}/candidates/${candidateId}/discard`),
+};
+
+/** 历史版本：正文被替换（手改 / 采用候选 / 恢复）前自动留档 */
+export const chapterVersionApi = {
+  list: (chapterId: string) =>
+    api.get<unknown, { total: number; items: ChapterVersionSummary[] }>(`/chapters/${chapterId}/versions`),
+  get: (chapterId: string, versionId: string) =>
+    api.get<unknown, ChapterVersionDetail>(`/chapters/${chapterId}/versions/${versionId}`),
+  restore: (chapterId: string, versionId: string) =>
+    api.post<unknown, ChapterVersionRestoreResult>(`/chapters/${chapterId}/versions/${versionId}/restore`),
+};
+
+/** 全局智能助笔：项目内任意页面可用；后台任务 + SSE，修改只产生候选（字段候选 / 章节候选稿） */
+export const assistantApi = {
+  session: (projectId: string) =>
+    api.get<unknown, AssistantSessionView>(`/projects/${projectId}/assistant/session`),
+  newSession: (projectId: string) =>
+    api.post<unknown, AssistantSessionView>(`/projects/${projectId}/assistant/sessions`),
+  sessions: (projectId: string) =>
+    api.get<unknown, { items: AssistantSessionInfo[] }>(`/projects/${projectId}/assistant/sessions`),
+  sessionById: (projectId: string, sessionId: string) =>
+    api.get<unknown, AssistantSessionView>(`/projects/${projectId}/assistant/sessions/${sessionId}`),
+  sendStream: (projectId: string, data: { message: string; page: AssistantPageContext }, options?: SSEClientOptions<AssistantRunResult>) =>
+    ssePost<AssistantRunResult>(`/api/projects/${projectId}/assistant/messages/stream`, data, options),
+  answerStream: (projectId: string, runId: string, answers: AssistantAnswer[], options?: SSEClientOptions<AssistantRunResult>) =>
+    ssePost<AssistantRunResult>(`/api/projects/${projectId}/assistant/runs/${runId}/answer/stream`, { answers }, options),
+  preview: (projectId: string, data: { message: string; page: AssistantPageContext }) =>
+    api.post<unknown, AssistantPreview>(`/projects/${projectId}/assistant/preview`, data),
+  runs: (projectId: string) =>
+    api.get<unknown, { items: AssistantRunView[] }>(`/projects/${projectId}/assistant/runs`),
+  /** 409 = 这项内容在生成后 / 应用后被改过；silent 交给调用方提示 */
+  applyCandidate: (projectId: string, candidateId: string) =>
+    api.post<unknown, AssistantFieldCandidate>(`/projects/${projectId}/assistant/candidates/${candidateId}/apply`, {}, { silent: true }),
+  undoCandidate: (projectId: string, candidateId: string) =>
+    api.post<unknown, AssistantFieldCandidate>(`/projects/${projectId}/assistant/candidates/${candidateId}/undo`, {}, { silent: true }),
+  rejectCandidate: (projectId: string, candidateId: string) =>
+    api.post<unknown, AssistantFieldCandidate>(`/projects/${projectId}/assistant/candidates/${candidateId}/reject`, {}, { silent: true }),
+  checks: (projectId: string) =>
+    api.get<unknown, AssistantChecks>(`/projects/${projectId}/assistant/checks`),
+};
+
+/** 世界地图：作者标注的平面沙盘 + 地点档案 + AI 布局候选 */
+export const worldMapApi = {
+  get: (projectId: string) => api.get<unknown, WorldMapView>(`/projects/${projectId}/world-map`),
+  /** 409 = 版本已变化（别处改过）；silent 交给调用方提示并保留本地调整 */
+  saveLayout: (projectId: string, expectedRevision: number, markers: Array<{ id?: string; name: string; x: number; y: number }>) =>
+    api.put<unknown, WorldMapView>(`/projects/${projectId}/world-map/layout`, { expected_revision: expectedRevision, markers }, { silent: true }),
+  createLocation: (projectId: string, data: Partial<Omit<MapLocation, 'id' | 'origin' | 'rule_id'>> & { name: string }) =>
+    api.post<unknown, MapLocation>(`/projects/${projectId}/world-map/locations`, data),
+  /** 规则地点改名会同步改世界规则 */
+  updateLocation: (projectId: string, locationId: string, data: Partial<Omit<MapLocation, 'id' | 'origin' | 'rule_id'>> & { clear_position?: boolean }) =>
+    api.patch<unknown, MapLocation>(`/projects/${projectId}/world-map/locations/${locationId}`, data),
+  /** 世界规则里的地点不能在地图上删（409），要到世界规则页删 */
+  deleteLocation: (projectId: string, locationId: string) =>
+    api.delete<unknown, { deleted: string }>(`/projects/${projectId}/world-map/locations/${locationId}`),
+  /** 把未登记的地点登记为世界规则「地图位置」；不传 locationIds = 全部未登记的 */
+  registerRules: (projectId: string, locationIds?: string[]) =>
+    api.post<unknown, WorldMapView>(`/projects/${projectId}/world-map/locations/register-rules`, { location_ids: locationIds ?? null }),
+  dossier: (projectId: string, locationId: string) =>
+    api.get<unknown, MapLocationDossier>(`/projects/${projectId}/world-map/locations/${locationId}`),
+  updateSettings: (projectId: string, data: { seed?: number; style?: string }) =>
+    api.put<unknown, WorldMapView>(`/projects/${projectId}/world-map/settings`, data),
+  generateStream: (projectId: string, options?: SSEClientOptions<{ candidate: MapLayoutCandidate }>) =>
+    ssePost<{ candidate: MapLayoutCandidate }>(`/api/projects/${projectId}/world-map/generate-stream`, {}, options),
+  getCandidate: (projectId: string) =>
+    api.get<unknown, { candidate: MapLayoutCandidate | null }>(`/projects/${projectId}/world-map/candidate`),
+  adoptCandidate: (projectId: string, replacePositions = false) =>
+    api.post<unknown, WorldMapView>(`/projects/${projectId}/world-map/candidate/adopt`, { replace_positions: replacePositions }),
+  discardCandidate: (projectId: string) =>
+    api.post<unknown, WorldMapView>(`/projects/${projectId}/world-map/candidate/discard`),
 };
 
 export const deaiPromptApi = {
@@ -1024,6 +1144,14 @@ export const chapterOutlineApi = {
   // 批量创建章纲
   batchCreateChapterOutlines: (data: ChapterOutlineBatchCreateRequest) =>
     api.post<unknown, ChapterOutline[]>('/chapter-outlines/batch', data),
+
+  // 确认章纲（清除 AI 草拟 / 上游已改标记）
+  confirmChapterOutline: (outlineId: string) =>
+    api.post<unknown, ChapterOutline>(`/chapter-outlines/${outlineId}/confirm`),
+
+  // 一键确认本项目全部待确认 / 上游已改的章纲
+  confirmAllChapterOutlines: (projectId: string) =>
+    api.post<unknown, { confirmed: number }>(`/chapter-outlines/project/${projectId}/confirm-all`),
 
   // 获取项目章纲统计信息
   getChapterOutlineStatistics: (projectId: string) =>

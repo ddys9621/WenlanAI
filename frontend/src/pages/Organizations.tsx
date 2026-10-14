@@ -277,9 +277,9 @@ export default function Organizations() {
   /* ---- 渲染：标题区 + 卡片网格 ---- */
   return (
     <div className="animate-fade-in space-y-6">
-      <section className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
+      <section className="lj-page-header">
         <div className="min-w-0">
-          <h1 className="text-[28px] font-semibold tracking-tight text-content md:text-[32px]">组织管理</h1>
+          <h1 className="lj-page-title">组织管理</h1>
           <p className="mt-2 max-w-[560px] text-sm leading-6 text-content-secondary">
             管理故事中的门派、家族、王朝等势力，维护它们的宗旨、势力等级与成员构成。
             {hasOrgs && `当前共 ${orgs.length} 个组织。`}

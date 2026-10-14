@@ -116,7 +116,7 @@ export default function UserManagement() {
       <AnnouncementSettingsCard />
 
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold text-content">用户管理 ({total})</h1>
+        <h1 className="lj-page-title">用户管理 ({total})</h1>
         <button onClick={() => setShowCreateModal(true)} className="bg-brand hover:bg-brand-600 text-white rounded-btn px-4 py-2 text-sm font-medium transition-colors inline-flex items-center gap-1.5">
           <Plus className="w-4 h-4" />
           添加用户

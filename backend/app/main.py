@@ -292,6 +292,26 @@ app.include_router(_project_ai_preference.router, prefix="/api")
 from app.api import deai_prompts as _deai_prompts
 app.include_router(_deai_prompts.router, prefix="/api")
 
+# 章节历史版本：正文被替换前自动留档，可查看 / 恢复
+from app.api import chapter_versions as _chapter_versions
+app.include_router(_chapter_versions.router, prefix="/api")
+
+# 章节候选稿：AI 输出先成候选，作者采用才写入正文
+from app.api import chapter_candidates as _chapter_candidates
+app.include_router(_chapter_candidates.router, prefix="/api")
+
+# 智能助笔：当前章的续写 / 改写 / 润色 / 核对 / 提问（修改类结果是候选稿）
+from app.api import writing_assistant as _writing_assistant
+app.include_router(_writing_assistant.router, prefix="/api")
+
+# 世界地图：作者标注的平面沙盘 + 地点档案 + AI 布局候选
+from app.api import world_map as _world_map
+app.include_router(_world_map.router, prefix="/api")
+
+# 全局智能助笔：项目内任意页面可用的对话式助手（全书工具、字段候选、作者提问、任务记录、核对清单）
+from app.api import assistant as _assistant
+app.include_router(_assistant.router, prefix="/api")
+
 # 静态文件目录（兼容打包后的环境）
 if getattr(sys, 'frozen', False):
     # 打包后的 exe：static 在 _internal 目录下

@@ -25,6 +25,7 @@ const ReferencePackLibrary = lazy(() => import('@/pages/ReferencePackLibrary'))
 const ReferencePackDetail = lazy(() => import('@/pages/ReferencePackDetail'))
 const ProjectReferencePacks = lazy(() => import('@/pages/ProjectReferencePacks'))
 const PlotBridges = lazy(() => import('@/pages/PlotBridges'))
+const WorldMap = lazy(() => import('@/pages/WorldMap'))
 
 export default function App() {
   return (
@@ -51,6 +52,7 @@ export default function App() {
             <Route index element={<Navigate to="world-setting" replace />} />
             <Route path="world-setting" element={<WorldSetting />} />
             <Route path="world-rules" element={<WorldRules />} />
+            <Route path="world-map" element={<WorldMap />} />
             <Route path="outline/*" element={<Outline />} />
             <Route path="characters" element={<Characters />} />
             <Route path="relationships" element={<Relationships />} />

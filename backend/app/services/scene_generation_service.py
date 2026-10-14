@@ -9,7 +9,10 @@ from app.models import (
 )
 from app.models.plot_card_chapter_outline_link import PlotCardChapterOutlineLink
 from app.services.ai_service import AIService
+from app.services.chapter_context_service import parse_json_list
+from app.services.generation_trace import trace_reference
 from app.services.memory_service import MemoryService
+from app.services.world_map_context import chapter_map_reference
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -175,6 +178,16 @@ class SceneGenerationService:
 【剧情要点】{chapter_outline.plot_points or '无'}
 【目标字数】{plot_card.word_count_target or 500}字（当前场景）
 """
+
+        # 世界地图：本场景相关地点的方位远近（作者在地图上摆好的布局）
+        map_ref = await chapter_map_reference(
+            db, project.id, chapter_outline.chapter_number, scene=chapter_outline.scene,
+            text=f"{chapter_outline.plot_points or ''}\n{plot_card.title or ''}\n{plot_card.content or ''}",
+            character_names=parse_json_list(chapter_outline.characters_involved),
+        )
+        if map_ref.text:
+            final_world_rules = f"{final_world_rules}\n\n【地图与方位】\n{map_ref.text}"
+            trace_reference("world_map", "世界地图", map_ref.items)
 
         # 8. 使用智能上下文中的最近完整内容作为前置章节内容
         previous_content = smart_context.get('recent_full', '')

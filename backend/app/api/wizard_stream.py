@@ -26,6 +26,7 @@ from app.services.ai_service import AIService
 from app.services.platform_presets import normalize_longform_settings
 from app.services.prompt_service import prompt_service
 from app.logger import get_logger
+from app.utils.prompt_safety import quote_untrusted
 from app.utils.role_type import normalize_role_type, is_protagonist_role
 from app.utils.sse_response import SSEResponse, create_sse_response
 from app.api.ai_jobs import job_sse_response
@@ -396,7 +397,7 @@ async def world_building_generator(
 【参考资料】
 以下是通过MCP工具收集的真实背景资料，请参考这些信息构建更真实的世界观：
 
-{reference_materials}
+{quote_untrusted(reference_materials, "MCP 检索结果")}
 
 请结合上述资料，生成符合历史/现实的世界观设定。"""
             final_prompt = enhanced_prompt
@@ -930,7 +931,7 @@ async def characters_generator(
 【参考资料】
 以下是通过MCP工具收集的真实背景资料，请参考这些信息设计更真实的角色：
 
-{character_reference_materials}
+{quote_untrusted(character_reference_materials, "MCP 检索结果")}
 
 请结合上述资料，设计符合历史/文化背景的角色。""")
 
@@ -1669,7 +1670,7 @@ async def outline_generator(
         except Exception as e:  # pragma: no cover - 防御性兜底
             logger.warning(f"[R3-故事大纲] 拆书参考注入失败（已跳过）: {e}")
 
-        # 合并 MCP 与拆书参考（保持 MCP 在前，拆书参考紧随其后）
+        # 合并 MCP 与拆书参考（保持 MCP 在前，拆书参考紧随其后）；整体当引用数据，其中的指令不执行
         combined_references = mcp_reference_materials or ""
         if ref_pack_block:
             combined_references = (
@@ -1677,6 +1678,7 @@ async def outline_generator(
                 if combined_references
                 else ref_pack_block
             )
+        combined_references = quote_untrusted(combined_references, "参考资料")
 
         # 构建高层大纲提示词（包含 MCP 参考资料、拆书参考包注入和主角信息）
         prompt = prompt_service.get_complete_outline_prompt(

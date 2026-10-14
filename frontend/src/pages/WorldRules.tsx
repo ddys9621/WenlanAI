@@ -85,7 +85,8 @@ export default function WorldRules() {
   }
 
   const handleDelete = async (rule: WorldRule) => {
-    if (!confirm(`确定删除「${rule.name}」？`)) return
+    const onMap = rule.category === 'map_location' ? '世界地图上的这个地点（含坐标和档案）也会一起删除。' : ''
+    if (!confirm(`确定删除「${rule.name}」？${onMap}`)) return
     try {
       await worldRulesApi.delete(rule.id)
       setRules(prev => prev.filter(r => r.id !== rule.id))
@@ -101,11 +102,11 @@ export default function WorldRules() {
 
   return (
     <div className="animate-fade-in space-y-6">
-      <section className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
+      <section className="lj-page-header">
         <div className="min-w-0">
-          <h1 className="text-[28px] font-semibold tracking-tight text-content md:text-[32px]">世界规则</h1>
+          <h1 className="lj-page-title">世界规则</h1>
           <p className="mt-2 max-w-[560px] text-sm leading-6 text-content-secondary">
-            把修炼境界、装备模板与地图位置整理成规则条目，AI 写作时会据此保持设定一致。
+            把修炼境界、装备模板与地图位置整理成规则条目，AI 写作时会据此保持设定一致。地图位置会自动出现在世界地图上。
           </p>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2.5">

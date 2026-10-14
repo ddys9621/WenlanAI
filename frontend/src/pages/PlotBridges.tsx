@@ -471,9 +471,9 @@ function PlotBridgesPageInner() {
 
   return (
     <div className="animate-fade-in space-y-6">
-      <section className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
+      <section className="lj-page-header">
         <div className="min-w-0">
-          <h1 className="text-[28px] font-semibold tracking-tight text-content md:text-[32px]">桥段规划</h1>
+          <h1 className="lj-page-title">桥段规划</h1>
           <p className="mt-2 max-w-[640px] text-sm leading-6 text-content-secondary">
             每个桥段 4 章：
             <span className="font-medium text-content">C1 代入 → C2 拉扯 → C3 兑现 → C4 善后</span>
@@ -1085,6 +1085,7 @@ const SLOT_LABEL: Record<string, string> = {
   project_skeleton: '项目信息',
   project_characters: '本书角色',
   world_rules_table: '世界规则表',
+  world_map: '世界地图',
   plot_lines_with_beats: '全书骨架',
   dissect_methodology: '拆书·写法手册',
   dissect_structure: '拆书·结构统计',

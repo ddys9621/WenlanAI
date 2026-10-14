@@ -1,5 +1,5 @@
 """章纲数据模型"""
-from sqlalchemy import Column, String, Text, Integer, DateTime, ForeignKey
+from sqlalchemy import Boolean, Column, String, Text, Integer, DateTime, ForeignKey
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from app.db_base import Base
@@ -27,6 +27,17 @@ class ChapterOutline(Base):
         Text,
         comment="本章叙事任务 JSON：{resolve:[{promise_id,title,how}], advance:[...], plant:[{title,content,payoff_after}]}",
     )
+
+    # 章节契约（参考岚笺）：正文开头承接什么、写到哪就停、本章不能提前发生什么
+    entry_state = Column(Text, nullable=True, comment="进入状态：本章开头人物 / 地点 / 局势（承接上一章结尾）")
+    exit_state = Column(Text, nullable=True, comment="退出状态：最后一个关键事件完成后停在哪")
+    forbidden = Column(Text, nullable=True, comment="禁止事项 JSON 列表：本章不能提前发生 / 揭晓的事")
+
+    # 确认与上游过期：保存 ≠ 确认；AI 草拟为 draft，作者确认后 confirmed；上游（桥段 / 剧情线 / 故事大纲）改了标过期
+    review_status = Column(String(20), nullable=True, comment="draft = AI 草拟待确认；confirmed / 空 = 已确认")
+    confirmed_at = Column(DateTime, nullable=True)
+    upstream_stale = Column(Boolean, default=False, comment="上游已修改，建议核对")
+    upstream_reason = Column(Text, nullable=True, comment="上游改了什么")
 
     # 旧字段（保留兼容）
     summary = Column(Text, comment="章节摘要（已废弃，保留兼容旧数据）")

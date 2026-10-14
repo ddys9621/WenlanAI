@@ -1,14 +1,15 @@
 /**
- * 剧情分析（章节与正文）：原「章节管理」与「剧情分析」两页合并。
+ * 章节写作（原「章节管理」与「剧情分析」两页合并）。
  *
- * 左侧章节列表：新建 / 编辑 / 生成 / 去 AI 味重写 / 场景生成 / 分析 / 删除；
- * 右侧阅读区：正文（带记忆标注）+ 记忆标注 / 叙事状态侧栏；正文任务运行时就地显示流式面板。
- * 任务编排在 useChapterWriteJobs，页面只管选中章节与阅读态。
+ * 左侧章节列表：新建 / 编辑 / 生成候选稿 / 去 AI 味重写 / 场景生成 / 分析 / 删除，并标出待审候选稿、章纲已改、章纲待确认；
+ * 右侧阅读区：正文 | 候选稿 | 历史版本 三个界面；正文旁是记忆标注 / 叙事状态 / 智能助笔侧栏；正文任务运行时就地显示流式面板。
+ * AI 输出一律先成候选稿，作者采用才写入正文（参考岚笺）。任务编排在 useChapterWriteJobs，页面只管选中章节与阅读态。
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
-  BookOpen, ChevronLeft, ChevronRight, Copy, Download, Film, Layers, Loader2, PanelRightClose, PanelRightOpen,
-  Pencil, Plus, RefreshCw, Search, Trash2, Zap,
+  BookOpen, ChevronLeft, ChevronRight, Copy, Download, FileCheck2, Film, History, Layers, Loader2, PanelRightClose,
+  PanelRightOpen, Pencil, Plus, RefreshCw, Search, Sparkles, Trash2, Zap,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
@@ -17,30 +18,37 @@ import { useChapterSync } from '@/store/hooks';
 import { chapterApi, type ChapterAnnotationsResponse } from '@/services/api';
 import { normalizeAnalysisData, type NormalizedAnalysisData } from '@/utils/chapterAnalysis';
 import type { MemoryAnnotation } from '@/utils/annotationSegments';
+import { readDomSelection, resolveSelection, type TextSelection } from '@/utils/selectionOffsets';
 import type { Chapter, ChapterCanGenerateResponse, ChapterGenerateRequest } from '@/types';
 import { OTHER_JOB_KINDS, WRITE_JOB_KINDS, useChapterWriteJobs } from '@/hooks/useChapterWriteJobs';
 import { AIJobBanner } from '@/components/ai-job/AIJobBanner';
 import AnnotatedText from '@/components/AnnotatedText';
 import MemorySidebar from '@/components/MemorySidebar';
 import { SceneGenerator } from '@/components/SceneGenerator';
+import { PageHeader } from '@/components/ui/PageHeader';
+import { useAssistantDataChange, useAssistantDetail } from '@/hooks/useAssistantPage';
+import { useAssistantStore, type AssistantDataChange } from '@/store/assistantStore';
 import { BatchGenerateModal } from '@/components/chapters/BatchGenerateModal';
+import { CandidatePanel } from '@/components/chapters/CandidatePanel';
 import { ChapterEditModal } from '@/components/chapters/ChapterEditModal';
 import { ChapterGenerateModal } from '@/components/chapters/ChapterGenerateModal';
 import { ChapterStreamPanel } from '@/components/chapters/ChapterStreamPanel';
 import { DeaiRewriteModal, type RewriteMode } from '@/components/chapters/DeaiRewriteModal';
 import { NarrativeStatePanel } from '@/components/chapters/NarrativeStatePanel';
+import { VersionHistoryPanel } from '@/components/chapters/VersionHistoryPanel';
 
 const STATUS_MAP: Record<string, { label: string; cls: string }> = {
-  draft: { label: '草稿', cls: 'bg-gray-100 text-gray-500' },
-  writing: { label: '生成中', cls: 'bg-blue-50 text-blue-600' },
-  completed: { label: '已完成', cls: 'bg-emerald-50 text-emerald-600' },
+  draft: { label: '草稿', cls: 'lj-badge--muted' },
+  writing: { label: '生成中', cls: 'lj-badge--candidate' },
+  completed: { label: '已完成', cls: 'lj-badge--ok' },
 };
 
 type SidebarTab = 'memory' | 'narrative';
+type ReaderTab = 'content' | 'candidates' | 'versions';
 
 export default function ChapterAnalysis() {
   const { currentProject, chapters } = useStore();
-  const { refreshChapters, deleteChapter, updateChapter } = useChapterSync();
+  const { refreshChapters, deleteChapter } = useChapterSync();
   const projectId = currentProject?.id;
   const sorted = useMemo(() => [...chapters].sort((a, b) => a.chapter_number - b.chapter_number), [chapters]);
 
@@ -57,6 +65,12 @@ export default function ChapterAnalysis() {
   const [activeAnnotationId, setActiveAnnotationId] = useState<string>();
   const [scrollToContent, setScrollToContent] = useState<string>();
   const [scrollToSidebar, setScrollToSidebar] = useState<string>();
+  const [readerTab, setReaderTab] = useState<ReaderTab>('content');
+  const [focusCandidateId, setFocusCandidateId] = useState<string | null>(null);
+  const [candidatesVersion, setCandidatesVersion] = useState(0);
+  const [selection, setSelection] = useState<TextSelection | null>(null);
+  const manuscriptRef = useRef<HTMLDivElement>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const loadSelected = useCallback(async (id: string) => {
     setContentLoading(true);
@@ -79,6 +93,9 @@ export default function ChapterAnalysis() {
   const selectChapter = useCallback((id: string) => {
     setSelectedId(id);
     setActiveAnnotationId(undefined);
+    setSelection(null);
+    setReaderTab('content');
+    setFocusCandidateId(null);
     void loadSelected(id);
   }, [loadSelected]);
 
@@ -94,19 +111,64 @@ export default function ChapterAnalysis() {
     if (projectId) void refreshChapters();
   }, [projectId, refreshChapters, clearSelection]);
 
-  // 首次：默认选第一个有正文的章
+  // 首次：默认选第一个有正文的章（从智能助笔 / 核对清单跳来时带 ?chapter=，由下面的深链处理）
   useEffect(() => {
-    if (selectedId || sorted.length === 0) return;
+    if (selectedId || sorted.length === 0 || searchParams.get('chapter')) return;
     const first = sorted.find((c) => c.word_count > 0) ?? sorted[0];
     selectChapter(first.id);
-  }, [sorted, selectedId, selectChapter]);
+  }, [sorted, selectedId, selectChapter, searchParams]);
+
+  // 深链：?chapter=<id>&tab=candidates&candidate=<id>（智能助笔的候选稿、核对清单）；处理完清掉参数
+  useEffect(() => {
+    const chapterId = searchParams.get('chapter');
+    if (!chapterId || !sorted.some((c) => c.id === chapterId)) return;
+    const tab = searchParams.get('tab');
+    selectChapter(chapterId);
+    if (tab === 'candidates' || tab === 'versions') setReaderTab(tab);
+    setFocusCandidateId(searchParams.get('candidate'));
+    setSearchParams({}, { replace: true });
+  }, [searchParams, sorted, selectChapter, setSearchParams]);
+
+  // 全局智能助笔：登记作者正在看的章节与选中的正文（只作参考上下文）
+  useAssistantDetail(detail ? {
+    label: `章节写作 · 第 ${detail.chapter_number} 章《${detail.title}》`,
+    chapter_id: detail.id,
+    selection: selection && selection.text ? { start: selection.start, end: selection.end, text: selection.text } : null,
+  } : null);
+
+  // 助笔给本章产生了候选稿：刷新候选稿列表与章节列表里的待审数
+  const onAssistantData = useCallback((change: AssistantDataChange) => {
+    if (change.entity !== 'chapter_candidate') return;
+    void refreshChapters();
+    if (change.chapterId && change.chapterId === selectedId) setCandidatesVersion((v) => v + 1);
+  }, [refreshChapters, selectedId]);
+  useAssistantDataChange(onAssistantData);
 
   // ---------- 正文任务 ----------
   const onChapterWritten = useCallback((id: string) => {
     if (id === selectedId) void loadSelected(id);
   }, [selectedId, loadSelected]);
 
-  const jobs = useChapterWriteJobs({ projectId, chapters: sorted, refreshChapters, onChapterWritten });
+  const openCandidate = useCallback((chapterId: string, candidateId: string) => {
+    if (chapterId !== selectedId) {
+      setSelectedId(chapterId);
+      setSelection(null);
+      void loadSelected(chapterId);
+    }
+    setFocusCandidateId(candidateId);
+    setReaderTab('candidates');
+  }, [selectedId, loadSelected]);
+
+  const jobs = useChapterWriteJobs({
+    projectId,
+    chapters: sorted,
+    refreshChapters,
+    onChapterWritten,
+    onCandidateReady: (chapterId, candidateId) => {
+      jobs.closeStreamPanel();
+      openCandidate(chapterId, candidateId);
+    },
+  });
   const streamChapterId = jobs.streamState?.chapterId;
 
   // 正文任务开始 / 批量切章时自动切到该章
@@ -183,16 +245,21 @@ export default function ChapterAnalysis() {
     void jobs.startStream({ chapter, kind: 'chapter_regenerate', requestBody: { prompt_ids: promptIds, mode }, mode: 'single' }).catch(() => { /* 已 toast / 已停止 */ });
   };
 
-  const saveStreamContent = async () => {
-    const state = jobs.streamState;
-    if (!state) return;
-    try {
-      await updateChapter(state.chapterId, { content: state.content });
-      toast.success('内容已保存');
-      if (state.chapterId === selectedId) void loadSelected(state.chapterId);
-    } catch {
-      toast.error('保存失败');
-    }
+  /** 正文里选中文字 → 记下与正文逐字一致的位置，交给智能助笔改写 / 润色 / 追问 */
+  const captureSelection = () => {
+    if (!detail?.content) return;
+    // 只在正文本身的节点里量位置（不含上方「尚未分析」之类的提示文字），量出来的起点才和正文下标一致
+    const raw = readDomSelection(manuscriptRef.current?.querySelector<HTMLElement>('[data-manuscript]') ?? null);
+    if (!raw) return;
+    const resolved = resolveSelection(detail.content, raw.text, raw.startHint);
+    if (resolved) setSelection(resolved);
+  };
+
+  const afterContentReplaced = () => {
+    void refreshChapters();
+    if (selectedId) void loadSelected(selectedId);
+    setSelection(null);
+    setReaderTab('content');
   };
 
   const copyText = async (text: string, what: string) => {
@@ -222,43 +289,47 @@ export default function ChapterAnalysis() {
   const prev = idx > 0 ? sorted[idx - 1] : null;
   const next = idx >= 0 && idx < sorted.length - 1 ? sorted[idx + 1] : null;
   const totalWords = chapters.reduce((s, c) => s + c.word_count, 0);
-  const completedCount = chapters.filter((c) => c.status === 'completed').length;
+  const writtenCount = chapters.filter((c) => c.word_count > 0).length;
+  const pendingCandidates = chapters.reduce((s, c) => s + (c.pending_candidates ?? 0), 0);
   const hasAnnotations = Boolean(annotations && annotations.annotations.length > 0);
   const streamPanelVisible = Boolean(jobs.streamState && !jobs.panelHidden && jobs.streamState.chapterId === selectedId);
   const { batchStatus, batchRunning, streamBusy } = jobs;
+  const selectedSummary = sorted.find((c) => c.id === selectedId);
 
   return (
     <div className="animate-fade-in space-y-6">
-      {/* 头部 */}
-      <section className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
-        <div className="min-w-0">
-          <h1 className="text-[28px] font-semibold tracking-tight text-content md:text-[32px]">剧情分析</h1>
-          <p className="mt-2 max-w-[600px] text-sm leading-6 text-content-secondary">
+      <PageHeader
+        eyebrow="写作"
+        title="章节写作"
+        description={
+          <>
             {chapters.length > 0 ? `共 ${chapters.length} 章 · ${totalWords.toLocaleString()} 字。` : ''}
-            左侧管理章节，右侧阅读正文与分析结果。从章纲同步生成骨架，再逐章 / 批量交给 AI 成稿；已完成的章可用去 AI 味提示词重写。
-          </p>
-        </div>
-        <div className="flex shrink-0 flex-wrap items-center gap-2.5">
-          <button onClick={() => void handleSyncFromOutlines()} disabled={syncing} className="hh-btn-secondary">
-            {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-            从章纲同步
-          </button>
-          <button onClick={() => setShowBatch(true)} disabled={batchRunning || streamBusy} className="hh-btn-secondary">
-            <Layers className="h-4 w-4" />
-            批量生成
-          </button>
-          <button onClick={() => setEditState({ editing: null })} className="hh-btn-primary">
-            <Plus className="h-4 w-4" />
-            新建章节
-          </button>
-        </div>
-      </section>
+            AI 写出的每一稿都先成为候选稿，审阅后采用才写入正文；被替换的旧稿自动存进历史版本，随时可以恢复。
+          </>
+        }
+        actions={
+          <>
+            <button onClick={() => void handleSyncFromOutlines()} disabled={syncing} className="hh-btn-secondary">
+              {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+              从章纲同步
+            </button>
+            <button onClick={() => setShowBatch(true)} disabled={batchRunning || streamBusy} className="hh-btn-secondary">
+              <Layers className="h-4 w-4" />
+              批量生成
+            </button>
+            <button onClick={() => setEditState({ editing: null })} className="hh-btn-primary">
+              <Plus className="h-4 w-4" />
+              新建章节
+            </button>
+          </>
+        }
+      />
 
       {chapters.length > 0 && (
-        <section className="hh-panel grid grid-cols-2 divide-surface-border/80 md:grid-cols-4 md:divide-x">
+        <section className="hh-panel grid grid-cols-2 divide-surface-border md:grid-cols-4 md:divide-x">
           <StatItem label="章节总数" value={chapters.length} />
-          <StatItem label="已完成" value={completedCount} />
-          <StatItem label="待生成" value={chapters.length - completedCount} />
+          <StatItem label="已有正文" value={writtenCount} />
+          <StatItem label="待审候选稿" value={pendingCandidates} />
           <StatItem label="累计字数" value={totalWords.toLocaleString()} />
         </section>
       )}
@@ -321,7 +392,7 @@ export default function ChapterAnalysis() {
       ) : (
         <div className="grid gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
           {/* 左栏：章节列表 */}
-          <section className="hh-panel divide-y divide-surface-border/80 overflow-hidden lg:max-h-[calc(100dvh-220px)] lg:overflow-y-auto">
+          <section className="hh-panel divide-y divide-surface-border-light overflow-hidden lg:max-h-[calc(100dvh-220px)] lg:overflow-y-auto">
             {sorted.map((c) => {
               const status = STATUS_MAP[c.status] || STATUS_MAP.draft;
               const isSelected = c.id === selectedId;
@@ -334,16 +405,16 @@ export default function ChapterAnalysis() {
                   key={c.id}
                   onClick={() => selectChapter(c.id)}
                   className={cn(
-                    'cursor-pointer border-l-2 px-4 py-3 transition-colors',
-                    isSelected ? 'border-brand bg-brand/[0.06]' : 'border-transparent hover:bg-brand/[0.04]',
-                    currentBatchChapter && !isSelected && 'bg-brand/[0.03]',
+                    'cursor-pointer px-4 py-3 transition-colors',
+                    isSelected ? 'lj-selected' : 'hover:bg-surface-hover',
+                    currentBatchChapter && !isSelected && 'bg-brand-50',
                   )}
                 >
                   <div className="flex items-center gap-3">
                     <div
                       className={cn(
-                        'flex h-8 w-8 flex-shrink-0 items-center justify-center text-sm font-semibold tabular-nums',
-                        c.status === 'completed' ? 'bg-brand/10 text-brand' : 'bg-surface-hover text-content-secondary',
+                        'flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-sm font-serif text-sm font-semibold tabular-nums',
+                        c.word_count > 0 ? 'bg-brand-100 text-brand-600' : 'bg-surface-muted text-content-secondary',
                       )}
                     >
                       {c.chapter_number}
@@ -351,37 +422,46 @@ export default function ChapterAnalysis() {
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <span className={cn('truncate text-sm text-content', isSelected ? 'font-semibold' : 'font-medium')}>{c.title}</span>
-                        <span className={cn('flex-shrink-0 px-1.5 py-0.5 text-[10px] font-medium', status.cls)}>{status.label}</span>
+                        <span className={cn('lj-badge', status.cls)}>{status.label}</span>
                       </div>
                       <p className="mt-0.5 text-xs text-content-tertiary tabular-nums">
                         {c.word_count > 0 ? `${c.word_count.toLocaleString()} 字` : '暂无内容'}
                         {currentBatchChapter && <span className="ml-2 text-brand">串行生成中</span>}
                       </p>
+                      {((c.pending_candidates ?? 0) > 0 || c.outline_changed || c.outline_review_status === 'draft' || c.outline_upstream_stale) && (
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          {(c.pending_candidates ?? 0) > 0 && (
+                            <span className="lj-badge lj-badge--candidate">候选稿 {c.pending_candidates}</span>
+                          )}
+                          {c.outline_changed && <span className="lj-badge lj-badge--stale" title="正文写完后章纲又改过">章纲已改</span>}
+                          {c.outline_upstream_stale && <span className="lj-badge lj-badge--stale" title="桥段 / 剧情线 / 故事大纲改过">上游已改</span>}
+                          {c.outline_review_status === 'draft' && <span className="lj-badge lj-badge--draft" title="AI 草拟的章纲，尚未确认">章纲待确认</span>}
+                        </div>
+                      )}
                     </div>
                   </div>
                   <div className="mt-1.5 flex items-center gap-0.5 pl-11" onClick={(e) => e.stopPropagation()}>
                     <button onClick={() => setEditState({ editing: c })} className="hh-icon-btn-plain h-7 w-7 hover:text-brand" title="编辑" aria-label="编辑">
                       <Pencil className="h-3.5 w-3.5" />
                     </button>
-                    {c.status === 'completed' && c.word_count > 0 ? (
+                    <button
+                      onClick={() => void openGenerate(c)}
+                      disabled={!canWrite}
+                      className="hh-icon-btn-plain h-7 w-7 hover:text-brand"
+                      title={c.word_count > 0 ? 'AI 重新写一稿（存为候选稿，不会覆盖现有正文）' : 'AI 生成候选稿'}
+                      aria-label="AI 生成候选稿"
+                    >
+                      {generating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
+                    </button>
+                    {c.word_count > 0 && (
                       <button
                         onClick={() => setRewriteTarget(c)}
                         disabled={!canWrite}
                         className="hh-icon-btn-plain h-7 w-7 hover:text-brand"
-                        title="去 AI 味重写（按项目提示词重写并覆盖正文）"
+                        title="去 AI 味重写（结果存为候选稿）"
                         aria-label="去 AI 味重写"
                       >
-                        {generating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => void openGenerate(c)}
-                        disabled={!canWrite}
-                        className="hh-icon-btn-plain h-7 w-7 hover:text-brand"
-                        title="AI 生成"
-                        aria-label="AI 生成"
-                      >
-                        {generating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
+                        <RefreshCw className="h-3.5 w-3.5" />
                       </button>
                     )}
                     {c.chapter_outline_id && (
@@ -394,7 +474,7 @@ export default function ChapterAnalysis() {
                         <Film className="h-3.5 w-3.5" />
                       </button>
                     )}
-                    {c.status === 'completed' && (
+                    {c.word_count > 0 && (
                       <button
                         onClick={() => void jobs.handleAnalyze(c)}
                         disabled={analyzing}
@@ -405,7 +485,7 @@ export default function ChapterAnalysis() {
                         {analyzing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
                       </button>
                     )}
-                    <button onClick={() => void handleDelete(c)} className="hh-icon-btn-plain h-7 w-7 hover:text-red-500" title="删除" aria-label="删除">
+                    <button onClick={() => void handleDelete(c)} className="hh-icon-btn-plain h-7 w-7 hover:text-cinnabar" title="删除" aria-label="删除">
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>
                   </div>
@@ -428,8 +508,14 @@ export default function ChapterAnalysis() {
               onClose={jobs.closeStreamPanel}
               relatedCards={jobs.relatedCards}
               loadingCards={jobs.loadingCards}
-              onContentChange={jobs.setStreamContent}
-              onSave={saveStreamContent}
+              onReviewCandidate={() => {
+                const id = jobs.streamState?.chapterId;
+                jobs.closeStreamPanel();
+                if (id) {
+                  if (id !== selectedId) selectChapter(id);
+                  setReaderTab('candidates');
+                }
+              }}
             />
           ) : (
             <section className="hh-panel flex min-h-[520px] flex-col overflow-hidden">
@@ -440,16 +526,66 @@ export default function ChapterAnalysis() {
               ) : (
                 <>
                   {/* 工具栏 */}
-                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-surface-border/80 px-5 py-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-surface-border px-5 py-2.5">
                     <div className="flex min-w-0 items-center gap-2">
                       <button onClick={() => prev && selectChapter(prev.id)} disabled={!prev} className="hh-icon-btn-plain h-8 w-8" title={prev ? `上一章：${prev.title}` : '已是第一章'} aria-label="上一章">
                         <ChevronLeft className="h-4 w-4" />
                       </button>
-                      <span className="truncate text-sm font-semibold text-content">第 {detail.chapter_number} 章：{detail.title}</span>
+                      <span className="truncate font-serif text-[15px] font-semibold text-content">
+                        第 {detail.chapter_number} 章<span className="ml-2">{detail.title}</span>
+                      </span>
                       <button onClick={() => next && selectChapter(next.id)} disabled={!next} className="hh-icon-btn-plain h-8 w-8" title={next ? `下一章：${next.title}` : '已是最后一章'} aria-label="下一章">
                         <ChevronRight className="h-4 w-4" />
                       </button>
                     </div>
+                    <div className="flex flex-wrap items-center gap-1 rounded border border-surface-border bg-surface p-0.5">
+                      {([
+                        ['content', '正文', BookOpen],
+                        ['candidates', `候选稿${(selectedSummary?.pending_candidates ?? 0) > 0 ? ` ${selectedSummary?.pending_candidates}` : ''}`, FileCheck2],
+                        ['versions', '历史版本', History],
+                      ] as const).map(([key, label, Icon]) => (
+                        <button
+                          key={key}
+                          onClick={() => setReaderTab(key)}
+                          className={cn(
+                            'flex items-center gap-1 rounded-sm px-2.5 py-1 text-xs font-medium',
+                            readerTab === key ? 'bg-brand text-white' : 'text-content-secondary hover:text-content',
+                          )}
+                        >
+                          <Icon className="h-3.5 w-3.5" />
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {readerTab === 'candidates' ? (
+                    <CandidatePanel
+                      key={`${detail.id}-${candidatesVersion}`}
+                      chapter={detail}
+                      focusCandidateId={focusCandidateId}
+                      onAdopted={afterContentReplaced}
+                      onChanged={() => void refreshChapters()}
+                    />
+                  ) : readerTab === 'versions' ? (
+                    <VersionHistoryPanel chapter={detail} onRestored={afterContentReplaced} />
+                  ) : (
+                  <>
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-surface-border-light px-5 py-2">
+                    <span className="text-xs text-content-tertiary">
+                      {selection ? (
+                        <span className="inline-flex items-center gap-2">
+                          已选中 {selection.text.length} 字
+                          <button
+                            onClick={() => useAssistantStore.getState().compose('')}
+                            className="inline-flex items-center gap-1 font-medium text-brand hover:underline"
+                          >
+                            <Sparkles className="h-3 w-3" />
+                            交给智能助笔
+                          </button>
+                        </span>
+                      ) : '选中正文里的一段文字，可交给智能助笔（右上角）改写、润色或追问出处'}
+                    </span>
                     <div className="flex flex-wrap items-center gap-2">
                       <button onClick={() => void copyText(`第${detail.chapter_number}章: ${detail.title}`, '章节标题')} className="hh-chip flex items-center gap-1 px-2 py-1 text-[11px]">
                         <Copy className="h-3 w-3" />
@@ -471,7 +607,7 @@ export default function ChapterAnalysis() {
                     </div>
                   </div>
                   {hasAnnotations && annotations && (
-                    <p className="border-b border-surface-border/80 px-5 py-2 text-xs text-content-tertiary">
+                    <p className="border-b border-surface-border-light px-5 py-2 text-xs text-content-tertiary">
                       共 {annotations.summary.total_annotations} 个标注：
                       {annotations.summary.hooks > 0 && ` 🎣${annotations.summary.hooks}个钩子`}
                       {annotations.summary.foreshadows > 0 && ` 🌟${annotations.summary.foreshadows}个伏笔`}
@@ -482,52 +618,59 @@ export default function ChapterAnalysis() {
 
                   <div className="flex flex-1 flex-col gap-4 p-5 xl:flex-row">
                     {/* 正文 */}
-                    <div className="min-w-0 flex-1 xl:max-h-[calc(100dvh-320px)] xl:overflow-y-auto">
+                    <div
+                      ref={manuscriptRef}
+                      onMouseUp={captureSelection}
+                      onKeyUp={captureSelection}
+                      className="min-w-0 flex-1 xl:max-h-[calc(100dvh-340px)] xl:overflow-y-auto"
+                    >
                       {contentLoading ? (
                         <div className="flex items-center gap-2 py-6 text-xs text-content-secondary">
                           <Loader2 className="h-3.5 w-3.5 animate-spin" />
                           加载中…
                         </div>
                       ) : !detail.content ? (
-                        <div className="py-10 text-center text-sm text-content-tertiary">本章还没有正文：点左侧 ⚡ 交给 AI 生成，或 ✎ 手动编辑。</div>
+                        <div className="py-10 text-center text-sm text-content-tertiary">本章还没有正文：点左侧 ⚡ 让 AI 写一份候选稿，或 ✎ 手动编辑。</div>
                       ) : (
                         <>
                           {!hasAnnotations && (
-                            <p className="mb-4 border border-dashed border-surface-border bg-white/60 px-3 py-2 text-xs text-content-tertiary">
+                            <p className="mb-4 rounded border border-dashed border-surface-border bg-surface-paper px-3 py-2 text-xs text-content-tertiary">
                               该章尚未分析，没有记忆标注。点左侧 🔍 分析后可在正文里高亮钩子 / 伏笔 / 情节点。
                             </p>
                           )}
                           {showAnnotations && hasAnnotations && annotations ? (
-                            <AnnotatedText
-                              content={detail.content}
-                              annotations={annotations.annotations}
-                              onAnnotationClick={(a) => handleAnnotationClick(a, 'content')}
-                              activeAnnotationId={activeAnnotationId}
-                              scrollToAnnotation={scrollToContent}
-                              style={{ lineHeight: 2, fontSize: 16 }}
-                            />
+                            <div data-manuscript>
+                              <AnnotatedText
+                                content={detail.content}
+                                annotations={annotations.annotations}
+                                onAnnotationClick={(a) => handleAnnotationClick(a, 'content')}
+                                activeAnnotationId={activeAnnotationId}
+                                scrollToAnnotation={scrollToContent}
+                                style={{ lineHeight: 2, fontSize: 16 }}
+                              />
+                            </div>
                           ) : (
-                            <div className="whitespace-pre-wrap break-words text-base leading-8 text-content">{detail.content}</div>
+                            <div data-manuscript className="lj-manuscript whitespace-pre-wrap break-words">{detail.content}</div>
                           )}
                         </>
                       )}
                     </div>
 
-                    {/* 侧栏：记忆标注 / 叙事状态 */}
+                    {/* 侧栏：记忆标注 / 叙事状态（智能助笔在项目右侧的全局抽屉里） */}
                     {sidebarOpen && (
-                      <aside className="border-t border-surface-border/80 pt-4 xl:w-[380px] xl:shrink-0 xl:border-l xl:border-t-0 xl:pl-4 xl:pt-0">
+                      <aside className="border-t border-surface-border pt-4 xl:w-[340px] xl:shrink-0 xl:border-l xl:border-t-0 xl:pl-4 xl:pt-0">
                         <div className="mb-3 flex gap-1">
                           {([['memory', '记忆标注'], ['narrative', '叙事状态']] as const).map(([key, label]) => (
                             <button
                               key={key}
                               onClick={() => setSidebarTab(key)}
-                              className={cn('hh-chip px-3 py-1 text-xs', sidebarTab === key ? 'bg-brand text-white' : 'text-content-secondary')}
+                              className={cn('hh-chip px-3 py-1 text-xs', sidebarTab === key && 'hh-chip--active')}
                             >
                               {label}
                             </button>
                           ))}
                         </div>
-                        <div className="xl:max-h-[calc(100dvh-380px)] xl:overflow-y-auto">
+                        <div className="xl:max-h-[calc(100dvh-400px)] xl:overflow-y-auto">
                           {sidebarTab === 'memory' ? (
                             hasAnnotations && annotations ? (
                               <MemorySidebar
@@ -546,6 +689,8 @@ export default function ChapterAnalysis() {
                       </aside>
                     )}
                   </div>
+                  </>
+                  )}
                 </>
               )}
             </section>

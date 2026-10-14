@@ -552,6 +552,39 @@ async def ensure_longform_columns(engine: AsyncEngine):
         await _ensure_columns(engine, table, columns, "长篇优化")
 
 
+# 写作链路加固（正文指纹 / 候选稿 / 章纲契约与确认 / 时序状态）新增列：旧库启动时补齐，均可空
+WRITING_FLOW_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
+    "plot_analysis": (("content_hash", "VARCHAR(64)"),),
+    "chapters": (("outline_hash", "VARCHAR(64)"),),
+    "relationship_events": (("requested_status", "VARCHAR(20)"),),
+    "narrative_promises": (("needs_reconcile", "BOOLEAN DEFAULT 0"),),
+    "chapter_outlines": (
+        ("entry_state", "TEXT"),
+        ("exit_state", "TEXT"),
+        ("forbidden", "TEXT"),
+        ("review_status", "VARCHAR(20)"),
+        ("confirmed_at", "DATETIME"),
+        ("upstream_stale", "BOOLEAN DEFAULT 0"),
+        ("upstream_reason", "TEXT"),
+    ),
+}
+
+
+async def ensure_writing_flow_columns(engine: AsyncEngine):
+    """写作链路加固各表新增列（chapter_versions 等新表由 create_all 建）。"""
+    for table, columns in WRITING_FLOW_COLUMNS.items():
+        await _ensure_columns(engine, table, columns, "写作链路加固")
+
+
+async def ensure_world_map_rule_column(engine: AsyncEngine):
+    """世界地图地点绑定世界规则「地图位置」：world_map_locations.rule_id（可空）+ 索引，旧库启动时补齐。"""
+    await _ensure_columns(engine, "world_map_locations", (("rule_id", "VARCHAR(36)"),), "地图绑定世界规则")
+    async with engine.begin() as conn:
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_world_map_locations_rule_id ON world_map_locations (rule_id)"
+        ))
+
+
 PROJECT_ID_INDEX_TABLES: tuple[str, ...] = (
     "chapters", "chapter_outlines", "plot_lines", "plot_cards", "characters",
     "story_outlines", "generation_history", "writing_styles", "project_default_styles",
@@ -645,6 +678,8 @@ async def run_auto_migrations(engine: AsyncEngine):
         await ensure_settings_reasoning_columns(engine)  # 思考强度全局设置字段
         await ensure_settings_sampling_columns(engine)  # 采样多样性字段（降低 AI 味）
         await ensure_longform_columns(engine)  # 长篇优化：声音卡 / 变长桥段 / 滚动规划 / 伏笔规划 / 平台预设
+        await ensure_writing_flow_columns(engine)  # 写作链路加固：正文指纹 / 候选稿 / 章纲契约 / 时序状态
+        await ensure_world_map_rule_column(engine)  # 世界地图地点绑定世界规则「地图位置」
         await ensure_project_id_indexes(engine)  # 热表 project_id 索引（旧库补建）
         logger.info("✅ Auto migrations finished")
     except Exception as exc:

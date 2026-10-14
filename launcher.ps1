@@ -212,6 +212,6 @@ if ($proc -and $proc.HasExited) {
 }
 
 Write-Host ""
-Print-Ok "App is still running. Startup panel should appear shortly."
+Print-Ok "App is still running. The app window should appear shortly."
 Write-Host "This terminal will close in 3 seconds..." -ForegroundColor Gray
 Start-Sleep 3

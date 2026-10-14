@@ -80,6 +80,12 @@ def apply_config_to_env(config):
     # 数据库配置
     if config.has_option('database', 'url'):
         os.environ['DATABASE_URL'] = config.get('database', 'url')
+
+    # 端口（桌面版固定只监听 127.0.0.1，不读 host，免得把服务暴露到局域网）
+    if config.has_option('app', 'port'):
+        port = config.get('app', 'port').strip()
+        if port.isdigit() and 0 < int(port) < 65536:
+            os.environ['APP_PORT'] = port
     
     # AI 配置
     if config.has_option('ai', 'openai_api_key'):

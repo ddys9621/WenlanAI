@@ -358,6 +358,11 @@ export interface Chapter {
   status: 'draft' | 'writing' | 'completed';
   created_at: string;
   updated_at: string;
+  /** 列表接口附带的写作链路状态 */
+  outline_changed?: boolean;           // 正文写完（采用）后章纲又改过
+  outline_review_status?: 'draft' | 'confirmed' | null;  // 关联章纲：draft = AI 草拟待确认
+  outline_upstream_stale?: boolean;    // 关联章纲的上游（桥段 / 剧情线 / 故事大纲）已改
+  pending_candidates?: number;         // 待采用的候选稿数
 }
 
 export interface ChapterCreate {
@@ -384,7 +389,8 @@ export interface ChapterGenerateRequest {
   style_id?: number;
   target_word_count?: number;
   enable_mcp?: boolean;
-  auto_analyze?: boolean;
+  /** 写完后另起一次模型调用审校章纲遵循度，报告附在候选稿上（默认开） */
+  adherence_review?: boolean;
   selected_plugins?: string[];
   // R8 拆书参考包显式参数（任一为空则走默认）
   pack_ids?: string[];
@@ -405,6 +411,10 @@ export interface ChapterBatchRequest {
   style_id?: number;
   enable_mcp?: boolean;
   target_word_count?: number;
+  /** 只写已确认的章纲：遇到 AI 草拟 / 上游已改的章纲就停 */
+  require_confirmed_outline?: boolean;
+  /** 章纲遵循度审校不通过时重写一次（默认开） */
+  adherence_gate?: boolean;
 }
 
 /** 批量任务里每章的状态事件 */
@@ -413,7 +423,7 @@ export interface ChapterBatchEvent {
   chapter_number: number;
   chapter_id: string | null;
   status: 'generating' | 'retrying' | 'quality_retry' | 'generated' | 'analyzing' | 'analysis_failed'
-    | 'done' | 'skipped' | 'failed' | 'paused' | 'no_outline';
+    | 'done' | 'skipped' | 'failed' | 'paused' | 'no_outline' | 'outline_unconfirmed';
   attempt?: number;
   error?: string;
   reason?: string;
@@ -1057,6 +1067,17 @@ export interface ChapterOutline {
   key_events?: string[];         // 关键事件，最后一条为章末钩子
   characters_involved?: string[];
   narrative_tasks?: NarrativeTasks | null;  // 本章叙事任务（伏笔 / 承诺）
+  // 章节契约：开头承接 / 写到哪停 / 不能提前发生的事
+  entry_state?: string | null;
+  exit_state?: string | null;
+  forbidden?: string[];
+  // 确认与上游过期
+  review_status?: 'draft' | 'confirmed';
+  confirmed_at?: string | null;
+  upstream_stale?: boolean;
+  upstream_reason?: string | null;
+  bridge_id?: string | null;
+  bridge_position?: string | null;
   // 旧字段（保留兼容）
   summary?: string;              // 已废弃，保留兼容旧数据
   // 系统字段
@@ -1084,6 +1105,9 @@ export interface ChapterOutlineCreate {
   plot_points?: string;
   key_events?: string[];
   characters_involved?: string[];
+  entry_state?: string;
+  exit_state?: string;
+  forbidden?: string[];
   // 旧字段（保留兼容）
   summary?: string;
   // 系统字段
@@ -1101,6 +1125,9 @@ export interface ChapterOutlineUpdate {
   plot_points?: string;
   key_events?: string[];
   characters_involved?: string[];
+  entry_state?: string;
+  exit_state?: string;
+  forbidden?: string[];
   // 旧字段（保留兼容）
   summary?: string;
   // 系统字段

@@ -1,4 +1,4 @@
-/** 去 AI 味重写：勾选项目提示词（可多选、可内联增删改）→ 只带提示词 + 原文重写 → 直接覆盖正文并清掉本章旧分析
+/** 去 AI 味重写：勾选项目提示词（可多选、可内联增删改）→ 只带提示词 + 原文重写 → 存为候选稿（采用才覆盖正文）
  *  模式：全文重写 / 局部重写（只改检测出 AI 味重的段落，其余一字不动）；两种都会附专有名词表防止改名 */
 import { useCallback, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -232,7 +232,7 @@ export function DeaiRewriteModal({ open, projectId, chapter, busy, onClose, onCo
           </div>
 
           <p className="text-[11px] leading-5 text-content-tertiary">
-            重写完成后<span className="font-medium text-amber-600">直接覆盖正文，不留版本、不能回滚</span>；本章已有的分析结果（记忆标注、伏笔 / 承诺、一致性等）会一并清除，需要时可重新「分析」。
+            重写结果先存为<span className="font-medium text-brand">候选稿</span>，正文和分析都不动；审阅后点「采用」才覆盖正文（原稿自动存进历史版本，可随时恢复），采用后本章旧分析会清除，需要时重新「分析」。
           </p>
         </div>
 

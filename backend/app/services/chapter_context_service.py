@@ -159,12 +159,12 @@ async def build_character_context(
     pov = next((c for c in people if c.name == pov_name), None)
 
     recent = await css.recent_presence(db, project_id, chapter_number, window=3)
-    related = await css.load_related_ids(db, project_id, pov.id if pov else None)
+    related = await css.load_related_ids(db, project_id, pov.id if pov else None, before_chapter=chapter_number)
     selected = css.select_relevant_characters(people, involved=involved, pov=pov_name, recent=recent,
                                               related_ids=related, limit=limit)
     names = [c.name for c in selected] + [a for c in selected for a in css._aliases(c)]
     states = await css.load_character_states(db, project_id, chapter_number, names=names)
-    relations = await css.load_protagonist_relations(db, project_id, protagonist, selected)
+    relations = await css.load_protagonist_relations(db, project_id, protagonist, selected, before_chapter=chapter_number)
     absent_states = await css.load_absent_states(db, project_id, chapter_number)
     story_time = await css.latest_story_time(db, project_id, chapter_number)
 

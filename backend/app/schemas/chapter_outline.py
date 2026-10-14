@@ -13,6 +13,9 @@ class ChapterOutlineBase(BaseModel):
     pov: Optional[str] = Field(None, description="视角角色名", max_length=100)
     # 剧情信息
     plot_points: Optional[str] = Field(None, description="剧情要点（含情感变化），300-400字")
+    # 章节契约：开头承接 / 写到哪停 / 不能提前发生的事
+    entry_state: Optional[str] = Field(None, description="进入状态：本章开头人物 / 地点 / 局势（承接上一章结尾）")
+    exit_state: Optional[str] = Field(None, description="退出状态：最后一个关键事件完成后停在哪")
     # 旧字段（保留兼容）
     summary: Optional[str] = Field(None, description="章节摘要（已废弃，保留兼容旧数据）")
     # 系统字段
@@ -26,6 +29,7 @@ class ChapterOutlineCreate(ChapterOutlineBase):
     plot_line_id: Optional[str] = Field(None, description="关联的剧情线ID")
     key_events: Optional[List[str]] = Field(None, description="关键事件列表，最后一条为章末钩子")
     characters_involved: Optional[List[str]] = Field(None, description="涉及角色名称列表")
+    forbidden: Optional[List[str]] = Field(None, description="禁止事项：本章不能提前发生 / 揭晓的事")
 
 
 class ChapterOutlineUpdate(BaseModel):
@@ -37,6 +41,9 @@ class ChapterOutlineUpdate(BaseModel):
     pov: Optional[str] = Field(None, description="视角角色名", max_length=100)
     # 剧情信息
     plot_points: Optional[str] = Field(None, description="剧情要点（含情感变化）")
+    entry_state: Optional[str] = Field(None, description="进入状态")
+    exit_state: Optional[str] = Field(None, description="退出状态")
+    forbidden: Optional[List[str]] = Field(None, description="禁止事项")
     # 旧字段（保留兼容）
     summary: Optional[str] = Field(None, description="章节摘要（已废弃）")
     # 系统字段
@@ -53,9 +60,16 @@ class ChapterOutlineResponse(ChapterOutlineBase):
     plot_line_id: Optional[str] = Field(None, description="关联的剧情线ID")
     key_events: Optional[List[str]] = Field(None, description="关键事件列表，最后一条为章末钩子")
     characters_involved: Optional[List[str]] = Field(None, description="涉及角色名称列表")
+    forbidden: Optional[List[str]] = Field(None, description="禁止事项")
     narrative_tasks: Optional[Dict[str, Any]] = Field(
         None, description="本章叙事任务：{resolve:[{promise_id,title,how}], advance:[...], plant:[{title,content,payoff_after}]}",
     )
+    review_status: str = Field("confirmed", description="draft = AI 草拟待确认；confirmed = 已确认")
+    confirmed_at: Optional[datetime] = Field(None, description="确认时间")
+    upstream_stale: bool = Field(False, description="上游（桥段 / 剧情线 / 故事大纲）已修改，建议核对")
+    upstream_reason: Optional[str] = Field(None, description="上游改了什么")
+    bridge_id: Optional[str] = Field(None, description="所属桥段")
+    bridge_position: Optional[str] = Field(None, description="桥段内位置")
     created_at: datetime = Field(..., description="创建时间")
     updated_at: datetime = Field(..., description="更新时间")
     # 关联统计字段 - 统一格式

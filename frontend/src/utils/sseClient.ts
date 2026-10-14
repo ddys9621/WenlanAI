@@ -5,7 +5,9 @@ export interface SSEMessage {
     | 'progress' | 'chunk' | 'result' | 'error' | 'done' | 'start' | 'content' | 'meta'
     | 'thinking' | 'partial' | 'bridges'
     | 'stage' | 'tool_call' | 'reference' | 'llm'
-    | 'batch_chapter';
+    | 'batch_chapter'
+    // 全局智能助笔：处理记录一步 / 清掉误推的回复 / 内容修改候选 / 章节候选稿 / 打开页面 / 向作者提问
+    | 'tool' | 'content_reset' | 'candidate' | 'chapter_candidate' | 'navigate' | 'question';
   message?: string;
   progress?: number;
   word_count?: number;

@@ -391,7 +391,7 @@ export function ImitationDialog({
                     onClick={() => setStrength(s)}
                     className={cn(
                       'px-3.5 py-1.5 text-xs font-medium transition-colors',
-                      selected ? 'bg-brand text-white shadow-[0_8px_20px_-12px_rgba(0,122,255,0.6)]' : 'text-content-secondary hover:text-content',
+                      selected ? 'bg-brand text-white' : 'text-content-secondary hover:text-content',
                     )}
                   >
                     {STRENGTH_LABELS[s]}

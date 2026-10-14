@@ -23,9 +23,12 @@ interface GenConfig {
   target_word_count: number;
   enable_mcp: boolean;
   selected_plugins: string[];
+  adherence_review: boolean;
 }
 
-const DEFAULT_CONFIG: GenConfig = { style_id: undefined, target_word_count: 3000, enable_mcp: true, selected_plugins: [] };
+const DEFAULT_CONFIG: GenConfig = {
+  style_id: undefined, target_word_count: 3000, enable_mcp: true, selected_plugins: [], adherence_review: true,
+};
 
 export function ChapterGenerateModal({ open, projectId, chapter, genCheck, relatedCards, loadingCards, onClose, onConfirm }: ChapterGenerateModalProps) {
   const [genConfig, setGenConfig] = useState<GenConfig>(DEFAULT_CONFIG);
@@ -46,6 +49,7 @@ export function ChapterGenerateModal({ open, projectId, chapter, genCheck, relat
     style_id: genConfig.style_id,
     target_word_count: genConfig.target_word_count,
     enable_mcp: genConfig.enable_mcp,
+    adherence_review: genConfig.adherence_review,
     selected_plugins: genConfig.enable_mcp && genConfig.selected_plugins.length > 0 ? genConfig.selected_plugins : undefined,
     // R8：仅 enabled 时透传拆书参考包参数
     ...(genRefPack.enabled ? {
@@ -68,7 +72,9 @@ export function ChapterGenerateModal({ open, projectId, chapter, genCheck, relat
           <div className="min-w-0">
             <p className="hh-eyebrow">AI 生成</p>
             <h2 className="mt-2 truncate text-xl font-semibold tracking-tight text-content">{chapter.title}</h2>
-            <p className="mt-1 text-sm text-content-secondary">选择风格与目标字数，AI 会结合章纲、前文与设定生成正文。</p>
+            <p className="mt-1 text-sm text-content-secondary">
+              AI 结合章纲、前文与设定写出<span className="font-medium text-content">候选稿</span>：正文不会被直接覆盖，审阅后点「采用」才写入（旧稿自动存进历史版本）。
+            </p>
           </div>
           <button onClick={onClose} className="hh-icon-btn-plain -mr-2 -mt-1" aria-label="关闭">
             <X className="h-4 w-4" />
@@ -111,6 +117,19 @@ export function ChapterGenerateModal({ open, projectId, chapter, genCheck, relat
               </div>
             </div>
           </div>
+
+          <label className="flex cursor-pointer items-start gap-2 rounded border border-surface-border bg-surface-paper px-3 py-2.5 text-xs text-content-secondary">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={genConfig.adherence_review}
+              onChange={(e) => setGenConfig((prev) => ({ ...prev, adherence_review: e.target.checked }))}
+            />
+            <span className="leading-5">
+              <span className="font-medium text-content">写完后审校章纲遵循度</span>
+              （另起一次模型调用逐项核对关键事件、章末落点、是否抢跑 / 新增设定，结论带原文引文并由程序核验；多花一次调用）
+            </span>
+          </label>
 
           <MCPSelector
             value={{ enable: genConfig.enable_mcp, selected: genConfig.selected_plugins }}
@@ -180,7 +199,7 @@ export function ChapterGenerateModal({ open, projectId, chapter, genCheck, relat
           </button>
           <button onClick={() => onConfirm(buildRequest())} className="hh-btn-primary">
             <Zap className="h-4 w-4" />
-            开始生成
+            生成候选稿
           </button>
         </div>
       </div>

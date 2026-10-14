@@ -1,4 +1,9 @@
-"""应用启动脚本 - pywebview 启动面板 + 主应用窗口"""
+"""应用启动脚本 - 桌面版单窗口应用（pywebview / Edge WebView2）
+
+双击即打开「文澜 AI」窗口：先显示启动画面（首启模型引导、出错提示），后端就绪后在同一窗口进入主界面，
+全程不需要浏览器。运行日志在单独的小窗口里，从启动画面底部或主界面侧栏「运行日志」打开。
+点 × 默认收进系统托盘（AI 任务继续跑），托盘右键「退出」才真正退出；托盘菜单里可改成关窗即退出。
+"""
 import sys
 import os
 import time
@@ -7,6 +12,7 @@ import asyncio
 import json
 import logging
 import traceback
+import webbrowser
 from pathlib import Path
 from collections import deque
 
@@ -32,11 +38,14 @@ for stream in (sys.stdout, sys.stderr):
         except Exception:
             pass
 
-_server_thread = None
-_server_started = threading.Event()
-_server_error = None
+from dataclasses import replace  # noqa: E402
 
-# 日志缓冲区（供启动面板显示）
+from desktop.shell import (  # noqa: E402 - 须在上面的路径 / 编码修复之后导入
+    APP_TITLE, LOGS_TITLE, MIN_SIZE, DesktopPrefs, close_prompt, default_window_state,
+    load_prefs, load_window_state, same_origin, save_prefs, save_window_state, work_area,
+)
+
+# 日志缓冲区（供启动画面 / 运行日志窗口显示）
 _log_buffer: deque = deque(maxlen=500)
 _log_seq = 0
 
@@ -44,15 +53,26 @@ _log_seq = 0
 _HOST = '127.0.0.1'
 _PORT = 8000
 _model_required = False        # True = 等待用户选择（下载/导入/跳过）
-_model_busy = ""               # 非空 = 正在下载/导入（面板显示忙碌文案）
+_model_busy = ""               # 非空 = 正在下载/导入（启动画面显示忙碌文案）
 _model_worker_running = False  # 防止重复起下载/导入线程
-_server_launched = False
 _launch_lock = threading.Lock()
+
+# ---- 桌面窗口状态 ----
+_server = None                 # desktop.server.BackendServer，模型引导结束后创建
+_startup_error = None          # 启动前置检查（数据库）失败的原因，显示在启动画面
+_main_window = None
+_logs_window = None
+_windows_lock = threading.Lock()
+_instance_mutex = None         # 单实例互斥量句柄，持有到进程退出
+_show_listener = None          # desktop.instance.ShowListener：第二个实例请求显示主窗口
+_tray = None                   # desktop.tray.Tray
+_prefs = DesktopPrefs()        # 点 × 进托盘等桌面偏好（data/desktop_settings.json）
 
 # 品牌图标（scripts/make_icon.py 由 frontend/public/logo.svg 生成）：
 # 打包后位于 exe 旁的 _internal/assets，开发环境位于 backend/assets
 _RESOURCE_DIR = (Path(sys.executable).parent / '_internal') if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent
 _ICON_PATH = _RESOURCE_DIR / 'assets' / 'app.ico'
+_WINDOW_BG = '#f3f5f3'
 
 
 def set_app_user_model_id():
@@ -95,18 +115,6 @@ def _panel_log(level, msg):
         "seq": _log_seq, "ts": time.time(), "level": level,
         "name": "launcher", "msg": msg,
     })
-
-
-def launch_server_once():
-    """幂等启动后端服务（模型引导的任一分支完成后调用）。"""
-    global _server_launched
-    with _launch_lock:
-        if _server_launched:
-            return
-        _server_launched = True
-    ok, err = start_server_thread(_HOST, _PORT)
-    if ok:
-        _panel_log("INFO", f"✅ 服务器已启动: http://{_HOST}:{_PORT}")
 
 
 def write_startup_error(exc):
@@ -182,64 +190,80 @@ def check_database_connection():
         return False, f"数据库连接失败：{e}"
 
 
-def run_server(host, port):
-    global _server_error
-    try:
-        import uvicorn
-        from app.main import app
-
-        # setup_logging() 会 clear 所有 handler，所以在 app 导入后重新挂载
-        panel_handler = PanelLogHandler()
-        panel_handler.setLevel(logging.DEBUG)
-        logging.getLogger().addHandler(panel_handler)
-
-        config = uvicorn.Config(app, host=host, port=port, log_level="info", access_log=False)
-        server = uvicorn.Server(config)
-        _server_started.set()
-        server.run()
-    except Exception as e:
-        _server_error = str(e)
-        _server_started.set()
+def _data_dir() -> Path:
+    """运行时可写目录下的 data（exe 旁 / backend 下，与 embedding 同一基准）。"""
+    from app.utils.runtime_paths import runtime_base_dir
+    return Path(runtime_base_dir()) / 'data'
 
 
-def start_server_thread(host='127.0.0.1', port=8000):
-    global _server_thread
-    _server_thread = threading.Thread(target=run_server, args=(host, port), daemon=True)
-    _server_thread.start()
-    _server_started.wait(timeout=30)
-    if _server_error:
-        return False, _server_error
-    time.sleep(1)
-    return True, None
+def _app_url():
+    return f"http://{_HOST}:{_PORT}"
 
 
-class PanelAPI:
-    """pywebview JavaScript 可调用的 API"""
+def _load_app():
+    from app.main import app
 
-    def get_logs(self, after_seq=0):
-        entries = [e for e in _log_buffer if e["seq"] > after_seq]
-        return json.dumps(entries[-100:], ensure_ascii=False)
+    # setup_logging() 会 clear 所有 handler，所以在 app 导入后重新挂载
+    panel_handler = PanelLogHandler()
+    panel_handler.setLevel(logging.DEBUG)
+    logging.getLogger().addHandler(panel_handler)
+    return app
 
-    def open_app(self):
-        import webbrowser
-        port = int(os.getenv('APP_PORT', '8000'))
-        webbrowser.open(f"http://127.0.0.1:{port}")
+
+def launch_server_once():
+    """幂等启动后端服务（模型引导的任一分支完成后调用）；就绪后启动画面会自己进入主界面。"""
+    global _server
+    from desktop.server import BackendServer
+
+    with _launch_lock:
+        if _server is not None:
+            return
+        _server = BackendServer(_load_app, _HOST, _PORT)
+        _server.start()
+    if _server.wait(600):
+        _panel_log("INFO", f"✅ 服务器已启动: {_server.url}")
+    elif _server.error:
+        _panel_log("ERROR", f"❌ 服务启动失败：{_server.error}")
+
+
+def _latest_hint():
+    """启动画面上的一行进度：最近一条 INFO 及以上的日志。"""
+    for entry in reversed(list(_log_buffer)):
+        if entry["level"] != "DEBUG":
+            return entry["msg"][:120]
+    return ""
+
+
+def _status():
+    from app import __version__
+
+    started = bool(_server and _server.ready)
+    return json.dumps({
+        "started": started,
+        "error": _startup_error or (_server.error if _server else None),
+        "url": _app_url(),
+        "log_count": len(_log_buffer),
+        # 首启模型引导状态
+        "model_required": _model_required,
+        "model_busy": _model_busy,
+        "hint": "" if started else _latest_hint(),
+        "version": __version__,
+    }, ensure_ascii=False)
+
+
+class MainAPI:
+    """主窗口（启动画面 → 主界面）可调用的 API；主界面只用到 open_logs（侧栏「运行日志」）。"""
 
     def get_status(self):
-        return json.dumps({
-            "started": _server_started.is_set(),
-            "error": _server_error,
-            "url": f"http://{_HOST}:{_PORT}",
-            "log_count": len(_log_buffer),
-            # 首启模型引导状态
-            "model_required": _model_required,
-            "model_busy": _model_busy,
-        }, ensure_ascii=False)
+        return _status()
+
+    def open_logs(self):
+        open_logs_window()
 
     # ---- 首启模型引导：三选一 ----
 
     def download_model(self):
-        """选项1：在线下载（多镜像依次尝试，约 470MB）。后台线程执行，不阻塞面板。"""
+        """选项1：在线下载（多镜像依次尝试，约 470MB）。后台线程执行，不阻塞界面。"""
         global _model_busy, _model_worker_running
         if not _model_required:
             return json.dumps({"ok": False})
@@ -276,8 +300,7 @@ class PanelAPI:
             return json.dumps({"ok": False})
 
         import webview
-        window = webview.windows[0]
-        result = window.create_file_dialog(
+        result = _main_window.create_file_dialog(
             webview.OPEN_DIALOG,
             allow_multiple=False,
             file_types=("模型压缩包 (*.zip)",),
@@ -328,343 +351,183 @@ class PanelAPI:
             _panel_log("INFO", f"💡 之后可在此界面重开应用前放入模型，或将模型放到 {EMBEDDING_PATH} 后重启")
         except Exception:
             pass
-        launch_server_once()
+        threading.Thread(target=launch_server_once, daemon=True).start()
         return json.dumps({"ok": True})
 
 
-# 面板样式与前端设计系统保持一致（frontend/src/globals.css、tailwind.config.js、BrandLogo.tsx）：
-# 浅色玻璃质感、品牌蓝 #007aff、全局零圆角、Inter/Segoe/苹方/雅黑字体栈、lucide 线性图标
-PANEL_HTML = """<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<title>文澜 AI - 启动控制台</title>
-<style>
-:root {
-  --brand:#007aff; --brand-600:#0070eb;
-  --surface:#f6f9fd; --border:#d9e4f3; --border-light:#e8eff8;
-  --content:#0b1a33; --content-2:#5f7090; --content-3:#93a4be;
-  --gold-50:#fff7e8; --gold-200:#ffd891; --gold-400:#dd9137; --gold-500:#bb7123;
-  --sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-  --mono: "Cascadia Code", "JetBrains Mono", Consolas, "Microsoft YaHei", monospace;
-}
-* { margin:0; padding:0; box-sizing:border-box; border-radius:0 !important; }
-html, body { height:100%; }
-body {
-  font-family: var(--sans); color: var(--content); background-color: var(--surface);
-  background-image:
-    radial-gradient(ellipse 55% 45% at 10% 5%, rgba(0,122,255,.12), transparent 70%),
-    radial-gradient(ellipse 50% 45% at 90% 95%, rgba(96,170,255,.14), transparent 70%),
-    linear-gradient(180deg, #f6f9fd 0%, #eaf1fb 100%);
-  display:flex; flex-direction:column; overflow:hidden; -webkit-font-smoothing:antialiased;
-}
-button, input, select { font:inherit; color:inherit; transition: color .2s ease, background-color .2s ease, border-color .2s ease, box-shadow .2s ease, transform .2s ease; }
-button { cursor:pointer; border:0; background:none; -webkit-tap-highlight-color:transparent; }
-::selection { background: rgba(0,122,255,.18); }
-::-webkit-scrollbar { width:8px; height:8px; }
-::-webkit-scrollbar-track { background:transparent; }
-::-webkit-scrollbar-thumb { background: rgba(95,112,144,.28); }
-::-webkit-scrollbar-thumb:hover { background: rgba(95,112,144,.45); }
-.i { width:16px; height:16px; flex-shrink:0; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
+class LogsAPI:
+    """运行日志窗口可调用的 API。"""
 
-/* 玻璃面板 / 卡片（对应 .hh-glass / .hh-panel） */
-.glass {
-  position:relative; border:1px solid rgba(255,255,255,.78);
-  background: linear-gradient(160deg, rgba(255,255,255,.74) 0%, rgba(255,255,255,.5) 100%);
-  -webkit-backdrop-filter: blur(24px) saturate(1.5); backdrop-filter: blur(24px) saturate(1.5);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.95), 0 0 0 1px rgba(15,43,96,.05), 0 30px 80px -36px rgba(15,43,96,.35);
-}
-.panel {
-  position:relative; border:1px solid rgba(255,255,255,.85);
-  background: linear-gradient(160deg, rgba(255,255,255,.9) 0%, rgba(255,255,255,.72) 100%);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.95), 0 0 0 1px rgba(15,43,96,.04), 0 18px 40px -28px rgba(15,43,96,.28);
-}
+    def get_logs(self, after_seq=0):
+        entries = [e for e in list(_log_buffer) if e["seq"] > after_seq]
+        return json.dumps(entries[-100:], ensure_ascii=False)
 
-/* 顶栏 */
-.header { height:64px; flex-shrink:0; display:flex; align-items:center; gap:14px; padding:0 20px; border-width:0 0 1px 0; }
-.logo {
-  position:relative; width:40px; height:40px; flex-shrink:0; display:inline-flex; align-items:center; justify-content:center; overflow:hidden; color:#fff;
-  background: linear-gradient(to bottom right, #007aff, #3a95ff, #8ec3ff); box-shadow: 0 12px 28px -12px rgba(0,122,255,.6);
-}
-.logo::before { content:""; position:absolute; inset:0; background: radial-gradient(circle at top left, rgba(255,255,255,.34), transparent 34%); }
-.logo svg { position:relative; width:66%; height:66%; }
-.brand { flex:1; min-width:0; }
-.eyebrow { display:block; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.22em; color:var(--brand); line-height:1; }
-.title { margin-top:5px; font-size:16px; font-weight:600; letter-spacing:-.01em; line-height:1.2; color:var(--content); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    def get_status(self):
+        return _status()
 
-/* 按钮（对应 .hh-btn-primary / -secondary / -ghost） */
-.btn { display:inline-flex; align-items:center; justify-content:center; gap:6px; height:36px; padding:0 14px; font-size:13px; font-weight:500; white-space:nowrap; }
-.btn:disabled { cursor:not-allowed; opacity:.6; }
-.btn .i { width:15px; height:15px; }
-.btn-primary { background:var(--brand); color:#fff; box-shadow: 0 12px 28px -12px rgba(0,122,255,.55); }
-.btn-primary:hover { background:var(--brand-600); }
-.btn-primary:active { transform: scale(.98); }
-.btn-secondary { border:1px solid var(--border); background: rgba(255,255,255,.7); color:var(--content); box-shadow: 0 1px 2px rgba(15,43,96,.04); }
-.btn-secondary:hover { border-color: rgba(0,122,255,.4); background:#fff; }
-.btn-ghost { padding:0 10px; color:var(--content-2); }
-.btn-ghost:hover { background: rgba(0,122,255,.05); color:var(--content); }
-.header .btn-primary { height:40px; padding:0 18px; font-size:14px; }
+    def open_in_browser(self):
+        """备用通道：用系统浏览器打开（浏览器里需要另外登录）。"""
+        if _server and _server.ready:
+            webbrowser.open(_app_url())
 
-/* 内容区：工具栏 + 日志 合为一张卡片 */
-.main { flex:1; min-height:0; display:flex; flex-direction:column; padding:12px 12px 0; }
-.card { flex:1; min-height:0; display:flex; flex-direction:column; }
-.toolbar { display:flex; align-items:center; gap:8px; padding:10px 12px; border-bottom:1px solid var(--border-light); flex-shrink:0; }
-.field { position:relative; flex:1; min-width:140px; max-width:280px; }
-.field .i, .select .i { position:absolute; top:50%; transform:translateY(-50%); color:var(--content-3); pointer-events:none; }
-.field .i { left:10px; }
-.select { position:relative; }
-.select .i { right:9px; width:14px; height:14px; }
-.field input, .select select {
-  height:36px; font-size:13px; border:1px solid var(--border); background: rgba(255,255,255,.65); color:var(--content);
-  box-shadow: 0 1px 2px rgba(15,43,96,.04); outline:none;
-}
-.field input { width:100%; padding:0 10px 0 32px; }
-.field input::placeholder { color:var(--content-3); }
-.select select { padding:0 30px 0 10px; appearance:none; -webkit-appearance:none; cursor:pointer; }
-.field input:focus, .select select:focus { border-color:var(--brand); background: rgba(255,255,255,.95); box-shadow: 0 0 0 4px rgba(0,122,255,.16); }
-.count { margin-left:auto; font-size:12px; color:var(--content-3); white-space:nowrap; font-variant-numeric: tabular-nums; }
-.count b { font-weight:500; color:var(--content-2); }
 
-/* 首启模型引导条（gold 警示色板） */
-.model-bar { display:none; flex-shrink:0; align-items:center; gap:8px; flex-wrap:wrap; padding:10px 12px; border-bottom:1px solid var(--gold-200); background:var(--gold-50); color:var(--gold-500); font-size:13px; }
-.model-bar.show { display:flex; }
-.model-bar .lead { display:inline-flex; align-items:center; gap:8px; margin-right:auto; padding-right:8px; }
-.model-bar .lead .i { color:var(--gold-400); }
-.model-bar .btn { height:32px; font-size:12.5px; padding:0 12px; }
-.model-bar .btn-ghost { color:var(--gold-500); }
-.model-bar .btn-ghost:hover { background: rgba(187,113,35,.08); color:var(--gold-500); }
+_main_api = MainAPI()
 
-/* 日志列表 */
-#logs { flex:1; min-height:0; overflow-y:auto; font-family:var(--mono); font-size:12px; line-height:1.75; }
-.log-line { display:flex; align-items:baseline; gap:10px; padding:1px 12px; }
-.log-line:first-child { margin-top:6px; }
-.log-line:last-child { margin-bottom:6px; }
-.log-line:hover { background: rgba(0,122,255,.04); }
-.log-line.is-WARNING { background: rgba(217,119,6,.04); }
-.log-line.is-ERROR, .log-line.is-CRITICAL { background: rgba(220,38,38,.04); }
-.ts { flex-shrink:0; color:var(--content-3); user-select:none; font-variant-numeric: tabular-nums; }
-.lv { flex-shrink:0; align-self:center; width:62px; text-align:center; font-family:var(--sans); font-size:10px; font-weight:600; letter-spacing:.06em; line-height:16px; user-select:none; }
-.lv-DEBUG { color:var(--content-3); background: rgba(147,164,190,.12); }
-.lv-INFO { color:#16a34a; background: rgba(22,163,74,.08); }
-.lv-WARNING { color:#d97706; background: rgba(217,119,6,.10); }
-.lv-ERROR { color:#dc2626; background: rgba(220,38,38,.08); }
-.lv-CRITICAL { color:#7c3aed; background: rgba(124,58,237,.08); }
-.mod { flex-shrink:0; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--content-2); user-select:none; }
-.msg { color:var(--content); word-break:break-all; }
-.is-DEBUG .msg { color:var(--content-2); }
-.empty { height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; font-family:var(--sans); font-size:13px; color:var(--content-3); }
-.empty .i { width:22px; height:22px; color:var(--brand); }
-.spin { animation: spin 1s linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
 
-/* 底部状态栏 */
-.status { height:40px; flex-shrink:0; display:flex; align-items:center; gap:10px; margin-top:12px; padding:0 16px; font-size:12px; color:var(--content-2); border-width:1px 0 0 0; }
-.dot { width:8px; height:8px; flex-shrink:0; }
-.dot-ok { background:#16a34a; box-shadow: 0 0 0 3px rgba(22,163,74,.15); }
-.dot-err { background:#dc2626; box-shadow: 0 0 0 3px rgba(220,38,38,.15); }
-.dot-loading { background:var(--gold-400); box-shadow: 0 0 0 3px rgba(221,145,55,.18); animation: blink 1.2s ease-in-out infinite; }
-@keyframes blink { 50% { opacity:.35; } }
-.status .url { margin-left:auto; font-family:var(--mono); font-size:11.5px; color:var(--content-3); }
-</style>
-</head>
-<body>
-<svg style="display:none" xmlns="http://www.w3.org/2000/svg">
-  <symbol id="ic-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
-  <symbol id="ic-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
-  <symbol id="ic-pause" viewBox="0 0 24 24"><rect x="14" y="4" width="4" height="16"/><rect x="6" y="4" width="4" height="16"/></symbol>
-  <symbol id="ic-play" viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3"/></symbol>
-  <symbol id="ic-trash" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></symbol>
-  <symbol id="ic-arrow" viewBox="0 0 24 24"><path d="M7 7h10v10"/><path d="M7 17 17 7"/></symbol>
-  <symbol id="ic-loader" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></symbol>
-  <symbol id="ic-alert" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></symbol>
-  <symbol id="ic-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></symbol>
-  <symbol id="ic-folder" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></symbol>
-  <symbol id="ic-skip" viewBox="0 0 24 24"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" x2="19" y1="5" y2="19"/></symbol>
-  <symbol id="ic-back" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></symbol>
-  <symbol id="ic-inbox" viewBox="0 0 24 24"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></symbol>
-</svg>
+def open_logs_window():
+    """运行日志窗口：已打开就切到前台，否则新建（关掉即销毁，重开时从缓冲区回放）。"""
+    global _logs_window
+    import webview
+    from desktop import instance
+    from desktop.pages import LOGS_HTML
 
-<header class="header glass">
-  <span class="logo" aria-hidden="true">
-    <svg viewBox="0 0 256 256" fill="none">
-      <defs>
-        <mask id="logo-not-stroke" maskUnits="userSpaceOnUse" x="0" y="0" width="256" height="256">
-          <rect width="256" height="256" fill="#fff"/>
-          <path d="M74 156C100 132 118 158 136 136C154 114 176 90 212 60" stroke="#000" stroke-width="16" stroke-linecap="round"/>
-        </mask>
-        <mask id="logo-not-pages" maskUnits="userSpaceOnUse" x="0" y="0" width="256" height="256">
-          <rect width="256" height="256" fill="#fff"/>
-          <path d="M48 84C76 72 104 76 122 94V196C104 178 76 174 48 186ZM208 84C180 72 152 76 134 94V196C152 178 180 174 208 186Z" fill="#000"/>
-        </mask>
-      </defs>
-      <path d="M48 84C76 72 104 76 122 94V196C104 178 76 174 48 186ZM208 84C180 72 152 76 134 94V196C152 178 180 174 208 186Z" fill="currentColor" mask="url(#logo-not-stroke)"/>
-      <path d="M74 156C100 132 118 158 136 136C154 114 176 90 212 60" stroke="currentColor" stroke-width="16" stroke-linecap="round" mask="url(#logo-not-pages)"/>
-    </svg>
-  </span>
-  <div class="brand">
-    <span class="eyebrow">启动控制台</span>
-    <h1 class="title">文澜 AI</h1>
-  </div>
-  <button class="btn btn-primary" onclick="openApp()">进入应用<svg class="i"><use href="#ic-arrow"/></svg></button>
-</header>
+    with _windows_lock:
+        if _logs_window is not None and _logs_window in webview.windows:
+            instance.bring_to_front(LOGS_TITLE)
+            return
+        _logs_window = webview.create_window(
+            LOGS_TITLE, html=LOGS_HTML, js_api=LogsAPI(),
+            width=900, height=560, min_size=(640, 380), text_select=True, background_color=_WINDOW_BG,
+        )
+        _logs_window.events.shown += apply_window_icon
 
-<main class="main">
-  <section class="card panel">
-    <div class="toolbar">
-      <label class="field">
-        <svg class="i"><use href="#ic-search"/></svg>
-        <input id="search" placeholder="筛选运行日志…" oninput="render()" spellcheck="false">
-      </label>
-      <span class="select">
-        <select id="levelFilter" onchange="render()">
-          <option value="">全部级别</option>
-          <option value="DEBUG">DEBUG</option>
-          <option value="INFO">INFO</option>
-          <option value="WARNING">WARNING</option>
-          <option value="ERROR">ERROR</option>
-        </select>
-        <svg class="i"><use href="#ic-chevron"/></svg>
-      </span>
-      <button class="btn btn-secondary" id="pauseBtn" onclick="togglePause()"><svg class="i"><use href="#ic-pause"/></svg><span>暂停刷新</span></button>
-      <button class="btn btn-secondary" onclick="allLogs=[];render()"><svg class="i"><use href="#ic-trash"/></svg>清空列表</button>
-      <span class="count" id="logCount">0 条</span>
-    </div>
 
-    <div class="model-bar" id="modelBar">
-      <div id="modelChoice" style="display:contents">
-        <span class="lead"><svg class="i"><use href="#ic-alert"/></svg>首次运行：缺少 AI 记忆模型（约 470MB），请选择获取方式</span>
-        <button class="btn btn-primary" onclick="dlModel()"><svg class="i"><use href="#ic-download"/></svg>在线下载</button>
-        <button class="btn btn-secondary" onclick="importModel()"><svg class="i"><use href="#ic-folder"/></svg>导入本地模型包 (zip)</button>
-        <button class="btn btn-ghost" onclick="skipModel()"><svg class="i"><use href="#ic-skip"/></svg>跳过（无记忆模式）</button>
-      </div>
-      <div id="modelBusy" style="display:none">
-        <span class="lead"><svg class="i spin"><use href="#ic-loader"/></svg><span id="modelBusyText">处理中…</span>（进度见下方日志）</span>
-        <button class="btn btn-ghost" onclick="cancelModelWait()"><svg class="i"><use href="#ic-back"/></svg>返回选择</button>
-      </div>
-    </div>
+def open_app_window(url):
+    """同源的新窗口请求（target=_blank / window.open）：在应用里另开一个窗口，共享登录状态。"""
+    import webview
 
-    <div id="logs"><div class="empty"><svg class="i spin"><use href="#ic-loader"/></svg>正在初始化，请稍候…</div></div>
-  </section>
-</main>
+    state = default_window_state(work_area())
+    window = webview.create_window(
+        APP_TITLE, url=url, js_api=_main_api,
+        width=state.width, height=state.height, maximized=state.maximized, min_size=MIN_SIZE,
+        text_select=True, zoomable=True, background_color=_WINDOW_BG,
+    )
+    window.events.shown += apply_window_icon
 
-<footer class="status glass">
-  <span class="dot dot-loading" id="statusDot"></span>
-  <span id="statusText">正在启动服务…</span>
-  <span class="url" id="statusUrl"></span>
-</footer>
 
-<script>
-let allLogs = [], lastSeq = 0, paused = false, autoScroll = true;
-const logsEl = document.getElementById('logs');
-const $ = id => document.getElementById(id);
-const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-const icon = (name, cls) => '<svg class="i' + (cls ? ' ' + cls : '') + '"><use href="#' + name + '"/></svg>';
+def _close_prompt():
+    """关主窗口前要不要确认：运行中的 AI 任务 + 各应用窗口里未保存的修改。"""
+    import webview
+    from desktop.webview2 import page_has_unsaved
 
-function formatTime(ts) {
-  const d = new Date(ts * 1000);
-  return d.toTimeString().slice(0,8) + '.' + String(d.getMilliseconds()).padStart(3,'0');
-}
+    running = 0
+    if _server is not None and _server.ready:
+        try:
+            from app.services.ai_jobs import ai_jobs
+            running = ai_jobs.running_count()
+        except Exception as e:
+            _panel_log("WARNING", f"统计运行中的 AI 任务失败: {e}")
+    unsaved = any(page_has_unsaved(w) for w in list(webview.windows) if w is not _logs_window)
+    return close_prompt(running, unsaved)
 
-function render() {
-  const q = $('search').value.toLowerCase();
-  const lv = $('levelFilter').value;
-  const filtered = allLogs.filter(e => {
-    if (lv && e.level !== lv) return false;
-    if (q && !e.msg.toLowerCase().includes(q) && !e.name.toLowerCase().includes(q)) return false;
-    return true;
-  });
-  $('logCount').innerHTML = '<b>' + filtered.length + '</b> / ' + allLogs.length + ' 条';
-  if (filtered.length === 0) {
-    logsEl.innerHTML = allLogs.length === 0
-      ? '<div class="empty">' + icon('ic-loader', 'spin') + '等待日志输出…</div>'
-      : '<div class="empty">' + icon('ic-inbox') + '没有匹配的日志记录</div>';
-    return;
-  }
-  logsEl.innerHTML = filtered.slice(-500).map(e =>
-    '<div class="log-line is-' + e.level + '">' +
-    '<span class="ts">' + formatTime(e.ts) + '</span>' +
-    '<span class="lv lv-' + e.level + '">' + e.level + '</span>' +
-    '<span class="mod" title="' + esc(e.name) + '">' + esc(e.name) + '</span>' +
-    '<span class="msg">' + esc(e.msg) + '</span>' +
-    '</div>'
-  ).join('');
-  if (autoScroll) logsEl.scrollTop = logsEl.scrollHeight;
-}
 
-logsEl.addEventListener('scroll', () => {
-  autoScroll = logsEl.scrollHeight - logsEl.scrollTop - logsEl.clientHeight < 40;
-});
+def show_main_window():
+    from desktop.webview2 import show_window
+    show_window(_main_window)
 
-function togglePause() {
-  paused = !paused;
-  $('pauseBtn').innerHTML = paused
-    ? icon('ic-play') + '<span>继续刷新</span>'
-    : icon('ic-pause') + '<span>暂停刷新</span>';
-}
 
-async function poll() {
-  if (paused) return;
-  try {
-    const raw = await pywebview.api.get_logs(lastSeq);
-    const entries = JSON.parse(raw);
-    if (entries.length > 0) {
-      lastSeq = entries[entries.length - 1].seq;
-      allLogs.push(...entries);
-      if (allLogs.length > 2000) allLogs = allLogs.slice(-2000);
-      render();
-    }
-  } catch(e) {}
+def _update_prefs(**changes):
+    global _prefs
+    _prefs = replace(_prefs, **changes)
+    try:
+        save_prefs(_data_dir() / 'desktop_settings.json', _prefs)
+    except OSError as e:
+        _panel_log("WARNING", f"桌面设置保存失败: {e}")
 
-  try {
-    const raw = await pywebview.api.get_status();
-    const st = JSON.parse(raw);
-    const dot = $('statusDot'), txt = $('statusText');
-    if (st.error) {
-      dot.className = 'dot dot-err';
-      txt.textContent = '服务启动失败：' + st.error;
-    } else if (st.started) {
-      dot.className = 'dot dot-ok';
-      txt.textContent = '服务运行中';
-    } else if (st.model_required || st.model_busy) {
-      dot.className = 'dot dot-loading';
-      txt.textContent = st.model_busy ? st.model_busy : '等待选择 AI 记忆模型获取方式…';
-    }
-    $('statusUrl').textContent = st.started && st.url ? st.url : '';
-    // 首启模型引导条显隐
-    const bar = $('modelBar'), choice = $('modelChoice'), busy = $('modelBusy');
-    bar.classList.toggle('show', !!(st.model_busy || st.model_required));
-    choice.style.display = st.model_busy ? 'none' : 'contents';
-    busy.style.display = st.model_busy ? 'contents' : 'none';
-    if (st.model_busy) $('modelBusyText').textContent = st.model_busy;
-  } catch(e) {}
-}
 
-async function openApp() {
-  try { await pywebview.api.open_app(); } catch(e) {}
-}
+def _set_close_to_tray(enabled):
+    _update_prefs(close_to_tray=enabled)
+    _panel_log("INFO", f"关闭窗口时：{'最小化到托盘' if enabled else '退出程序'}")
 
-async function dlModel() {
-  try { await pywebview.api.download_model(); } catch(e) {}
-}
-async function importModel() {
-  try { await pywebview.api.import_model_zip(); } catch(e) {}
-}
-async function skipModel() {
-  try { await pywebview.api.skip_model(); } catch(e) {}
-}
-async function cancelModelWait() {
-  try { await pywebview.api.cancel_model_wait(); } catch(e) {}
-}
 
-setInterval(poll, 1000);
-setTimeout(poll, 500);
-</script>
-</body>
-</html>"""
+def _on_hidden_to_tray():
+    """点 × 收进托盘：第一次弹个通知，说明程序还在运行、怎么找回和退出。"""
+    if not _prefs.tray_hint_shown:
+        _tray.notify("文澜 AI 仍在运行", "已收到托盘，AI 任务会继续。单击托盘图标重新打开，右键托盘图标可以退出。")
+        _update_prefs(tray_hint_shown=True)
+
+
+def _on_main_close(state):
+    """主窗口真正关闭时（UI 线程）：移除托盘图标、不再认领唤起请求、记住窗口尺寸 / 最大化。"""
+    if _tray is not None:
+        _tray.dispose()
+    if _show_listener is not None:
+        threading.Thread(target=_show_listener.close, daemon=True).start()
+    if state is None:
+        return
+    try:
+        save_window_state(_data_dir() / 'desktop_window.json', state)
+    except OSError as e:
+        _panel_log("WARNING", f"窗口尺寸保存失败: {e}")
+
+
+def _close_other_windows():
+    """主窗口关了，日志窗口和应用内新开的窗口一起关，进程才能退出。"""
+    import webview
+
+    for window in list(webview.windows):
+        if window is not _main_window:
+            try:
+                window.destroy()
+            except Exception:
+                pass
+
+
+def _bootstrap():
+    """GUI 起来后的后台线程：缺模型就等用户在启动画面三选一，否则直接启动后端。"""
+    global _model_required
+    if _startup_error:
+        return
+    # 首启引导：embedding 模型不再内置于安装包（体积 -470MB）。
+    # 缺失时不自动下载——启动画面给出三选一（在线下载 / 导入本地 zip / 跳过降级），
+    # 由用户决定后再启动服务
+    try:
+        from app.services.embedding_bootstrap import model_present
+        if model_present():
+            _panel_log("INFO", "✅ AI 记忆模型已就绪")
+        else:
+            _model_required = True
+            _panel_log("WARNING", "首次运行：缺少 AI 记忆模型，请在启动画面选择获取方式（在线下载 / 导入本地模型包 / 跳过）")
+            return  # 等用户选择，选择后由 MainAPI 调 launch_server_once()
+    except Exception as e:
+        _panel_log("ERROR", f"模型检查异常（将降级运行）: {e}")
+
+    launch_server_once()
+
+
+def _show_signal_name():
+    return f"Local\\WenlanAI.Desktop.Show.{_PORT}"
+
+
+def _ensure_single_instance():
+    """已经开着就让那个实例把主窗口叫出来（可能藏在托盘里）并返回 False。
+    上个实例可能正在退出（窗口已关、后端还在收尾），等它一会儿。"""
+    global _instance_mutex
+    from desktop import instance
+    from desktop.webview2 import message_box
+
+    name = f"Local\\WenlanAI.Desktop.{_PORT}"
+    _instance_mutex = instance.acquire(name)
+    if _instance_mutex is not None:
+        return True
+    if instance.request_show(_show_signal_name()) or instance.bring_to_front(APP_TITLE):
+        return False
+    _instance_mutex = instance.acquire(name, wait=15)
+    if _instance_mutex is not None:
+        return True
+    message_box("文澜 AI 已在运行，但没有找到它的窗口。\n请稍后再试，或在任务管理器里结束 WenlanAI 进程后重新打开。")
+    return False
 
 
 def main():
     import webview
+    from desktop import instance
+    from desktop.pages import SPLASH_HTML
+    from desktop.tray import Tray
+    from desktop.webview2 import (
+        IDYES, MB_YESNO_WARNING, WEBVIEW2_DOWNLOAD_URL,
+        configure, install_close_guard, message_box, webview2_available,
+    )
 
     set_app_user_model_id()
 
@@ -674,7 +537,24 @@ def main():
     except Exception as e:
         print(f"[WARN] 配置加载失败: {e}")
 
-    # 安装日志捕获器（启动阶段用，app 导入后会在 run_server 中重新挂载）
+    global _HOST, _PORT, _main_window, _startup_error, _prefs, _tray, _show_listener
+    _PORT = int(os.getenv('APP_PORT', '8000'))
+    _HOST = '127.0.0.1'
+
+    if not _ensure_single_instance():
+        return
+
+    if not webview2_available():
+        answer = message_box(
+            "没有检测到 Microsoft Edge WebView2 运行时（Windows 10/11 通常自带），文澜 AI 需要它来显示界面。\n\n"
+            "是否现在打开下载页面？安装「常青引导程序」后重新打开文澜 AI 即可。",
+            flags=MB_YESNO_WARNING,
+        )
+        if answer == IDYES:
+            webbrowser.open(WEBVIEW2_DOWNLOAD_URL)
+        return
+
+    # 安装日志捕获器（启动阶段用，app 导入后会在 _load_app 中重新挂载）
     early_handler = PanelLogHandler()
     early_handler.setLevel(logging.DEBUG)
     logging.getLogger().addHandler(early_handler)
@@ -682,49 +562,38 @@ def main():
     # 检查数据库
     db_ok, db_error = check_database_connection()
     if not db_ok:
-        _log_buffer.append({"seq": 1, "ts": time.time(), "level": "ERROR", "name": "launcher", "msg": db_error})
+        _startup_error = db_error
+        _panel_log("ERROR", db_error)
 
-    global _HOST, _PORT
-    _PORT = int(os.getenv('APP_PORT', '8000'))
-    _HOST = '127.0.0.1'
+    configure(lambda url: same_origin(url, _app_url()), open_app_window)
 
-    # 创建控制面板窗口
-    api = PanelAPI()
-    panel = webview.create_window(
-        title='文澜 AI - 启动控制台',
-        html=PANEL_HTML,
-        width=900,
-        height=550,
-        min_size=(700, 400),
-        resizable=True,
-        background_color='#f6f9fd',
-        js_api=api,
+    data_dir = _data_dir()
+    _prefs = load_prefs(data_dir / 'desktop_settings.json')
+    state = load_window_state(data_dir / 'desktop_window.json', work_area())
+    _main_window = webview.create_window(
+        APP_TITLE, html=SPLASH_HTML, js_api=_main_api,
+        width=state.width, height=state.height, maximized=state.maximized, min_size=MIN_SIZE,
+        text_select=True, zoomable=True, background_color=_WINDOW_BG,
     )
+    _main_window.events.shown += apply_window_icon
+    _main_window.events.closed += _close_other_windows
+    request_quit = install_close_guard(
+        _main_window, (state.width, state.height), _close_prompt, _on_main_close,
+        close_to_tray=lambda: _prefs.close_to_tray, on_hide=_on_hidden_to_tray,
+    )
+    _tray = Tray(
+        _ICON_PATH, on_show=show_main_window, on_logs=open_logs_window, on_quit=request_quit,
+        close_to_tray=_prefs.close_to_tray, on_close_to_tray_changed=_set_close_to_tray,
+    )
+    _tray.attach(_main_window)
+    _show_listener = instance.ShowListener(_show_signal_name(), show_main_window)
 
-    def on_loaded():
-        global _model_required
-        if not db_ok:
-            return
-        # 首启引导：embedding 模型不再内置于安装包（体积 -470MB）。
-        # 缺失时不自动下载——面板给出三选一（在线下载 / 导入本地 zip / 跳过降级），
-        # 由用户决定后再启动服务
-        try:
-            from app.services.embedding_bootstrap import model_present
-            if model_present():
-                _panel_log("INFO", "✅ AI 记忆模型已就绪")
-            else:
-                _model_required = True
-                _panel_log("WARNING", "首次运行：缺少 AI 记忆模型，请在上方选择获取方式（在线下载 / 导入本地模型包 / 跳过）")
-                return  # 等用户选择，选择后由 PanelAPI 调 launch_server_once()
-        except Exception as e:
-            _panel_log("ERROR", f"模型检查异常（将降级运行）: {e}")
+    # 独立的 WebView2 用户数据目录：登录状态、界面偏好跨次启动保留
+    webview.start(_bootstrap, private_mode=False, storage_path=str(data_dir / 'webview'))
 
-        launch_server_once()
-
-    panel.events.shown += apply_window_icon
-    panel.events.loaded += on_loaded
-
-    webview.start(debug=False, private_mode=False)
+    # 窗口都关了：请求后端退出（停掉 AI 任务、关闭数据库），最多等 15 秒
+    if _server is not None:
+        _server.stop(15)
 
 
 if __name__ == '__main__':
@@ -733,3 +602,9 @@ if __name__ == '__main__':
     except Exception as e:
         write_startup_error(e)
         raise
+    # 后端已优雅停止、窗口尺寸已保存。正常退出时 pythonnet 还要卸载 .NET 运行时（实测约 10 秒），
+    # 这段时间进程仍在、重新打开会被单实例挡住干等；日志落盘后直接结束进程
+    logging.shutdown()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)

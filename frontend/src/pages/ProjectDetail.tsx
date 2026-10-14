@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react'
+import { useCallback, useEffect, useState, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { useParams, useNavigate, useLocation, Outlet, NavLink, Link } from 'react-router-dom'
 import {
@@ -20,7 +20,10 @@ import {
   Library,
   Rocket,
   ChevronRight,
+  Map as MapIcon,
+  Sparkles,
 } from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 import { useStore } from '@/store/index'
@@ -29,30 +32,54 @@ import { useCharacterSync, useOutlineSync, useChapterSync } from '@/store/hooks'
 import { PageLoading } from '@/components/ui/PageLoading'
 import { AIJobTray } from '@/components/ai-job/AIJobTray'
 import { ProjectModelPicker } from '@/components/ai-model/ProjectModelPicker'
+import { GlobalAssistantHost } from '@/components/assistant/GlobalAssistantHost'
+import { useAssistantDataChange } from '@/hooks/useAssistantPage'
+import { useAssistantStore, type AssistantDataChange } from '@/store/assistantStore'
 import { setActiveProjectId } from '@/utils/activeProject'
 
-const NAV_ITEMS = [
-  { label: '世界设定', icon: Globe, path: 'world-setting' },
-  { label: '世界规则', icon: Shield, path: 'world-rules' },
-  { label: '角色与组织', icon: Users, path: 'characters' },
-  { label: '关系管理', icon: GitBranch, path: 'relationships' },
-  { label: '故事大纲', icon: FileText, path: 'outline' },
-  { label: '桥段规划', icon: Rocket, path: 'plot-bridges' },
-  { label: '剧情分析', icon: BookOpen, path: 'chapter-analysis' },
-  { label: '写作风格', icon: Palette, path: 'writing-styles' },
-  { label: '仿写参考包', icon: Library, path: 'reference-packs' },
-  { label: '记忆系统', icon: Brain, path: 'memories' },
-] as const
+interface NavItem {
+  label: string
+  icon: LucideIcon
+  path: string
+}
+
+const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
+  {
+    label: '设定',
+    items: [
+      { label: '世界设定', icon: Globe, path: 'world-setting' },
+      { label: '世界规则', icon: Shield, path: 'world-rules' },
+      { label: '世界地图', icon: MapIcon, path: 'world-map' },
+      { label: '角色与组织', icon: Users, path: 'characters' },
+      { label: '关系管理', icon: GitBranch, path: 'relationships' },
+    ],
+  },
+  {
+    label: '规划',
+    items: [
+      { label: '故事大纲', icon: FileText, path: 'outline' },
+      { label: '桥段规划', icon: Rocket, path: 'plot-bridges' },
+    ],
+  },
+  {
+    label: '写作',
+    items: [
+      { label: '章节写作', icon: BookOpen, path: 'chapter-analysis' },
+      { label: '写作风格', icon: Palette, path: 'writing-styles' },
+      { label: '仿写参考包', icon: Library, path: 'reference-packs' },
+      { label: '记忆系统', icon: Brain, path: 'memories' },
+    ],
+  },
+]
+
+const NAV_ITEMS: NavItem[] = NAV_GROUPS.flatMap((group) => group.items)
 
 const PROJECT_STATUS_META = {
-  planning: { label: '规划中', className: 'bg-surface-hover text-content-secondary' },
-  writing: { label: '创作中', className: 'bg-emerald-50 text-emerald-600' },
-  revising: { label: '修改中', className: 'bg-amber-50 text-amber-600' },
-  completed: { label: '已完成', className: 'bg-violet-50 text-violet-600' },
+  planning: { label: '规划中', className: 'lj-badge lj-badge--muted' },
+  writing: { label: '创作中', className: 'lj-badge lj-badge--ok' },
+  revising: { label: '修改中', className: 'lj-badge lj-badge--draft' },
+  completed: { label: '已完成', className: 'lj-badge lj-badge--candidate' },
 } as const
-
-const SIDEBAR_ITEM_CLASS =
-  'group relative flex items-center gap-3 px-3 py-2.5 text-sm text-content-secondary transition-all hover:bg-white/70 hover:text-content'
 
 function getCoverLetter(title: string) {
   return Array.from(title.trim()).find((char) => /[A-Za-z0-9\u4e00-\u9fa5]/.test(char)) ?? '书'
@@ -143,20 +170,44 @@ export default function ProjectDetail() {
 
   const formatCount = (n: number) => (n >= 10000 ? `${(n / 10000).toFixed(1)}万` : String(n))
 
-  const currentSection = useMemo(() => {
-    return NAV_ITEMS.find((item) => location.pathname.includes(item.path))?.label ?? '创作总览'
-  }, [location.pathname])
+  const currentNav = useMemo(() => NAV_ITEMS.find((item) => location.pathname.includes(item.path)), [location.pathname])
+  const currentSection = currentNav?.label ?? '创作总览'
+
+  // 全局智能助笔：登记作者所在页面（具体页面再补充正在看的章节 / 选中的正文）、Alt+A 开关、应用修改后刷新共享数据
+  const assistantOpen = useAssistantStore((s) => s.open)
+  const toggleAssistant = useAssistantStore((s) => s.toggle)
+  const setAssistantRoute = useAssistantStore((s) => s.setRoute)
+  useEffect(() => {
+    setAssistantRoute(currentNav?.path ?? '', currentSection)
+  }, [currentNav, currentSection, setAssistantRoute])
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === 'KeyA') {
+        e.preventDefault()
+        toggleAssistant()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [toggleAssistant])
+  const onAssistantData = useCallback((change: AssistantDataChange) => {
+    if (!projectId) return
+    if (change.entity === 'project') void projectApi.getProject(projectId).then(setCurrentProject).catch(() => {})
+    if (change.entity === 'character' || change.entity === 'organization') void refreshCharacters(projectId)
+    if (change.entity === 'story_outline') void refreshOutlines(projectId)
+  }, [projectId, refreshCharacters, refreshOutlines, setCurrentProject])
+  useAssistantDataChange(onAssistantData)
 
   const projectStatus = currentProject ? PROJECT_STATUS_META[currentProject.status] : PROJECT_STATUS_META.planning
 
   if (loading && !currentProject) return <PageLoading />
 
   const sidebarContent = (
-    <div className="flex h-full flex-col">
-      <div className="shrink-0 border-b border-surface-border/80 p-2.5">
+    <div className="lj-rail">
+      <div className="shrink-0 border-b border-sidebar-border p-2">
         <button
           onClick={() => navigate('/')}
-          className={cn(SIDEBAR_ITEM_CLASS, 'py-2 text-xs', collapsed && 'justify-center px-0')}
+          className={cn('lj-rail-item min-h-[34px] text-xs', collapsed && 'justify-center px-0')}
           title="返回书架"
         >
           <ArrowLeft className="h-4 w-4 shrink-0" />
@@ -164,57 +215,49 @@ export default function ProjectDetail() {
         </button>
 
         {currentProject && (
-          <div className={cn('mt-1 flex items-center gap-3 px-3 py-2', collapsed && 'justify-center px-0')}>
+          <div className={cn('mt-1 flex items-center gap-2.5 px-2 py-2', collapsed && 'justify-center px-0')}>
             <span
-              className="flex h-10 w-10 shrink-0 items-center justify-center bg-gradient-to-br from-[#007aff] to-[#63b3ff] text-base font-semibold text-white shadow-[0_12px_28px_-12px_rgba(0,122,255,0.6)]"
+              className="relative flex h-10 w-8 shrink-0 items-center justify-center overflow-hidden rounded-sm bg-brand-600 font-serif text-base font-semibold text-white"
               title={collapsed ? currentProject.title : undefined}
             >
               {getCoverLetter(currentProject.title)}
+              <span className="absolute bottom-0 left-0 h-0.5 w-full bg-signal" />
             </span>
             {!collapsed && (
               <div className="min-w-0">
-                <p className="truncate text-sm font-semibold tracking-tight text-content">{currentProject.title}</p>
-                <span className={cn('mt-1 inline-flex px-1.5 py-0.5 text-[11px] font-medium', projectStatus.className)}>
-                  {projectStatus.label}
-                </span>
+                <p className="truncate font-serif text-sm font-semibold text-sidebar-text-active">{currentProject.title}</p>
+                <span className="mt-1 inline-flex text-[11px] text-sidebar-text/80">{projectStatus.label}</span>
               </div>
             )}
           </div>
         )}
       </div>
 
-      <nav className="flex-1 space-y-1 overflow-y-auto px-2.5 py-4">
-        {!collapsed && (
-          <p className="mb-2 px-3 text-[11px] font-semibold uppercase tracking-[0.22em] text-content-tertiary">项目工作台</p>
-        )}
-        {NAV_ITEMS.map(({ label, icon: Icon, path }) => (
-          <NavLink
-            key={path}
-            to={path}
-            className={({ isActive }) =>
-              cn(
-                SIDEBAR_ITEM_CLASS,
-                collapsed && 'justify-center px-0',
-                isActive && 'bg-brand/10 font-medium text-brand hover:bg-brand/10 hover:text-brand',
-              )
-            }
-            title={collapsed ? label : undefined}
-          >
-            {({ isActive }) => (
-              <>
-                {isActive && <span className="absolute inset-y-2 left-0 w-[3px] bg-brand" aria-hidden />}
-                <Icon className="h-[18px] w-[18px] shrink-0" />
-                {!collapsed && <span className="truncate">{label}</span>}
-              </>
-            )}
-          </NavLink>
+      <nav className="flex-1 overflow-y-auto px-2 py-1">
+        {NAV_GROUPS.map((group) => (
+          <div key={group.label} className="mb-1">
+            {!collapsed && <p className="lj-rail-caption">{group.label}</p>}
+            <div className="space-y-0.5">
+              {group.items.map(({ label, icon: Icon, path }) => (
+                <NavLink
+                  key={path}
+                  to={path}
+                  className={({ isActive }) => cn('lj-rail-item', collapsed && 'justify-center px-0', isActive && 'lj-rail-item--active')}
+                  title={collapsed ? label : undefined}
+                >
+                  <Icon className="h-[18px] w-[18px] shrink-0" />
+                  {!collapsed && <span className="truncate">{label}</span>}
+                </NavLink>
+              ))}
+            </div>
+          </div>
         ))}
       </nav>
 
-      <div className="shrink-0 border-t border-surface-border/80 p-2.5">
+      <div className="shrink-0 border-t border-sidebar-border p-2">
         <button
           onClick={() => setShowRepairPanel(true)}
-          className={cn(SIDEBAR_ITEM_CLASS, collapsed && 'justify-center px-0')}
+          className={cn('lj-rail-item', collapsed && 'justify-center px-0')}
           title="数据修复"
         >
           <Wrench className="h-[18px] w-[18px] shrink-0" />
@@ -222,7 +265,7 @@ export default function ProjectDetail() {
         </button>
         <button
           onClick={() => setCollapsed((v) => !v)}
-          className={cn(SIDEBAR_ITEM_CLASS, 'hidden lg:flex', collapsed && 'justify-center px-0')}
+          className={cn('lj-rail-item hidden lg:flex', collapsed && 'justify-center px-0')}
           title={collapsed ? '展开侧栏' : '收起侧栏'}
         >
           {collapsed ? <PanelLeft className="h-[18px] w-[18px] shrink-0" /> : <PanelLeftClose className="h-[18px] w-[18px] shrink-0" />}
@@ -233,14 +276,11 @@ export default function ProjectDetail() {
   )
 
   return (
-    <div className="relative flex h-screen overflow-hidden">
-      <div className="hh-orb -left-40 -top-40 h-[520px] w-[520px] bg-brand/15 animate-float-soft" />
-      <div className="hh-orb -bottom-48 right-[-120px] h-[560px] w-[560px] bg-brand-400/15" />
-
+    <div className="relative flex h-screen overflow-hidden bg-surface">
       <aside
         className={cn(
-          'relative z-40 hidden shrink-0 flex-col overflow-hidden border-r border-white/80 bg-white/55 backdrop-blur-2xl backdrop-saturate-150 shadow-[0_0_0_1px_rgba(15,43,96,0.04),20px_0_60px_-44px_rgba(15,43,96,0.35)] transition-[width] duration-200 lg:flex',
-          collapsed ? 'w-16' : 'w-60',
+          'relative z-40 hidden shrink-0 overflow-hidden transition-[width] duration-200 lg:block',
+          collapsed ? 'w-16' : 'w-56',
         )}
       >
         {sidebarContent}
@@ -248,13 +288,13 @@ export default function ProjectDetail() {
 
       {mobileOpen && (
         <div
-          className="fixed inset-0 z-40 bg-content/25 backdrop-blur-sm lg:hidden"
+          className="fixed inset-0 z-40 bg-content/30 lg:hidden"
           onClick={() => setMobileOpen(false)}
         />
       )}
       <aside
         className={cn(
-          'hh-glass fixed inset-y-0 left-0 z-50 w-60 transform border-r transition-transform duration-200 lg:hidden',
+          'fixed inset-y-0 left-0 z-50 w-56 transform shadow-xl transition-transform duration-200 lg:hidden',
           mobileOpen ? 'translate-x-0' : '-translate-x-full',
         )}
       >
@@ -262,14 +302,14 @@ export default function ProjectDetail() {
       </aside>
 
       <div className="relative flex min-w-0 flex-1 flex-col">
-        <header className="relative z-20 flex h-16 shrink-0 items-center justify-between gap-4 border-b border-white/80 bg-white/45 px-4 backdrop-blur-xl md:px-8">
+        <header className="lj-topbar">
           <div className="flex min-w-0 items-center gap-3">
             <button
-              className="hh-icon-btn lg:hidden"
+              className="hh-icon-btn h-8 w-8 lg:hidden"
               onClick={() => setMobileOpen((v) => !v)}
               aria-label="切换侧栏"
             >
-              {mobileOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+              {mobileOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
             </button>
 
             <nav className="flex min-w-0 items-center gap-1.5 text-sm" aria-label="面包屑">
@@ -286,6 +326,18 @@ export default function ProjectDetail() {
           </div>
 
           <div className="flex shrink-0 items-center gap-3">
+            <button
+              onClick={toggleAssistant}
+              aria-pressed={assistantOpen}
+              title="智能助笔（Alt+A）"
+              className={cn(
+                'inline-flex h-8 items-center gap-1.5 rounded border px-2.5 text-xs font-medium transition-colors',
+                assistantOpen ? 'border-brand bg-brand text-white' : 'border-surface-border bg-white text-content-secondary hover:border-brand/50 hover:text-brand',
+              )}
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">智能助笔</span>
+            </button>
             {projectId && <ProjectModelPicker projectId={projectId} />}
             <AIJobTray />
             <div className="hidden shrink-0 items-center gap-5 md:flex">
@@ -302,17 +354,19 @@ export default function ProjectDetail() {
                   </div>
                 ))}
               </dl>
-              <span className={cn('px-2 py-1 text-[11px] font-medium', projectStatus.className)}>{projectStatus.label}</span>
+              <span className={projectStatus.className}>{projectStatus.label}</span>
             </div>
           </div>
         </header>
 
-        <main className="flex-1 overflow-y-auto px-4 pb-8 pt-6 md:px-8 md:pt-8">
+        <main className="flex-1 overflow-y-auto px-4 pb-8 pt-6 md:px-8 md:pt-7">
           <div className="mx-auto w-full max-w-[1400px]">
             <Outlet />
           </div>
         </main>
       </div>
+
+      {projectId && <GlobalAssistantHost projectId={projectId} />}
 
       {showRepairPanel && projectId && createPortal(
         <div className="hh-modal-mask" onClick={() => setShowRepairPanel(false)}>

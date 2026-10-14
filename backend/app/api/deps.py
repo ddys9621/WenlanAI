@@ -3,6 +3,8 @@
 此前 8 个 api 模块各有一份逐字相同的 verify_project_access、5 个模块各有一份 require_login；
 统一到这里。plot_bridges 的版本对非本人返回 403，语义不同，保留原地。
 """
+from typing import Any, Iterable, Optional
+
 from fastapi import HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,3 +54,33 @@ async def verify_project_access(project_id: str, user_id: str, db: AsyncSession)
         raise HTTPException(status_code=404, detail="项目不存在或无权访问")
 
     return project
+
+
+def request_user_id(request: Any) -> Optional[str]:
+    return getattr(getattr(request, "state", None), "user_id", None)
+
+
+async def verify_request_project(request: Any, project_id: str, db: AsyncSession) -> Project:
+    """按请求里的登录用户校验项目归属（所有用户共用一个数据库，只按 ID 查会越权）。"""
+    return await verify_project_access(project_id, request_user_id(request), db)
+
+
+async def load_owned(db: AsyncSession, request: Any, model: Any, object_id: str, not_found: str = "记录不存在") -> Any:
+    """按 ID 取一条带 project_id 的记录并校验它所属项目归当前用户；不存在或无权一律 404。"""
+    obj = (await db.execute(select(model).where(model.id == object_id))).scalar_one_or_none()
+    if obj is None:
+        raise HTTPException(status_code=404, detail=not_found)
+    await verify_project_access(obj.project_id, request_user_id(request), db)
+    return obj
+
+
+async def verify_owned_ids(db: AsyncSession, request: Any, model: Any, ids: Iterable[str]) -> None:
+    """批量操作（排序等）里的每条记录都必须属于当前用户的项目。"""
+    wanted = {i for i in ids if i}
+    if not wanted:
+        return
+    rows = (await db.execute(select(model.id, model.project_id).where(model.id.in_(wanted)))).all()
+    if len(rows) != len(wanted):
+        raise HTTPException(status_code=404, detail="记录不存在")
+    for project_id in {project_id for _id, project_id in rows}:
+        await verify_project_access(project_id, request_user_id(request), db)

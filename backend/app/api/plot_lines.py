@@ -7,14 +7,15 @@ import json
 
 from app.database import get_db
 from app.models import (
-    PlotLine, Project, ChapterOutlinePlotLineLink, PlotCardPlotLineLink
+    PlotLine, ChapterOutlinePlotLineLink, PlotCardPlotLineLink
 )
 from app.schemas.plot_line import (
     PlotLineCreate, PlotLineUpdate, PlotLineResponse,
     PlotLineGenerateRequest, PlotLineReorderRequest, PlotLineListResponse
 )
 from app.api.ai_jobs import job_sse_response
-from app.api.deps import verify_project_access
+from app.api.deps import load_owned, verify_owned_ids, verify_project_access, verify_request_project
+from app.services import outline_review_service as outline_review
 from app.services.ai_jobs import AIJob, AIJobConflictError, Runner, ai_jobs, job_session_factory
 from app.services.ai_service import AIService
 from app.services.plot_link_service import PlotLinkService
@@ -79,16 +80,35 @@ async def _serialize_plot_line(db: AsyncSession, line: PlotLine) -> PlotLineResp
     return (await _serialize_plot_lines(db, [line]))[0]
 
 
+async def _load_line(db: AsyncSession, request: Request, line_id: str) -> PlotLine:
+    return await load_owned(db, request, PlotLine, line_id, not_found="剧情线不存在")
+
+
+def _content_changed(line: PlotLine, updates: Dict[str, Any]) -> bool:
+    """标题 / 描述 / 节点 / 预计章数真改了才算（timeline_data 按解析后的值比，格式差异不算）。"""
+    if outline_review.content_changed(line, updates, ("title", "description", "estimated_chapters")):
+        return True
+    if updates.get("timeline_data") is None:
+        return False
+    try:
+        current = json.loads(line.timeline_data) if line.timeline_data else None
+    except (TypeError, ValueError):
+        current = None
+    return updates["timeline_data"] != current
+
+
 @router.get("/project/{project_id}", response_model=PlotLineListResponse)
 async def get_plot_lines(
     project_id: str,
+    request: Request,
     skip: int = Query(0, ge=0, description="跳过数量"),
     limit: int = Query(100, ge=1, le=100, description="限制数量"),
     line_type: Optional[str] = Query(None, description="剧情线类型筛选"),
     db: AsyncSession = Depends(get_db)
 ):
     """获取项目的剧情线列表"""
-    
+    await verify_request_project(request, project_id, db)
+
     # 构建查询
     query = select(PlotLine).where(PlotLine.project_id == project_id)
     
@@ -112,27 +132,16 @@ async def get_plot_lines(
 
 
 @router.get("/{line_id}", response_model=PlotLineResponse)
-async def get_plot_line(line_id: str, db: AsyncSession = Depends(get_db)):
+async def get_plot_line(line_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     """获取单个剧情线"""
-    
-    result = await db.execute(select(PlotLine).where(PlotLine.id == line_id))
-    line = result.scalar_one_or_none()
-    
-    if not line:
-        raise HTTPException(status_code=404, detail="剧情线不存在")
-    
-    return await _serialize_plot_line(db, line)
+    return await _serialize_plot_line(db, await _load_line(db, request, line_id))
 
 
 @router.post("", response_model=PlotLineResponse)
-async def create_plot_line(line_data: PlotLineCreate, db: AsyncSession = Depends(get_db)):
+async def create_plot_line(line_data: PlotLineCreate, request: Request, db: AsyncSession = Depends(get_db)):
     """创建剧情线"""
-    
-    # 验证项目存在
-    project_result = await db.execute(select(Project).where(Project.id == line_data.project_id))
-    if not project_result.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="项目不存在")
-    
+    await verify_request_project(request, line_data.project_id, db)
+
     # 如果没有指定排序序号，自动设置为最大值+1
     if line_data.order_index is None:
         max_order_result = await db.execute(
@@ -178,25 +187,22 @@ async def create_plot_line(line_data: PlotLineCreate, db: AsyncSession = Depends
 
 @router.put("/{line_id}", response_model=PlotLineResponse)
 async def update_plot_line(
-    line_id: str, 
-    line_data: PlotLineUpdate, 
+    line_id: str,
+    line_data: PlotLineUpdate,
+    request: Request,
     db: AsyncSession = Depends(get_db)
 ):
-    """更新剧情线"""
-    
-    # 检查剧情线是否存在
-    result = await db.execute(select(PlotLine).where(PlotLine.id == line_id))
-    line = result.scalar_one_or_none()
-    
-    if not line:
-        raise HTTPException(status_code=404, detail="剧情线不存在")
-    
+    """更新剧情线；内容真改了 → 挂在这条线上的章纲（直接关联 / 经桥段）标「上游已改」"""
+    line = await _load_line(db, request, line_id)
+
     # 更新字段
     update_data = line_data.model_dump(exclude_unset=True)
-    
+
     # 提取 plot_cards 用于关联表更新
     plot_cards = update_data.pop("plot_cards", None)
-    
+    if _content_changed(line, update_data):
+        await outline_review.mark_plot_line_outlines(db, line)
+
     # 处理 JSON 字段
     if "timeline_data" in update_data and update_data["timeline_data"] is not None:
         update_data["timeline_data"] = json.dumps(update_data["timeline_data"], ensure_ascii=False)
@@ -212,8 +218,8 @@ async def update_plot_line(
         await db.execute(
             update(PlotLine).where(PlotLine.id == line_id).values(**update_data)
         )
-        await db.commit()
-        await db.refresh(line)
+    await db.commit()
+    await db.refresh(line)
     
     # 更新剧情卡片关联（如果提供了）
     if plot_cards is not None:
@@ -238,29 +244,22 @@ async def update_plot_line(
 
 
 @router.delete("/{line_id}")
-async def delete_plot_line(line_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_plot_line(line_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     """删除剧情线"""
-    
-    # 检查剧情线是否存在
-    result = await db.execute(select(PlotLine).where(PlotLine.id == line_id))
-    line = result.scalar_one_or_none()
-    
-    if not line:
-        raise HTTPException(status_code=404, detail="剧情线不存在")
-    
+    await _load_line(db, request, line_id)
     await db.execute(delete(PlotLine).where(PlotLine.id == line_id))
     await db.commit()
-    
     return {"message": "剧情线删除成功"}
 
 
 @router.post("/reorder")
 async def reorder_plot_lines(
-    reorder_data: PlotLineReorderRequest, 
+    reorder_data: PlotLineReorderRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db)
 ):
     """重排序剧情线"""
-    
+    await verify_owned_ids(db, request, PlotLine, [o.get("id") for o in reorder_data.orders])
     for order_item in reorder_data.orders:
         line_id = order_item.get("id")
         new_order = order_item.get("order_index")
@@ -350,9 +349,9 @@ async def generate_plot_lines_stream(
 
 
 @router.get("/project/{project_id}/types")
-async def get_line_types(project_id: str, db: AsyncSession = Depends(get_db)):
+async def get_line_types(project_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     """获取项目中使用的剧情线类型"""
-    
+    await verify_request_project(request, project_id, db)
     result = await db.execute(
         select(PlotLine.line_type, func.count(PlotLine.id).label('count'))
         .where(PlotLine.project_id == project_id)
@@ -379,10 +378,11 @@ async def get_line_types(project_id: str, db: AsyncSession = Depends(get_db)):
 async def add_cards_to_line(
     line_id: str,
     card_ids: List[str],
+    request: Request,
     db: AsyncSession = Depends(get_db)
 ):
     """向剧情线添加剧情卡片"""
-    
+    await _load_line(db, request, line_id)
     try:
         result = await PlotLinkService.add_cards_to_plot_line(
             db=db,
@@ -400,10 +400,11 @@ async def add_cards_to_line(
 async def remove_cards_from_line(
     line_id: str,
     card_ids: List[str],
+    request: Request,
     db: AsyncSession = Depends(get_db)
 ):
     """从剧情线移除剧情卡片"""
-    
+    await _load_line(db, request, line_id)
     try:
         result = await PlotLinkService.remove_cards_from_plot_line(
             db=db,
@@ -425,6 +426,7 @@ async def remove_cards_from_line(
 @router.get("/{line_id}/progress")
 async def get_plot_line_progress(
     line_id: str,
+    request: Request,
     db: AsyncSession = Depends(get_db)
 ):
     """获取剧情线的节点覆盖进度
@@ -454,12 +456,7 @@ async def get_plot_line_progress(
             "linked_chapters_count": 5  # 关联的章节数量
         }
     """
-    # 检查剧情线是否存在
-    line_result = await db.execute(select(PlotLine).where(PlotLine.id == line_id))
-    line = line_result.scalar_one_or_none()
-
-    if not line:
-        raise HTTPException(status_code=404, detail=f"剧情线不存在: {line_id}")
+    line = await _load_line(db, request, line_id)
 
     # 解析剧情线的 timeline_data
     timeline_data = None

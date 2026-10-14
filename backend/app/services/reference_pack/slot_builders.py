@@ -215,6 +215,14 @@ async def build_world_rules_table(db: AsyncSession, ctx: Any) -> str:
     return "\n".join(lines)
 
 
+async def build_world_map(db: AsyncSession, ctx: Any) -> str:
+    """【🗺 世界地图】作者在地图上摆好的地点布局（项目级缓存）：章纲展开 / 桥段规划按它安排场景与行程。"""
+    from app.services.world_map_context import map_overview
+
+    overview = await map_overview(db, ctx.project_id)
+    return f"【🗺 世界地图】\n{overview}" if overview else ""
+
+
 async def build_plot_lines_with_beats(db: AsyncSession, ctx: Any) -> str:
     """主线节点 + 桥段配额（由 bridge_slot_planner 确定）+ 副线节点概览。
 
@@ -525,6 +533,7 @@ SLOT_BUILDERS: dict[str, Callable[[AsyncSession, Any], Awaitable[str]]] = {
     "plot_lines_with_beats":  build_plot_lines_with_beats,  # V4.1 方案 C
     "project_characters":     build_project_characters,     # 评审问题 A：本书角色
     "world_rules_table":      build_world_rules_table,      # 评审问题 A：世界规则表
+    "world_map":              build_world_map,              # 世界地图：地点方位远近
     "history_full":           build_history_full,
     "history_normal":         build_history_normal,
     "history_brief":          build_history_brief,

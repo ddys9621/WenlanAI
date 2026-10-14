@@ -218,7 +218,7 @@ export default function MCPPlugins() {
     <div className="space-y-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-4">
-          <h1 className="text-xl font-bold text-content">MCP 插件管理</h1>
+          <h1 className="lj-page-title">MCP 插件管理</h1>
           <div className="flex gap-2" role="tablist">
             <button type="button" role="tab" aria-selected={tab === 'mine'} onClick={() => setTab('mine')} className={cn('hh-chip', tab === 'mine' && 'hh-chip--active')}>
               <Plug className="w-3.5 h-3.5" />我的插件 <span className="tabular-nums opacity-70">{plugins.length}</span>

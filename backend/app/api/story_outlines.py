@@ -14,6 +14,7 @@ from app.schemas.story_outline import (
     StoryOutlineResponse,
     StoryOutlineUpdate,
 )
+from app.services import outline_review_service as outline_review
 from app.services.story_outline_service import StoryOutlineService
 from app.api.deps import verify_project_access
 
@@ -108,16 +109,22 @@ async def update_story_outline(
     request: Request,
     db: AsyncSession = Depends(get_db)
 ):
-    """更新故事大纲"""
+    """更新故事大纲；故事前提真改了 → 本项目全部章纲标「上游已改」，等作者核对确认"""
     editor_id = getattr(request.state, 'user_id', None)
-    await get_outline_with_access_check(outline_id, editor_id, db)
+    current = await get_outline_with_access_check(outline_id, editor_id, db)
+    premise_changed = outline_update.content is not None and outline_update.content.strip() != (current.content or "").strip()
 
-    return await StoryOutlineService.update_outline(
+    updated = await StoryOutlineService.update_outline(
         db=db,
         outline_id=outline_id,
         outline_update=outline_update,
         editor_id=editor_id
     )
+    if premise_changed:
+        await outline_review.mark_project_outlines(db, updated.project_id, "故事大纲（故事前提）已修改")
+        await db.commit()
+        await db.refresh(updated)
+    return updated
 
 
 @router.delete("/story-outlines/{outline_id}", status_code=status.HTTP_204_NO_CONTENT)

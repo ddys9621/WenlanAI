@@ -1,4 +1,4 @@
-import { useState, useEffect, type ReactNode } from 'react';
+import { useState, useEffect, useRef, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Pencil,
@@ -19,7 +19,8 @@ import { cn } from '@/lib/utils';
 import { useStore } from '@/store';
 import { useProjectSync } from '@/store/hooks';
 import { wizardStreamApi } from '@/services/api';
-import type { BridgeRhythm, C3HookStyle, PlatformPreset } from '@/types';
+import type { BridgeRhythm, C3HookStyle, PlatformPreset, Project } from '@/types';
+import { mergeUntouched } from '@/utils/draftMerge';
 import { MCPSelector } from '@/components/MCPSelector';
 import {
   ReferencePackSelector,
@@ -72,6 +73,19 @@ const longformFromProject = (p: { platform_preset?: PlatformPreset | null; bridg
   platform_preset: (p.platform_preset ?? '') as PlatformPreset | '',
   bridge_rhythm: (p.bridge_rhythm === 'varied' ? 'varied' : 'fixed4') as BridgeRhythm,
   rolling_planning: Boolean(p.rolling_planning),
+});
+
+const formFromProject = (p: Project): WorldSettingForm => ({
+  title: p.title || '',
+  theme: p.theme || '',
+  genre: p.genre || '',
+  generation_prompt: p.generation_prompt || '',
+  c3_hook_style: p.c3_hook_style === 'soft' ? 'soft' : 'none',
+  ...longformFromProject(p),
+  world_time_period: p.world_time_period || '',
+  world_location: p.world_location || '',
+  world_atmosphere: p.world_atmosphere || '',
+  world_rules: p.world_rules || '',
 });
 
 const BLOCKS: WorldBlock[] = [
@@ -132,21 +146,14 @@ export default function WorldSetting() {
     world_rules: '',
   });
 
+  // 项目数据刷新（如智能助笔应用了修改）：只更新作者没动过的字段，正在编辑的内容不会被冲掉
+  const baseRef = useRef<WorldSettingForm | null>(null);
   useEffect(() => {
-    if (currentProject) {
-      setForm({
-        title: currentProject.title || '',
-        theme: currentProject.theme || '',
-        genre: currentProject.genre || '',
-        generation_prompt: currentProject.generation_prompt || '',
-        c3_hook_style: currentProject.c3_hook_style === 'soft' ? 'soft' : 'none',
-        ...longformFromProject(currentProject),
-        world_time_period: currentProject.world_time_period || '',
-        world_location: currentProject.world_location || '',
-        world_atmosphere: currentProject.world_atmosphere || '',
-        world_rules: currentProject.world_rules || '',
-      });
-    }
+    if (!currentProject) return;
+    const next = formFromProject(currentProject);
+    const base = baseRef.current;
+    baseRef.current = next;
+    setForm((prev) => (base ? mergeUntouched(prev, base, next) : next));
   }, [currentProject]);
 
   const handleRegenerate = async () => {
@@ -230,20 +237,7 @@ export default function WorldSetting() {
   };
 
   const handleCancel = () => {
-    if (currentProject) {
-      setForm({
-        title: currentProject.title || '',
-        theme: currentProject.theme || '',
-        genre: currentProject.genre || '',
-        generation_prompt: currentProject.generation_prompt || '',
-        c3_hook_style: currentProject.c3_hook_style === 'soft' ? 'soft' : 'none',
-        ...longformFromProject(currentProject),
-        world_time_period: currentProject.world_time_period || '',
-        world_location: currentProject.world_location || '',
-        world_atmosphere: currentProject.world_atmosphere || '',
-        world_rules: currentProject.world_rules || '',
-      });
-    }
+    if (currentProject) setForm(formFromProject(currentProject));
     setEditing(false);
   };
 
@@ -254,9 +248,9 @@ export default function WorldSetting() {
 
   return (
     <div className="animate-fade-in space-y-6">
-      <section className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
+      <section className="lj-page-header">
         <div className="min-w-0">
-          <h1 className="text-[28px] font-semibold tracking-tight text-content md:text-[32px]">世界设定</h1>
+          <h1 className="lj-page-title">世界设定</h1>
           <p className="mt-2 max-w-[560px] text-sm leading-6 text-content-secondary">
             把时代、地点、氛围与规则分开整理，先立好框架，再往里填充细节。
           </p>

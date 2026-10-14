@@ -137,6 +137,10 @@ class AIJobManager:
         jobs.sort(key=lambda j: (j.is_terminal, -j.started_at))
         return jobs
 
+    def running_count(self) -> int:
+        """所有用户运行中的任务数。桌面版关窗确认在 UI 线程调用：先拷一份再数，不受事件循环同时增删影响。"""
+        return sum(1 for j in list(self._jobs.values()) if not j.is_terminal)
+
     def gc(self, now: Optional[float] = None) -> int:
         now = now or time.time()
         stale = [

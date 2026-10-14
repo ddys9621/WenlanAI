@@ -20,6 +20,7 @@ class Chapter(Base):
     status = Column(String(20), default="draft", comment="章节状态")
     version = Column(Integer, default=1, comment="版本号")
     parent_version_id = Column(String(36), ForeignKey("chapters.id", ondelete="SET NULL"), nullable=True, comment="父版本ID")
+    outline_hash = Column(String(64), nullable=True, comment="采用正文时所依据的章纲指纹（之后章纲被改 → 提示章纲已改）")
     created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间")
     

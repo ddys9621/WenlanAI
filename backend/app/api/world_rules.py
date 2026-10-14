@@ -14,11 +14,20 @@ from app.schemas.world_rule import (
     WorldRuleListResponse
 )
 from app.services.world_rule_service import world_rule_service
+from app.services import world_map_service as wms
 from app.logger import get_logger
 from app.api.deps import verify_project_access
 
 router = APIRouter(tags=["世界规则系统"])
 logger = get_logger(__name__)
+
+
+async def _check_place_name(db: AsyncSession, project_id: str, name: str, rule_id: Optional[str] = None) -> None:
+    """「地图位置」规则要在世界地图上一一对应：规则之间不重名，也不能撞上地图上别的地点。"""
+    try:
+        await wms.check_rule_location_name(db, project_id, name, rule_id)
+    except wms.WorldMapError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 @router.get("/projects/{project_id}/world-rules", response_model=WorldRuleListResponse, summary="获取世界规则列表")
@@ -76,6 +85,8 @@ async def create_world_rule(
     )
     if existing.scalars().first():
         raise HTTPException(status_code=400, detail=f"规则标识 '{rule.key}' 已存在")
+    if rule.category == wms.RULE_CATEGORY:
+        await _check_place_name(db, project_id, rule.name)
     
     # 创建新规则
     db_rule = WorldRule(
@@ -90,6 +101,8 @@ async def create_world_rule(
     )
     
     db.add(db_rule)
+    if db_rule.category == wms.RULE_CATEGORY:
+        await wms.sync_rule_locations(db, project_id)  # 地图位置规则立刻出现在世界地图上
     await db.commit()
     await db.refresh(db_rule)
 
@@ -139,8 +152,15 @@ async def update_world_rule(
 
     # 更新字段
     update_data = rule_update.model_dump(exclude_unset=True)
+    was_place = db_rule.category == wms.RULE_CATEGORY
+    is_place = (update_data.get("category") or db_rule.category) == wms.RULE_CATEGORY
+    new_name = update_data.get("name") or db_rule.name
+    if is_place and (not was_place or new_name != db_rule.name):  # 新成为地图位置或改名时查重名
+        await _check_place_name(db, db_rule.project_id, new_name, rule_id)
     for field, value in update_data.items():
         setattr(db_rule, field, value)
+    if was_place or is_place:
+        await wms.sync_rule_locations(db, db_rule.project_id)  # 改名 / 改分类：世界地图跟着变
 
     await db.commit()
     await db.refresh(db_rule)
@@ -179,7 +199,9 @@ async def delete_world_rule(
     # 保存项目ID（删除后无法访问）
     project_id = db_rule.project_id
 
-    # 删除规则
+    # 删除规则（地图位置规则：世界地图上对应的地点一并删除）
+    if db_rule.category == wms.RULE_CATEGORY:
+        await wms.delete_rule_locations(db, project_id, rule_id)
     await db.delete(db_rule)
     await db.commit()
 

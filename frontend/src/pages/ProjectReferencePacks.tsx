@@ -111,9 +111,9 @@ export default function ProjectReferencePacksPage() {
 
   return (
     <div className="animate-fade-in space-y-6">
-      <section className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
+      <section className="lj-page-header">
         <div className="min-w-0">
-          <h1 className="text-[28px] font-semibold tracking-tight text-content md:text-[32px]">仿写参考包</h1>
+          <h1 className="lj-page-title">仿写参考包</h1>
           <p className="mt-2 max-w-[600px] text-sm leading-6 text-content-secondary">
             挂载到本项目的参考包，会作为一键仿写章节时的笔法、节奏、结构、角色与世界观来源。
             {items.length > 0 && ` 当前已挂载 ${items.length} 本。`}
@@ -474,7 +474,7 @@ function DimensionConfig({
               onClick={() => onStrengthChange(s)}
               className={cn(
                 'px-3.5 py-1.5 text-xs font-medium transition-colors',
-                strength === s ? 'bg-brand text-white shadow-[0_8px_20px_-12px_rgba(0,122,255,0.6)]' : 'text-content-secondary hover:text-content',
+                strength === s ? 'bg-brand text-white' : 'text-content-secondary hover:text-content',
               )}
             >
               {STRENGTH_LABEL[s]}

@@ -17,10 +17,13 @@ logger = get_logger(__name__)
 # 注意：这里不能再走 app.models 聚合入口，否则会触发
 # database -> app.models -> model -> database 的循环导入。
 from app.models.analysis_task import AnalysisTask  # noqa: F401
+from app.models.assistant import AssistantFieldCandidate, AssistantMessage, AssistantRun, AssistantSession  # noqa: F401
 from app.models.book_dissect_task import BookDissectTask  # noqa: F401
 from app.models.book_dissect_chapter_fact import BookDissectChapterFact  # noqa: F401
 from app.models.book_dissect_story_arc import BookDissectStoryArc  # noqa: F401
 from app.models.chapter import Chapter  # noqa: F401
+from app.models.chapter_candidate import ChapterCandidate  # noqa: F401
+from app.models.chapter_version import ChapterVersion  # noqa: F401
 from app.models.chapter_causal_link import ChapterCausalLink  # noqa: F401
 from app.models.chapter_consistency_issue import ChapterConsistencyIssue  # noqa: F401
 from app.models.chapter_continuity_signal import ChapterContinuitySignal  # noqa: F401
@@ -50,6 +53,7 @@ from app.models.settings import Settings  # noqa: F401
 from app.models.story_outline import StoryOutline  # noqa: F401
 from app.models.system_setting import SystemSetting  # noqa: F401
 from app.models.timeline_event import TimelineEvent  # noqa: F401
+from app.models.world_map import WorldMap, WorldMapLocation  # noqa: F401
 from app.models.world_rule import WorldRule  # noqa: F401
 from app.models.writing_style import WritingStyle  # noqa: F401
 

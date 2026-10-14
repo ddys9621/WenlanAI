@@ -7,14 +7,14 @@ import json
 
 from app.database import get_db
 from app.models import (
-    PlotCard, Project, PlotCardPlotLineLink, PlotCardChapterOutlineLink
+    PlotCard, PlotCardPlotLineLink, PlotCardChapterOutlineLink
 )
 from app.schemas.plot_card import (
     PlotCardCreate, PlotCardUpdate, PlotCardResponse, 
     PlotCardGenerateRequest, PlotCardReorderRequest, PlotCardListResponse
 )
 from app.api.ai_jobs import job_sse_response
-from app.api.deps import verify_project_access
+from app.api.deps import load_owned, verify_owned_ids, verify_project_access, verify_request_project
 from app.services.ai_jobs import AIJob, AIJobConflictError, Runner, ai_jobs, job_session_factory
 from app.services.ai_service import AIService
 from app.services.plot_generation_service import PlotGenerationService
@@ -26,9 +26,42 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/plot-cards", tags=["剧情卡片"])
 
 
+def _card_tags(card: PlotCard) -> List[str]:
+    try:
+        tags = json.loads(card.tags) if card.tags else []
+    except (TypeError, ValueError):
+        return []
+    return tags if isinstance(tags, list) else []
+
+
+def _card_response(card: PlotCard) -> PlotCardResponse:
+    """ORM 行 → 响应（tags 在这里解析，不再改写会话里的 ORM 对象）。"""
+    return PlotCardResponse(
+        id=card.id,
+        project_id=card.project_id,
+        title=card.title,
+        content=card.content,
+        card_type=card.card_type or "plot",
+        order_index=card.order_index,
+        tags=_card_tags(card),
+        created_at=card.created_at,
+        updated_at=card.updated_at,
+        generation_status=card.generation_status,
+        generated_content=card.generated_content,
+        word_count_target=card.word_count_target,
+        word_count_actual=card.word_count_actual,
+        generation_order=card.generation_order,
+    )
+
+
+async def _load_card(db: AsyncSession, request: Request, card_id: str) -> PlotCard:
+    return await load_owned(db, request, PlotCard, card_id, not_found="剧情卡片不存在")
+
+
 @router.get("/project/{project_id}", response_model=PlotCardListResponse)
 async def get_plot_cards(
     project_id: str,
+    request: Request,
     skip: int = Query(0, ge=0, description="跳过数量"),
     limit: int = Query(100, ge=1, le=100, description="限制数量"),
     card_type: Optional[str] = Query(None, description="卡片类型筛选"),
@@ -36,7 +69,8 @@ async def get_plot_cards(
     db: AsyncSession = Depends(get_db)
 ):
     """获取项目的剧情卡片列表"""
-    
+    await verify_request_project(request, project_id, db)
+
     # 构建查询
     query = select(PlotCard).where(PlotCard.project_id == project_id)
     
@@ -119,36 +153,16 @@ async def get_plot_cards(
 
 
 @router.get("/{card_id}", response_model=PlotCardResponse)
-async def get_plot_card(card_id: str, db: AsyncSession = Depends(get_db)):
+async def get_plot_card(card_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     """获取单个剧情卡片"""
-    
-    result = await db.execute(select(PlotCard).where(PlotCard.id == card_id))
-    card = result.scalar_one_or_none()
-    
-    if not card:
-        raise HTTPException(status_code=404, detail="剧情卡片不存在")
-    
-    # 处理 tags 字段
-    if card.tags:
-        try:
-            card.tags = json.loads(card.tags)
-        except:
-            card.tags = []
-    else:
-        card.tags = []
-    
-    return card
+    return _card_response(await _load_card(db, request, card_id))
 
 
 @router.post("", response_model=PlotCardResponse)
-async def create_plot_card(card_data: PlotCardCreate, db: AsyncSession = Depends(get_db)):
+async def create_plot_card(card_data: PlotCardCreate, request: Request, db: AsyncSession = Depends(get_db)):
     """创建剧情卡片"""
-    
-    # 验证项目存在
-    project_result = await db.execute(select(Project).where(Project.id == card_data.project_id))
-    if not project_result.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="项目不存在")
-    
+    await verify_request_project(request, card_data.project_id, db)
+
     # 如果没有指定排序序号，自动设置为最大值+1
     if card_data.order_index is None:
         max_order_result = await db.execute(
@@ -175,34 +189,19 @@ async def create_plot_card(card_data: PlotCardCreate, db: AsyncSession = Depends
     db.add(card)
     await db.commit()
     await db.refresh(card)
-    
-    # 处理返回的 tags 字段
-    if card.tags:
-        try:
-            card.tags = json.loads(card.tags)
-        except:
-            card.tags = []
-    else:
-        card.tags = []
-    
-    return card
+    return _card_response(card)
 
 
 @router.put("/{card_id}", response_model=PlotCardResponse)
 async def update_plot_card(
-    card_id: str, 
-    card_data: PlotCardUpdate, 
+    card_id: str,
+    card_data: PlotCardUpdate,
+    request: Request,
     db: AsyncSession = Depends(get_db)
 ):
     """更新剧情卡片"""
-    
-    # 检查卡片是否存在
-    result = await db.execute(select(PlotCard).where(PlotCard.id == card_id))
-    card = result.scalar_one_or_none()
-    
-    if not card:
-        raise HTTPException(status_code=404, detail="剧情卡片不存在")
-    
+    card = await _load_card(db, request, card_id)
+
     # 更新字段
     update_data = card_data.model_dump(exclude_unset=True)
     
@@ -216,43 +215,26 @@ async def update_plot_card(
         )
         await db.commit()
         await db.refresh(card)
-    
-    # 处理返回的 tags 字段
-    if card.tags:
-        try:
-            card.tags = json.loads(card.tags)
-        except:
-            card.tags = []
-    else:
-        card.tags = []
-    
-    return card
+    return _card_response(card)
 
 
 @router.delete("/{card_id}")
-async def delete_plot_card(card_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_plot_card(card_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     """删除剧情卡片"""
-    
-    # 检查卡片是否存在
-    result = await db.execute(select(PlotCard).where(PlotCard.id == card_id))
-    card = result.scalar_one_or_none()
-    
-    if not card:
-        raise HTTPException(status_code=404, detail="剧情卡片不存在")
-    
+    await _load_card(db, request, card_id)
     await db.execute(delete(PlotCard).where(PlotCard.id == card_id))
     await db.commit()
-    
     return {"message": "剧情卡片删除成功"}
 
 
 @router.post("/reorder")
 async def reorder_plot_cards(
-    reorder_data: PlotCardReorderRequest, 
+    reorder_data: PlotCardReorderRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db)
 ):
     """重排序剧情卡片"""
-    
+    await verify_owned_ids(db, request, PlotCard, [o.get("id") for o in reorder_data.orders])
     for order_item in reorder_data.orders:
         card_id = order_item.get("id")
         new_order = order_item.get("order_index")
@@ -356,9 +338,9 @@ async def generate_plot_cards_stream(
 
 
 @router.get("/project/{project_id}/types")
-async def get_card_types(project_id: str, db: AsyncSession = Depends(get_db)):
+async def get_card_types(project_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     """获取项目中使用的卡片类型"""
-    
+    await verify_request_project(request, project_id, db)
     result = await db.execute(
         select(PlotCard.card_type, func.count(PlotCard.id).label('count'))
         .where(PlotCard.project_id == project_id)

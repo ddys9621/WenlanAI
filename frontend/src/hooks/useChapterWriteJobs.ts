@@ -1,8 +1,9 @@
 /**
  * 章节正文任务编排：单章生成 / 去 AI 味重写 / 批量串行 / 刷新后接管运行中任务 / 等待分析 / 取消。
  *
- * 任务本身由全局 aiJobsStore 持有（关面板、切页、刷新都不中断），这里只维护页面视图需要的派生状态，
- * 并把「完成后落库」的时刻通过 onChapterWritten 通知页面刷新阅读区。
+ * 任务本身由全局 aiJobsStore 持有（关面板、切页、刷新都不中断），这里只维护页面视图需要的派生状态。
+ * 单章生成与重写的结果是候选稿（不动正文）：完成时通过 onCandidateReady 让页面打开候选稿审阅；
+ * 批量每章过闸门后服务端自动采用，通过 onChapterWritten 通知页面刷新阅读区。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
@@ -48,11 +49,18 @@ interface Options {
   /** 已按 chapter_number 排好序 */
   chapters: Chapter[];
   refreshChapters: () => Promise<unknown>;
-  /** 单章 / 重写 / 批量每章落库后回调（页面用来刷新阅读区） */
+  /** 批量每章写入 / 分析完成后回调（页面用来刷新阅读区） */
   onChapterWritten?: (chapterId: string) => void;
+  /** 单章生成 / 重写完成：候选稿已就绪（页面打开候选稿审阅） */
+  onCandidateReady?: (chapterId: string, candidateId: string) => void;
 }
 
-export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onChapterWritten }: Options) {
+const candidateIdOf = (result: unknown): string | null => {
+  const id = (result as { candidate_id?: unknown } | null)?.candidate_id;
+  return typeof id === 'string' && id ? id : null;
+};
+
+export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onChapterWritten, onCandidateReady }: Options) {
   const [streamState, setStreamState] = useState<StreamState | null>(null);
   const [streamJobId, setStreamJobId] = useState<string | null>(null);
   const streamJob = useAIJob(streamJobId);
@@ -73,6 +81,8 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
 
   const onWrittenRef = useRef(onChapterWritten);
   onWrittenRef.current = onChapterWritten;
+  const onCandidateRef = useRef(onCandidateReady);
+  onCandidateRef.current = onCandidateReady;
 
   // 清理：只停掉前端的批量编排循环；正在跑的任务归 store，切页不中断
   useEffect(() => () => { batchCancelRef.current = true; }, []);
@@ -94,7 +104,7 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
     }
   }, []);
 
-  /** 面板视图跟随任务状态：进度 / 文案 / 正文都来自 store（生成完成后正文转为可编辑的本地副本） */
+  /** 面板视图跟随任务状态：进度 / 文案 / 流式正文都来自 store */
   useEffect(() => {
     if (!streamJob || streamDone) return;
     setStreamState((prev) => {
@@ -126,10 +136,11 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
       mode: 'single',
     });
     void waitForAIJob(job.id)
-      .then(async () => {
+      .then(async (finished) => {
         setStreamDone(true);
         await refreshChapters();
-        onWrittenRef.current?.(chapterId);
+        const candidateId = candidateIdOf(finished.result);
+        if (candidateId) onCandidateRef.current?.(chapterId, candidateId);
       })
       .catch(() => { /* 失败 / 停止：面板保留错误态由任务弹窗展示 */ });
   }, [streamJobId, runningWriteJobs, refreshChapters]);
@@ -191,10 +202,11 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
       setStreamState((prev) => (prev && prev.chapterId === chapter.id ? { ...prev, progress: 100, content: finalContent } : prev));
       setStreamDone(true);
       await refreshChapters();
-      onWrittenRef.current?.(chapter.id);
+      const candidateId = candidateIdOf(job.result);
       if (mode === 'single') {
-        toast.success(`「${chapter.title}」${isRewrite ? '重写完成，已覆盖正文' : '生成完成'}`);
+        toast.success(`「${chapter.title}」${isRewrite ? '重写' : '生成'}完成：候选稿已就绪，审阅后采用才会写入正文`);
       }
+      if (candidateId) onCandidateRef.current?.(chapter.id, candidateId);
       return (job.result as ChapterWriteResult | ChapterRegenerateResult | null) ?? null;
     } catch (error) {
       if (error instanceof AIJobError && error.job.status === 'cancelled') {
@@ -283,7 +295,7 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
     toast.info('已停止生成');
   }, [batchStatus, cancelBatch, streamJobId, cancelJob, resetStreamView]);
 
-  /** 生成前检查：前面有「有正文但未分析（无记忆状态）」的章节则提醒用户是否继续。返回 true=继续。 */
+  /** 生成前检查：前面有未分析 / 分析过期的章节、本章章纲未确认或上游已改时提醒是否继续。返回 true=继续。 */
   const confirmUnanalyzedPrevious = useCallback(async (chapter: Chapter): Promise<boolean> => {
     try {
       const res = await chapterApi.generationPrecheck(chapter.id);
@@ -299,8 +311,12 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
    * 逐章事件 batch_chapter 驱动本地进度；暂停 / 失败的原因在 result.message 里。
    */
   const startBatch = useCallback(async ({
-    from, to, pauseOnCritical, qualityGate = true, pipeline = false, autoExpand = true,
-  }: { from: number; to: number; pauseOnCritical: boolean; qualityGate?: boolean; pipeline?: boolean; autoExpand?: boolean }) => {
+    from, to, pauseOnCritical, qualityGate = true, pipeline = false, autoExpand = true, adherenceGate = true,
+    requireConfirmedOutline = false,
+  }: {
+    from: number; to: number; pauseOnCritical: boolean; qualityGate?: boolean; pipeline?: boolean; autoExpand?: boolean;
+    adherenceGate?: boolean; requireConfirmedOutline?: boolean;
+  }) => {
     if (!projectId) return;
     const { toGenerate, skipped } = selectBatchChapters(chapters, from, to);
     const total = countBatchTargets(chapters, from, to);
@@ -340,6 +356,8 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
           quality_gate: qualityGate,
           pipeline,
           auto_expand: autoExpand,
+          adherence_gate: adherenceGate,
+          require_confirmed_outline: requireConfirmedOutline,
         }, options as SSEClientOptions<ChapterBatchResult>),
         onEvent: (m) => {
           if (m.type === 'batch_chapter') {
@@ -433,10 +451,6 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
     }
   }, [projectId, refreshChapters]);
 
-  const setStreamContent = useCallback((content: string) => {
-    setStreamState((prev) => (prev ? { ...prev, content } : prev));
-  }, []);
-
   const analyzingChapterIds = new Set<string>([
     ...analyzingIds,
     ...runningAnalyses.map((j) => (typeof j.meta.chapter_id === 'string' ? j.meta.chapter_id : '')).filter(Boolean),
@@ -465,7 +479,6 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
     cancelBatch,
     closeStreamPanel,
     hideStreamPanel,
-    setStreamContent,
     handleAnalyze,
     confirmUnanalyzedPrevious,
   };

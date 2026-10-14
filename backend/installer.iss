@@ -6,7 +6,7 @@
 ; - 每用户安装（PrivilegesRequired=lowest + {userpf}）：免管理员/UAC，
 ;   且安装目录可写——应用的 data\/config.ini/embedding 模型下载都写在安装目录，
 ;   装到 Program Files 会因写权限直接不可用，切勿改回 admin 模式
-; - 卸载时保留用户数据（data\ 与 config.ini），仅清理可再生的 embedding 缓存与日志
+; - 卸载时保留用户数据（data\ 与 config.ini），仅清理可再生的 embedding 缓存、日志与窗口内核缓存（data\webview）
 
 #define MyAppName "WenlanAI"
 #ifndef MyAppVersion
@@ -87,3 +87,5 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}
 ; 用户重装后数据仍在；如需彻底清除可手动删除安装目录
 Type: filesandordirs; Name: "{app}\embedding"
 Type: filesandordirs; Name: "{app}\logs"
+; 桌面窗口（WebView2）的用户数据目录：登录 Cookie、界面偏好与浏览缓存，可再生
+Type: filesandordirs; Name: "{app}\data\webview"

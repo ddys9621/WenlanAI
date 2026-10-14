@@ -1,11 +1,11 @@
 import type { Chapter, ChapterBatchEvent } from '@/types'
 
-/** 批量生成范围内待生成的章：按序号升序，跳过「已完成且有正文」的，避免覆盖 */
+/** 批量生成范围内待生成的章：按序号升序，跳过已有正文的（不论状态，和服务端一致），避免覆盖 */
 export function selectBatchChapters(chapters: Chapter[], from: number, to: number): { toGenerate: Chapter[]; skipped: number } {
   const inRange = chapters
     .filter((c) => c.chapter_number >= from && c.chapter_number <= to)
     .sort((a, b) => a.chapter_number - b.chapter_number)
-  const toGenerate = inRange.filter((c) => !(c.status === 'completed' && c.word_count > 0))
+  const toGenerate = inRange.filter((c) => !(c.word_count > 0))
   return { toGenerate, skipped: inRange.length - toGenerate.length }
 }
 
@@ -29,6 +29,7 @@ export function describeBatchEvent(e: ChapterBatchEvent): string {
     case 'analysis_failed': return `第 ${n} 章分析失败，后续章节缺少这一章的记忆`
     case 'paused': return `第 ${n} 章检测到 ${e.critical ?? 0} 个严重一致性问题，已暂停`
     case 'no_outline': return `第 ${n} 章没有章纲，批量停止`
+    case 'outline_unconfirmed': return `第 ${n} 章章纲未确认（AI 草拟或上游已改），批量停止`
     case 'failed': return `第 ${n} 章多次生成失败：${e.error ?? ''}`
     default: return ''
   }

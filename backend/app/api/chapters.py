@@ -13,6 +13,7 @@ from typing import Optional
 from app.config import settings as app_settings
 from app.database import get_db
 from app.models.chapter import Chapter
+from app.models.chapter_candidate import ChapterCandidate
 from app.models.chapter_outline import ChapterOutline
 from app.models.project import Project
 from app.models.character import Character
@@ -29,6 +30,7 @@ from app.schemas.chapter import (
     ChapterCreate,
     ChapterUpdate,
     ChapterResponse,
+    ChapterListItem,
     ChapterListResponse,
     ChapterGenerateRequest,
 )
@@ -54,6 +56,18 @@ from app.services.chapter_context_service import (
     parse_json_list,
 )
 from app.services.chapter_prompt_builder import ChapterPromptInput, build_chapter_prompt, build_continuation_prompt
+from app.services.adherence_review_service import has_reviewable_contract, review_candidate
+from app.services.chapter_candidate_service import create_candidate
+from app.services.chapter_purge_service import purge_chapter_analysis, purge_chapter_vector_memory
+from app.services.chapter_readiness_service import (
+    analysis_is_stale,
+    chapter_brief,
+    previous_chapter_issues,
+    previous_issues_message,
+)
+from app.services.chapter_version_service import content_hash, replace_chapter_content
+from app.services import outline_review_service as outline_review
+from app.services.outline_contract import forbidden_items, outline_fingerprint
 from app.services.platform_presets import default_chapter_words, platform_block
 from app.services.deai_rewrite import (
     build_local_rewrite_prompt,
@@ -63,6 +77,7 @@ from app.services.deai_rewrite import (
     split_paragraph_lines,
 )
 from app.services.generation_trace import begin_stage, stage_scope, trace_progress, trace_reference
+from app.services.world_map_context import chapter_map_reference
 from app.services.prompt_service import prompt_service
 from app.services.plot_analyzer import PlotAnalyzer
 from app.services.chapter_consistency_service import chapter_consistency_service
@@ -529,8 +544,31 @@ async def get_project_chapters(
         .order_by(Chapter.chapter_number)
     )
     chapters = result.scalars().all()
+    outlines = {
+        o.id: o for o in (await db.execute(
+            select(ChapterOutline).where(ChapterOutline.project_id == project_id)
+        )).scalars().all()
+    }
+    pending = dict((await db.execute(
+        select(ChapterCandidate.chapter_id, func.count(ChapterCandidate.id))
+        .where(ChapterCandidate.project_id == project_id, ChapterCandidate.status == "pending")
+        .group_by(ChapterCandidate.chapter_id)
+    )).all())
 
-    return ChapterListResponse(total=len(chapters), items=chapters)
+    items = []
+    for chapter in chapters:
+        item = ChapterListItem.model_validate(chapter)
+        outline = outlines.get(chapter.chapter_outline_id) if chapter.chapter_outline_id else None
+        if outline is not None:
+            item.outline_review_status = outline.review_status
+            item.outline_upstream_stale = bool(outline.upstream_stale)
+            item.outline_changed = bool(
+                (chapter.word_count or 0) > 0 and chapter.outline_hash
+                and outline_fingerprint(outline) != chapter.outline_hash
+            )
+        item.pending_candidates = pending.get(chapter.id, 0)
+        items.append(item)
+    return ChapterListResponse(total=len(items), items=items)
 
 
 @router.get("/{chapter_id}", response_model=ChapterResponse, summary="获取章节详情")
@@ -574,30 +612,18 @@ async def update_chapter(
     # 验证用户权限
     user_id = getattr(request.state, 'user_id', None)
     await verify_project_access(chapter.project_id, user_id, db)
-    
-    # 记录旧字数
-    old_word_count = chapter.word_count or 0
-    
-    # 更新字段
+
     update_data = chapter_update.model_dump(exclude_unset=True)
+    content_given = "content" in update_data
+    new_content = update_data.pop("content", None)
     for field, value in update_data.items():
         setattr(chapter, field, value)
-    
-    # 如果内容更新了，重新计算字数（含清空为 "" 的场景，word_count 需归零）
-    if "content" in update_data:
-        new_word_count = count_words(chapter.content or "")
-        chapter.word_count = new_word_count
 
-        # 更新项目字数
-        result = await db.execute(
-            select(Project).where(Project.id == chapter.project_id)
-        )
-        project = result.scalar_one_or_none()
-        if project:
-            project.current_words = max(
-                0, (project.current_words or 0) - old_word_count + new_word_count
-            )
-    
+    # 正文变化：旧稿先进历史版本，再写新稿并同步字数（含清空为 "" 的场景）。
+    # 局部手改不清分析，分析结果靠正文指纹判过期，生成前预检会提醒重新分析
+    if content_given:
+        await replace_chapter_content(db, chapter, new_content, reason="manual_edit")
+
     await db.commit()
     await db.refresh(chapter)
     return chapter
@@ -706,77 +732,9 @@ async def check_prerequisites(db: AsyncSession, chapter: Chapter) -> tuple[bool,
     return True, "", previous_chapters
 
 
-async def _unanalyzed_previous_chapters(db: AsyncSession, chapter: Chapter) -> list[Chapter]:
-    """返回当前章节之前「有正文但从未分析（无 PlotAnalysis 记忆状态）」的章节列表。
-
-    用于生成前提醒：这些章节缺少记忆状态，续写会缺乏它们的剧情/角色/伏笔上下文。
-    判定「已分析」= 存在 PlotAnalysis 记录（哪怕已过期），因为记忆状态在分析时写入。
-    """
-    if chapter.chapter_number <= 1:
-        return []
-
-    prev_result = await db.execute(
-        select(Chapter)
-        .where(Chapter.project_id == chapter.project_id)
-        .where(Chapter.chapter_number < chapter.chapter_number)
-        .where(Chapter.content.isnot(None))
-        .where(Chapter.content != "")
-        .order_by(Chapter.chapter_number)
-    )
-    previous_chapters = list(prev_result.scalars().all())
-    if not previous_chapters:
-        return []
-
-    analyzed_result = await db.execute(
-        select(PlotAnalysis.chapter_id).where(
-            PlotAnalysis.chapter_id.in_([c.id for c in previous_chapters])
-        )
-    )
-    analyzed_ids = set(analyzed_result.scalars().all())
-    return [c for c in previous_chapters if c.id not in analyzed_ids]
-
-
-async def _purge_chapter_analysis_and_memory(db: AsyncSession, chapter_id: str) -> int:
-    """删除该章全部分析产物：PlotAnalysis + AnalysisTask + StoryMemory（DB 行）+ 叙事状态（伏笔 / 承诺、因果、时间轴、
-    关系事件、已知信息）+ 一致性信号与问题。
-
-    用于「正文被整章覆盖」后清理过期分析（不标过期，直接删，回到「未分析」，由用户手动重新分析）。
-    仅删关系库行，不提交、不清向量；返回删除的记忆条数供调用方做向量清理。
-    """
-    for _pa in (await db.execute(
-        select(PlotAnalysis).where(PlotAnalysis.chapter_id == chapter_id)
-    )).scalars().all():
-        await db.delete(_pa)
-    for _at in (await db.execute(
-        select(AnalysisTask).where(AnalysisTask.chapter_id == chapter_id)
-    )).scalars().all():
-        await db.delete(_at)
-    mem_rows = (await db.execute(
-        select(StoryMemory).where(StoryMemory.chapter_id == chapter_id)
-    )).scalars().all()
-    for _m in mem_rows:
-        await db.delete(_m)
-    await narrative_state_service.clear_chapter_state(db, chapter_id)
-    await chapter_consistency_service.clear_chapter_records(db, chapter_id)
-    located = (await db.execute(
-        select(Chapter.project_id, Chapter.chapter_number).where(Chapter.id == chapter_id)
-    )).first()
-    if located:
-        # 覆盖本章的单元 / 阶段 / 卷摘要已过期：删掉，等本章重新分析后自然重算
-        await arc_summary_service.invalidate_covering(db, located[0], located[1])
-    return len(mem_rows)
-
-
-async def _purge_chapter_vector_memory(user_id: str | None, project_id: str, chapter_id: str, mem_count: int) -> None:
-    """向量库记忆清理（best-effort；须在 DB 删除已提交后调用）。"""
-    if not mem_count or not user_id:
-        return
-    try:
-        await memory_service.delete_chapter_memories(
-            user_id=user_id, project_id=project_id, chapter_id=chapter_id
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"⚠️ 向量记忆清理失败（不影响正文覆盖）: {e}")
+# 整章替换后的分析清理在 chapter_purge_service（版本恢复 / 候选稿采用共用）；保留旧名供本模块与测试引用
+_purge_chapter_analysis_and_memory = purge_chapter_analysis
+_purge_chapter_vector_memory = purge_chapter_vector_memory
 
 
 RECENT_FULL_COUNT = 2
@@ -1082,7 +1040,9 @@ async def analyze_chapter_background(
                 await db_session.commit()
             logger.error(f"❌ 章节不存在或内容为空: {chapter_id}")
             return
-        
+        # 分析结果绑定本次读到的正文指纹（分析期间正文若被改，结果一落库就显示为过期）
+        analyzed_content_hash = content_hash(chapter.content)
+
         async with write_lock:
             task.progress = 20
             await db_session.commit()
@@ -1176,6 +1136,7 @@ async def analyze_chapter_background(
                     # 与 chapter.updated_at 的 onupdate=func.now() 保持同一时钟，
                     # 否则 datetime.now()（本地时区）会让 stale 比较在时差窗口内失效
                     existing_analysis.created_at = func.now()
+                    existing_analysis.content_hash = analyzed_content_hash
                 else:
                     # 创建新记录
                     logger.info(f"  创建新的分析记录")
@@ -1204,7 +1165,8 @@ async def analyze_chapter_background(
                         analysis_report=analyzer.generate_analysis_summary(analysis_result),
                         suggestions=analysis_result.get('suggestions', []),
                         dialogue_ratio=analysis_result.get('dialogue_ratio', 0),
-                        description_ratio=analysis_result.get('description_ratio', 0)
+                        description_ratio=analysis_result.get('description_ratio', 0),
+                        content_hash=analyzed_content_hash,
                     )
                     db_session.add(plot_analysis)
             
@@ -1385,29 +1347,27 @@ async def chapter_generation_precheck(
     request: Request,
     db: AsyncSession = Depends(get_db)
 ):
-    """生成前预检查：前面是否有「有正文但未分析（无记忆状态）」的章节。
+    """生成前预检查：前面有正文的章节里，哪些从未分析（无记忆状态）、哪些分析后正文又改过（记忆已过期）。
 
-    前端在触发生成前调用；count>0 时提示用户「前面有 N 章没有记忆状态，是否继续生成」。
-    这是提醒性检查，不阻断生成（用户确认后仍可正常调用 generate-stream）。
+    前端在触发生成前调用；count>0 时提示用户是否继续。提醒性检查，不阻断生成。
     """
     result = await db.execute(select(Chapter).where(Chapter.id == chapter_id))
     chapter = result.scalar_one_or_none()
     if not chapter:
         raise HTTPException(status_code=404, detail="章节不存在")
+    await verify_project_access(chapter.project_id, getattr(request.state, "user_id", None), db)
 
-    unanalyzed = await _unanalyzed_previous_chapters(db, chapter)
-    numbers = [c.chapter_number for c in unanalyzed]
-    message = (
-        f"前面有 {len(numbers)} 章尚未分析（缺少记忆状态）：第 {', '.join(map(str, numbers))} 章。"
-        "缺少记忆状态可能影响续写的剧情连贯性，是否继续生成？"
-        if numbers else ""
-    )
+    issues = await previous_chapter_issues(db, chapter)
+    outline = await db.get(ChapterOutline, chapter.chapter_outline_id) if chapter.chapter_outline_id else None
+    warnings = outline_review.outline_warnings(outline) if outline is not None else []
+    message = previous_issues_message(issues)
+    if warnings:
+        message = "；".join(warnings) + "。" + (message or "是否继续生成？")
     return {
-        "count": len(unanalyzed),
-        "chapters": [
-            {"id": c.id, "chapter_number": c.chapter_number, "title": c.title}
-            for c in unanalyzed
-        ],
+        "count": len(issues.unanalyzed) + len(issues.stale) + len(warnings),
+        "chapters": [chapter_brief(c) for c in issues.unanalyzed],
+        "stale_chapters": [chapter_brief(c) for c in issues.stale],
+        "outline_warnings": warnings,
         "message": message,
     }
 
@@ -1419,10 +1379,10 @@ class ChapterGenerateOptions:
     target_word_count: Optional[int] = None
     enable_mcp: bool = True
     selected_plugins: Optional[list[str]] = None
-    auto_analyze: bool = False
     pack_ids: Optional[list[str]] = None
     dimensions: Optional[list[str]] = None
     strength: Optional[str] = None
+    adherence_review: bool = True
 
     @classmethod
     def from_request(cls, req: ChapterGenerateRequest) -> "ChapterGenerateOptions":
@@ -1432,7 +1392,7 @@ class ChapterGenerateOptions:
             target_word_count=req.target_word_count if explicit_words else None,
             enable_mcp=getattr(req, "enable_mcp", True),
             selected_plugins=getattr(req, "selected_plugins", None),
-            auto_analyze=getattr(req, "auto_analyze", False),
+            adherence_review=getattr(req, "adherence_review", True),
             pack_ids=req.pack_ids,
             dimensions=req.dimensions,
             strength=req.strength,
@@ -1453,11 +1413,20 @@ def _outline_task_text(chapter_outline: ChapterOutline, target_word_count: int) 
         lines.append(f"【场景】{chapter_outline.scene}")
     if chapter_outline.pov:
         lines.append(f"【视角人物】{chapter_outline.pov}")
+    entry_state = (getattr(chapter_outline, "entry_state", None) or "").strip()
+    if entry_state:
+        lines.append(f"【进入状态】{entry_state}（正文开头必须承接这里）")
     if chapter_outline.summary:
         lines.append(f"【章节摘要】{chapter_outline.summary}")
     lines.append(f"【剧情要点】{chapter_outline.plot_points or '无'}")
     if key_events:
         lines.append(f"【关键事件】{'、'.join(key_events)}（最后一条是章末落点）")
+    exit_state = (getattr(chapter_outline, "exit_state", None) or "").strip()
+    if exit_state:
+        lines.append(f"【退出状态】{exit_state}（写到这里就停，不往下写下一章的事）")
+    forbidden = forbidden_items(getattr(chapter_outline, "forbidden", None))
+    if forbidden:
+        lines.append("【禁止事项】本章不能发生 / 揭晓：\n" + "\n".join(f"- {item}" for item in forbidden))
     if characters_involved:
         lines.append(f"【涉及角色】{'、'.join(characters_involved)}")
     lines.append(f"【目标字数】{target_word_count}字")
@@ -1466,9 +1435,10 @@ def _outline_task_text(chapter_outline: ChapterOutline, target_word_count: int) 
 
 async def run_chapter_generation(job, *, chapter_id: str, user_id: str, ai_service: AIService,
                                  options: ChapterGenerateOptions) -> dict:
-    """生成一章正文：上下文装配（过预算器）→ 流式创作（截断自动续写）→ 写库 → 可选排队分析。
+    """生成一章正文：上下文装配（过预算器）→ 流式创作（截断自动续写）→ 存为候选稿（不动正式正文）。
 
-    单章端点与服务端批量（chapter_batch_service）共用；事件写进 job 日志，可回放。
+    单章端点与服务端批量（chapter_batch_service）共用；单章由作者采用，批量过质检闸门后自动采用。
+    事件写进 job 日志，可回放。
     """
     current_user_id = user_id
     async with job_session_factory(current_user_id)() as db_session:
@@ -1488,6 +1458,9 @@ async def run_chapter_generation(job, *, chapter_id: str, user_id: str, ai_servi
         )).scalar_one_or_none()
         if not chapter_outline:
             raise ValueError('关联的章纲不存在')
+        # 候选稿绑定生成时的正文与章纲指纹：采用时正文已改要确认，生成期间章纲被改要标记
+        base_content_hash = content_hash(current_chapter.content)
+        generation_outline_hash = outline_fingerprint(chapter_outline)
 
         target_word_count = (
             options.target_word_count
@@ -1552,6 +1525,12 @@ async def run_chapter_generation(job, *, chapter_id: str, user_id: str, ai_servi
 
         st_smart = begin_stage("smart_context", "组装前情脉络 / 近期剧情 / 上一章正文")
         char_ctx = await build_character_context(db_session, project.id, chapter_number, chapter_outline, characters)
+        map_ref = await chapter_map_reference(
+            db_session, project.id, chapter_number,
+            scene=chapter_outline.scene, text=current_outline_content, character_names=char_ctx.names,
+        )
+        if map_ref.items:
+            trace_reference("world_map", "世界地图", map_ref.items)
         retrieval_query = build_query_text(chapter_outline, char_ctx.involved or char_ctx.names)
         smart_context = await build_smart_chapter_context(
             db=db_session,
@@ -1709,6 +1688,7 @@ async def run_chapter_generation(job, *, chapter_id: str, user_id: str, ai_servi
             absent_characters=char_ctx.absent_text,
             organizations=char_ctx.organizations_text,
             story_time=char_ctx.story_time_text,
+            world_map=map_ref.text,
             ledger_blocks=ledger_blocks,
             references=mcp_reference_materials,
             style_content=style_content,
@@ -1769,14 +1749,44 @@ async def run_chapter_generation(job, *, chapter_id: str, user_id: str, ai_servi
                 f"请在「设置」中调大 Max Tokens（建议 ≥ 目标字数 × 2）后重试"
             )
         st_llm.done(chars=len(full_content), continuations=continuations)
-        st_persist = begin_stage("persist", "写入正文 / 生成历史")
 
-        old_word_count = current_chapter.word_count or 0
-        current_chapter.content = full_content
+        # 章纲遵循度审校：另起一次模型调用逐项核对（引文由程序核验）；报告附在候选稿上，失败不阻断
+        adherence = None
+        if options.adherence_review and has_reviewable_contract(chapter_outline):
+            st_review = begin_stage("review", "章纲遵循度审校")
+            job.progress('🔎 审校是否照章纲写…', 93)
+            adherence = await review_candidate(
+                ai_service, chapter_outline, full_content, render_narrative_tasks(planned_tasks_raw, chapter_number),
+            )
+            st_review.done(status=adherence.get("status"), passed=adherence.get("passed"),
+                           issues=len(adherence.get("issues") or []))
+
+        st_persist = begin_stage("persist", "存为候选稿 / 生成历史")
+
+        # 生成期间章纲是否被改（重新读库，不用会话里的旧对象）
+        fresh_outline = (await db_session.execute(
+            select(ChapterOutline)
+            .where(ChapterOutline.id == chapter_outline.id)
+            .execution_options(populate_existing=True)
+        )).scalar_one_or_none()
+        outline_changed = outline_fingerprint(fresh_outline) != generation_outline_hash
         new_word_count = count_words(full_content)
-        current_chapter.word_count = new_word_count
-        current_chapter.status = "completed"
-        project.current_words = (project.current_words or 0) - old_word_count + new_word_count
+        quality = ai_flavor_metrics.analyze_text(
+            full_content,
+            previous_text=(smart_context.get('recent_full') or '')[-4000:],
+            target_word_count=target_word_count,
+        )
+        candidate = await create_candidate(
+            db_session, current_chapter,
+            content=full_content,
+            source="ai_generate",
+            base_hash=base_content_hash,
+            outline_hash=generation_outline_hash,
+            outline_changed=outline_changed,
+            quality=quality,
+            adherence=adherence,
+            meta={"target_word_count": target_word_count, "continuations": continuations, "style_id": options.style_id},
+        )
         db_session.add(GenerationHistory(
             project_id=current_chapter.project_id,
             chapter_id=current_chapter.id,
@@ -1785,38 +1795,20 @@ async def run_chapter_generation(job, *, chapter_id: str, user_id: str, ai_servi
             model="default"
         ))
         await db_session.commit()
-        await db_session.refresh(current_chapter)
 
-        logger.info(f"成功创作章节 {chapter_id}，共 {new_word_count} 字")
-        job.publish({'type': 'progress', 'message': '✅ 章节创作完成', 'progress': 95, 'status': 'processing', 'word_count': new_word_count})
-        quality = ai_flavor_metrics.analyze_text(
-            full_content,
-            previous_text=(smart_context.get('recent_full') or '')[-4000:],
-            target_word_count=target_word_count,
-        )
-        st_persist.done(word_count=new_word_count, ai_flavor=quality["score"])
-        result = {'word_count': new_word_count, 'analysis_task_id': None, 'analysis_job_id': None,
-                  'continuations': continuations, 'quality': quality}
-
-        # 单章生成：不自动分析（用户可先改正文再分析）；批量 / auto_analyze：自动排队分析
-        if not options.auto_analyze:
-            return result
-
-        st_ana = begin_stage("analysis", "排队章节分析")
-        task_id = await create_analysis_task(db_session, chapter_id=chapter_id, user_id=current_user_id, project_id=project.id)
-        logger.info(f"📋 已创建分析任务: {task_id}")
-        result['analysis_task_id'] = task_id
-        try:
-            analysis_job = await start_chapter_analysis(
-                chapter_id=chapter_id, chapter_number=chapter_number, chapter_title=current_chapter.title,
-                user_id=current_user_id, project_id=project.id, task_id=task_id, ai_service=ai_service,
-            )
-            result['analysis_job_id'] = analysis_job.id
-            st_ana.done(task_id=task_id)
-        except AIJobConflictError as conflict:
-            logger.warning(f"⚠️ 章节分析任务未启动（已有同章分析在跑）: {conflict}")
-            st_ana.skip("同章分析任务已在运行")
-        return result
+        logger.info(f"成功创作章节候选稿 {chapter_id}，共 {new_word_count} 字（候选 {candidate.id}）")
+        job.publish({'type': 'progress', 'message': '✅ 候选稿已生成，采用后才写入正文', 'progress': 95,
+                     'status': 'processing', 'word_count': new_word_count})
+        st_persist.done(word_count=new_word_count, ai_flavor=quality["score"], outline_changed=outline_changed)
+        return {
+            'word_count': new_word_count,
+            'candidate_id': candidate.id,
+            'adopted': False,
+            'outline_changed': outline_changed,
+            'continuations': continuations,
+            'quality': quality,
+            'adherence': adherence,
+        }
 
 
 @router.post("/project/{project_id}/batch-write-stream", summary="服务端批量生成章节（后台任务 + SSE，可关浏览器）")
@@ -1888,19 +1880,20 @@ async def generate_chapter_content_stream(
     user_ai_service: AIService = Depends(get_user_ai_service)
 ):
     """
-    根据章纲、前情（层级摘要）、本章相关角色状态与叙事账本创作章节正文（流式返回）
+    根据章纲、前情（层级摘要）、本章相关角色状态与叙事账本创作章节正文（流式返回），结果存为候选稿：
+    正式正文不变，作者在候选面板采用后才写入（旧稿进历史版本）。
     要求：必须按顺序生成，确保前置章节都已完成
 
     请求体参数：
     - style_id: 可选，写作风格ID
     - target_word_count: 可选，目标字数；不传则用章纲 / 平台预设的字数
     - enable_mcp: 可选，是否启用MCP工具增强，默认True
-    - auto_analyze: 生成后是否自动排队分析
     """
     async for temp_db in get_db(request):
         chapter = (await temp_db.execute(select(Chapter).where(Chapter.id == chapter_id))).scalar_one_or_none()
         if not chapter:
             raise HTTPException(status_code=404, detail="章节不存在")
+        await verify_project_access(chapter.project_id, getattr(request.state, "user_id", None), temp_db)
         can_generate, error_msg, _previous = await check_prerequisites(temp_db, chapter)
         if not can_generate:
             raise HTTPException(status_code=400, detail=error_msg)
@@ -1921,7 +1914,7 @@ async def generate_chapter_content_stream(
             project_id=chapter.project_id,
             scope=f"chapter_write:{chapter.project_id}",
             runner=runner,
-            cancel_message="已停止生成；本章正文未写入",
+            cancel_message="已停止生成；没有产生候选稿，本章正文未变",
             meta={"chapter_id": chapter_id, "target_word_count": options.target_word_count},
         )
     except AIJobConflictError as exc:
@@ -1981,12 +1974,8 @@ async def get_chapter_analysis(
         chapter=chapter_check,
     )
 
-    # 失效判定：章节内容在分析之后被修改过 → 分析/记忆/审计结果可能过期
-    is_stale = bool(
-        analysis.created_at
-        and chapter_check.updated_at
-        and chapter_check.updated_at > analysis.created_at
-    )
+    # 失效判定：分析时的正文指纹与当前正文不一致 → 分析 / 记忆 / 审计结果已过期（只改标题不算）
+    is_stale = analysis_is_stale(analysis, chapter_check)
 
     return {
         "chapter_id": chapter_id,
@@ -2226,7 +2215,7 @@ async def trigger_chapter_analysis_stream(
 
 # ==================== 去 AI 味重写 ====================
 
-@router.post("/{chapter_id}/regenerate-stream", summary="按去 AI 味提示词重写正文并覆盖（后台任务 + SSE）")
+@router.post("/{chapter_id}/regenerate-stream", summary="按去 AI 味提示词重写正文，结果存为候选稿（后台任务 + SSE）")
 async def regenerate_chapter_stream(
     chapter_id: str,
     request: Request,
@@ -2237,7 +2226,7 @@ async def regenerate_chapter_stream(
     """提示词只带用户勾选的项目去 AI 味提示词 + 本章原文（不带章纲 / 前文 / 设定），附专有名词表防止改名。
 
     mode=full 全文重写；mode=local 只重写 AI 味重的段落（自动检测或 paragraph_indices 指定），其余段落一字不动。
-    完成后直接覆盖正文，并清掉本章已有的分析产物（分析 / 记忆 / 伏笔承诺 / 一致性…），回到「未分析」。不留版本、不可回滚。
+    完成后存为整章候选稿：正文与分析都不动；作者采用后才覆盖正文（原稿进历史版本，可恢复）并清掉本章旧分析。
     """
     user_id = getattr(request.state, "user_id", None)
     if not user_id:
@@ -2276,9 +2265,10 @@ async def regenerate_chapter_stream(
         prompt = build_rewrite_prompt(prompt_texts, original, glossary)
     original_len = max(len(original), 1)
     project_id = chapter.project_id
+    base_content_hash = content_hash(original)
 
     async def runner(job):
-        """后台任务体：流式重写 → 覆盖正文 → 清旧分析与记忆。事件进任务日志，可回放。"""
+        """后台任务体：流式重写 → 存为候选稿。事件进任务日志，可回放。"""
         st_llm = begin_stage("llm", "模型按去 AI 味提示词重写" + (f"（局部 {len(targets)} 段）" if local else "正文"))
         job.progress("开始重写…", 5)
         full_content = ""
@@ -2310,25 +2300,26 @@ async def regenerate_chapter_stream(
             full_content = merge_paragraphs(original, replacements)
             job.publish({"type": "content", "content": full_content})
 
-        st_persist = begin_stage("persist", "覆盖正文 / 清理旧分析与记忆")
+        st_persist = begin_stage("persist", "存为候选稿")
         async with job_session_factory(user_id)() as db_session:
             target = (await db_session.execute(select(Chapter).where(Chapter.id == chapter_id))).scalar_one_or_none()
             if not target:
                 raise ValueError("章节不存在")
-            old_wc = target.word_count or 0
-            new_wc = count_words(full_content)
-            target.content = full_content
-            target.word_count = new_wc
-            target.status = "completed"
-            project = (await db_session.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
-            if project:
-                project.current_words = max(0, (project.current_words or 0) - old_wc + new_wc)
-            purged = await _purge_chapter_analysis_and_memory(db_session, chapter_id)
+            quality = ai_flavor_metrics.analyze_text(full_content, previous_text="", target_word_count=None)
+            candidate = await create_candidate(
+                db_session, target,
+                content=full_content,
+                source="deai_rewrite",
+                base_hash=base_content_hash,
+                outline_hash=target.outline_hash,
+                quality=quality,
+                meta={"mode": regenerate_request.mode, "rewritten_paragraphs": rewritten if local else None},
+            )
             await db_session.commit()
-        st_persist.done(word_count=new_wc, purged_memories=purged)
-        await _purge_chapter_vector_memory(user_id, project_id, chapter_id, purged)
-        logger.info(f"✅ 去 AI 味重写完成并覆盖正文: {chapter_id}，{new_wc} 字，清理旧记忆 {purged} 条")
-        result = {"word_count": new_wc}
+        new_wc = candidate.word_count
+        st_persist.done(word_count=new_wc, candidate_id=candidate.id)
+        logger.info(f"✅ 去 AI 味重写完成，已存为候选稿: {chapter_id}，{new_wc} 字（候选 {candidate.id}）")
+        result = {"word_count": new_wc, "candidate_id": candidate.id, "quality": quality}
         if local:
             result["rewritten_paragraphs"] = rewritten
         return result
@@ -2341,7 +2332,7 @@ async def regenerate_chapter_stream(
             project_id=project_id,
             scope=f"chapter_write:{project_id}",
             runner=runner,
-            cancel_message="已停止重写；正文未改动",
+            cancel_message="已停止重写；没有产生候选稿，正文未改动",
             meta={"chapter_id": chapter_id, "mode": regenerate_request.mode},
         )
     except AIJobConflictError as exc:

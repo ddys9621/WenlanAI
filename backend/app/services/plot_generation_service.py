@@ -15,6 +15,7 @@ from app.services.world_rule_service import WorldRuleService
 from app.services.prompt_service import prompt_service as project_prompt_service
 from app.logger import get_logger
 from app.utils.plot_line_types import normalize_plot_line_type
+from app.utils.prompt_safety import quote_untrusted
 
 logger = get_logger(__name__)
 
@@ -463,7 +464,7 @@ class PlotGenerationService:
 【参考资料】
 以下是通过 MCP 工具收集的真实背景资料，请参考这些信息生成更真实的剧情卡片：
 
-{reference_materials}
+{quote_untrusted(reference_materials, "MCP 检索结果")}
 
 请结合上述资料，生成符合要求的剧情卡片。"""
                     st.note(tools=len(planning_result.get("tools_used") or []), chars=len(reference_materials))
@@ -1243,7 +1244,7 @@ class PlotGenerationService:
     【参考资料】
     以下是通过 MCP 工具收集的真实背景资料，请参考这些信息生成更合理的剧情线：
 
-    {reference_materials}
+    {quote_untrusted(reference_materials, "MCP 检索结果")}
 
     请结合上述资料，生成符合要求的剧情线。"""
 

@@ -45,7 +45,7 @@ export function NarrativeStatePanel({ data, loading }: { data: NormalizedAnalysi
             const pt = String(p.promise_type || '')
             const pr = String(p.priority || '')
             return (
-              <Item key={String(p.id || i)} accent={st === 'resolved' ? '#10b981' : st === 'broken' ? '#ef4444' : '#007aff'}>
+              <Item key={String(p.id || i)} accent={st === 'resolved' ? '#10b981' : st === 'broken' ? '#ef4444' : '#285b4d'}>
                 <div className="mb-1 flex flex-wrap gap-1">
                   {pt && <Pill tone="purple">{P_TYPE_LABEL[pt] || pt}</Pill>}
                   <Pill tone={P_STATUS_TONE[st] || 'default'}>{P_STATUS_LABEL[st] || st}</Pill>
@@ -79,7 +79,7 @@ export function NarrativeStatePanel({ data, loading }: { data: NormalizedAnalysi
             const actors = (evt.actor_names as string[]) || []
             const targets = (evt.target_names as string[]) || []
             return (
-              <Item key={String(evt.id || i)} accent="#007aff">
+              <Item key={String(evt.id || i)} accent="#285b4d">
                 <div className="mb-1 flex gap-1">
                   {Boolean(evt.event_type) && <Pill tone="brand">{String(evt.event_type)}</Pill>}
                   {evt.public_visibility === 'secret' && <Pill>秘密</Pill>}
@@ -110,7 +110,7 @@ export function NarrativeStatePanel({ data, loading }: { data: NormalizedAnalysi
           {relGraph.edges.map((e, i) => {
             const d = Number(e.delta || 0)
             return (
-              <Item key={i} accent={d > 0 ? '#10b981' : d < 0 ? '#ef4444' : '#d9e4f3'}>
+              <Item key={i} accent={d > 0 ? '#10b981' : d < 0 ? '#ef4444' : '#d4dad6'}>
                 <div className="flex items-center gap-1.5 text-[13px]">
                   <span className="font-semibold text-content">{String(e.source)}</span>
                   <span className="text-content-tertiary">→</span>
@@ -171,7 +171,7 @@ export function NarrativeStatePanel({ data, loading }: { data: NormalizedAnalysi
           {issues.map((iss, i) => {
             const sev = String(iss.severity || 'medium')
             return (
-              <Item key={i} accent={SEV_BORDER[sev] || '#d9e4f3'}>
+              <Item key={i} accent={SEV_BORDER[sev] || '#d4dad6'}>
                 <div className="mb-1 flex gap-1">
                   <Pill tone={SEV_TONE[sev] || 'default'}>{SEV_LABEL[sev] || sev}</Pill>
                   {Boolean(iss.issue_type) && <Pill>{String(iss.issue_type)}</Pill>}

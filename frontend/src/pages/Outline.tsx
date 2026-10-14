@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Plus, Pencil, Trash2, FileText, Loader2, Sparkles, LayoutGrid, GitBranch, BookOpen, BarChart3, Check, ChevronDown, ChevronUp, Link2, Eye } from 'lucide-react'
 import { toast } from 'sonner'
@@ -7,7 +7,9 @@ import { useStore } from '@/store/index'
 import { useOutlineSync } from '@/store/hooks'
 import { usePlotCardSync, usePlotLineSync, useChapterOutlineSync } from '@/store/plotHooks'
 import { useAIJobsStore, useRunningAIJobs } from '@/store/aiJobsStore'
-import { wizardStreamApi, outlineApi, chapterOutlineLinkApi, plotLineApi, plotCardApi } from '@/services/api'
+import { useAssistantDataChange } from '@/hooks/useAssistantPage'
+import type { AssistantDataChange } from '@/store/assistantStore'
+import { wizardStreamApi, outlineApi, chapterOutlineApi, chapterOutlineLinkApi, plotLineApi, plotCardApi } from '@/services/api'
 import { AIJobBanner } from '@/components/ai-job/AIJobBanner'
 import { MCPSelector } from '@/components/MCPSelector'
 import {
@@ -108,12 +110,18 @@ export default function OutlinePage() {
     ]).finally(() => setLoading(false))
   }, [projectId, refreshChapterOutlines, refreshOutlines, refreshPlotCards, refreshPlotLines])
 
+  // 全局智能助笔改了章纲 / 故事前提（改前提会把章纲标成「上游已改」）：刷新章纲
+  const onAssistantData = useCallback((change: AssistantDataChange) => {
+    if (projectId && (change.entity === 'chapter_outline' || change.entity === 'story_outline')) void refreshChapterOutlines(projectId)
+  }, [projectId, refreshChapterOutlines])
+  useAssistantDataChange(onAssistantData)
+
   // ==================== Tab 容器 ====================
   return (
     <div className="animate-fade-in space-y-6">
-      <section className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
+      <section className="lj-page-header">
         <div className="min-w-0">
-          <h1 className="text-[28px] font-semibold tracking-tight text-content md:text-[32px]">故事大纲</h1>
+          <h1 className="lj-page-title">故事大纲</h1>
           <p className="mt-2 max-w-[560px] text-sm leading-6 text-content-secondary">
             先定整本书的骨架，再拆成剧情卡片、剧情线与章纲。当前有 {outlines.length} 个大纲版本、{plotCards.length} 张剧情卡片、{plotLines.length} 条剧情线、{chapterOutlines.length} 份章纲。
           </p>
@@ -148,7 +156,7 @@ export default function OutlinePage() {
           {activeTab === 'outlines' && <OutlinesView outlines={outlines} projectId={projectId} createOutline={createOutline} updateOutline={updateOutline} deleteOutline={deleteOutline} activateOutline={activateOutline} refreshOutlines={refreshOutlines} />}
           {activeTab === 'plotCards' && <PlotCardsView plotCards={plotCards} projectId={projectId} outlines={outlines} createPlotCard={createPlotCard} updatePlotCard={updatePlotCard} deletePlotCard={deletePlotCard} refreshPlotCards={refreshPlotCards} />}
           {activeTab === 'plotLines' && <PlotLinesView plotLines={plotLines} plotCards={plotCards} projectId={projectId} outlines={outlines} createPlotLine={createPlotLine} updatePlotLine={updatePlotLineData} deletePlotLine={deletePlotLine} refreshPlotLines={refreshPlotLines} />}
-          {activeTab === 'chapterOutlines' && <ChapterOutlinesView chapterOutlines={chapterOutlines} projectId={projectId} createChapterOutline={createChapterOutline} updateChapterOutline={updateChapterOutlineData} deleteChapterOutline={deleteChapterOutline} batchCreateChapterOutlines={batchCreateChapterOutlines} plotLines={plotLines} />}
+          {activeTab === 'chapterOutlines' && <ChapterOutlinesView chapterOutlines={chapterOutlines} projectId={projectId} createChapterOutline={createChapterOutline} updateChapterOutline={updateChapterOutlineData} deleteChapterOutline={deleteChapterOutline} batchCreateChapterOutlines={batchCreateChapterOutlines} plotLines={plotLines} onRefresh={() => (projectId ? refreshChapterOutlines(projectId) : Promise.resolve())} />}
           {activeTab === 'overview' && <OverviewPanel plotCards={plotCards} plotLines={plotLines} chapterOutlines={chapterOutlines} />}
         </>
       )}
@@ -1349,7 +1357,22 @@ function PlotLinesView({ plotLines, projectId, outlines, plotCards, createPlotLi
   )
 }
 // ==================== Tab 4: 章纲 ====================
-function ChapterOutlinesView({ chapterOutlines, projectId, createChapterOutline, updateChapterOutline, deleteChapterOutline, batchCreateChapterOutlines, plotLines }: {
+const EMPTY_CHAPTER_OUTLINE_FORM = {
+  chapter_number: 1, title: '', plot_points: '', scene: '', pov: '', target_word_count: 3000,
+  key_events: '', entry_state: '', exit_state: '', forbidden: '',
+}
+
+const splitLines = (text: string) => text.split('\n').map((s) => s.trim()).filter(Boolean)
+
+/** 章纲状态徽标：AI 草拟待确认 / 上游已改 / 已确认 */
+function OutlineReviewBadge({ co }: { co: ChapterOutline }) {
+  if (co.upstream_stale) return <span className="lj-badge lj-badge--stale" title={co.upstream_reason || '桥段 / 剧情线 / 故事大纲改过'}>上游已改</span>
+  if (co.review_status === 'draft') return <span className="lj-badge lj-badge--draft" title="AI 草拟的章纲，确认后再写正文更稳">待确认</span>
+  if (co.review_status === 'confirmed') return <span className="lj-badge lj-badge--ok">已确认</span>
+  return null
+}
+
+function ChapterOutlinesView({ chapterOutlines, projectId, createChapterOutline, updateChapterOutline, deleteChapterOutline, batchCreateChapterOutlines, plotLines, onRefresh }: {
   chapterOutlines: ChapterOutline[]
   projectId?: string
   createChapterOutline: (data: ChapterOutlineCreate) => Promise<ChapterOutline>
@@ -1357,11 +1380,13 @@ function ChapterOutlinesView({ chapterOutlines, projectId, createChapterOutline,
   deleteChapterOutline: (id: string) => Promise<void>
   batchCreateChapterOutlines: (data: ChapterOutlineBatchCreateRequest) => Promise<ChapterOutline[]>
   plotLines: PlotLine[]
+  onRefresh: () => Promise<unknown>
 }) {
   const [showModal, setShowModal] = useState(false)
   const [editing, setEditing] = useState<ChapterOutline | null>(null)
   const [viewingChapterOutline, setViewingChapterOutline] = useState<ChapterOutline | null>(null)
-  const [form, setForm] = useState({ chapter_number: 1, title: '', plot_points: '', scene: '', pov: '', target_word_count: 3000 })
+  const [form, setForm] = useState(EMPTY_CHAPTER_OUTLINE_FORM)
+  const [confirming, setConfirming] = useState<string | null>(null)
   const [showBatchModal, setShowBatchModal] = useState(false)
   const [batchCount, setBatchCount] = useState(5)
   const [batchCreating, setBatchCreating] = useState(false)
@@ -1417,26 +1442,59 @@ function ChapterOutlinesView({ chapterOutlines, projectId, createChapterOutline,
   const openCreate = () => {
     setEditing(null)
     const nextNum = sorted.length > 0 ? sorted[sorted.length - 1].chapter_number + 1 : 1
-    setForm({ chapter_number: nextNum, title: '', plot_points: '', scene: '', pov: '', target_word_count: 3000 })
+    setForm({ ...EMPTY_CHAPTER_OUTLINE_FORM, chapter_number: nextNum })
     setShowModal(true)
   }
   const openEdit = (co: ChapterOutline) => {
     setEditing(co)
-    setForm({ chapter_number: co.chapter_number, title: co.title, plot_points: co.plot_points || '', scene: co.scene || '', pov: co.pov || '', target_word_count: co.target_word_count })
+    setForm({
+      chapter_number: co.chapter_number, title: co.title, plot_points: co.plot_points || '', scene: co.scene || '',
+      pov: co.pov || '', target_word_count: co.target_word_count,
+      key_events: (co.key_events || []).join('\n'), entry_state: co.entry_state || '', exit_state: co.exit_state || '',
+      forbidden: (co.forbidden || []).join('\n'),
+    })
     setShowModal(true)
   }
 
   const handleSubmit = async () => {
     if (!projectId) return
     if (!form.title.trim()) { toast.error('请填写标题'); return }
+    const contract = {
+      key_events: splitLines(form.key_events),
+      entry_state: form.entry_state.trim(),
+      exit_state: form.exit_state.trim(),
+      forbidden: splitLines(form.forbidden),
+    }
     try {
       if (editing) {
-        await updateChapterOutline(editing.id, { chapter_number: form.chapter_number, title: form.title, plot_points: form.plot_points || undefined, scene: form.scene || undefined, pov: form.pov || undefined, target_word_count: form.target_word_count })
+        await updateChapterOutline(editing.id, { chapter_number: form.chapter_number, title: form.title, plot_points: form.plot_points || undefined, scene: form.scene || undefined, pov: form.pov || undefined, target_word_count: form.target_word_count, ...contract })
       } else {
-        await createChapterOutline({ project_id: projectId, chapter_number: form.chapter_number, title: form.title, plot_points: form.plot_points || undefined, scene: form.scene || undefined, pov: form.pov || undefined, target_word_count: form.target_word_count })
+        await createChapterOutline({ project_id: projectId, chapter_number: form.chapter_number, title: form.title, plot_points: form.plot_points || undefined, scene: form.scene || undefined, pov: form.pov || undefined, target_word_count: form.target_word_count, ...contract })
       }
       setShowModal(false)
     } catch { /* hook 已 toast */ }
+  }
+
+  const unconfirmed = sorted.filter(co => co.review_status === 'draft' || co.upstream_stale)
+
+  const confirmOne = async (co: ChapterOutline) => {
+    setConfirming(co.id)
+    try {
+      await chapterOutlineApi.confirmChapterOutline(co.id)
+      await onRefresh()
+      toast.success(`第${co.chapter_number}章章纲已确认`)
+    } catch { /* 已 toast */ } finally { setConfirming(null) }
+  }
+
+  const confirmAll = async () => {
+    if (!projectId || unconfirmed.length === 0) return
+    if (!window.confirm(`确认全部 ${unconfirmed.length} 份待确认 / 上游已改的章纲？确认表示你已看过，可以照它写正文。`)) return
+    setConfirming('all')
+    try {
+      const res = await chapterOutlineApi.confirmAllChapterOutlines(projectId)
+      await onRefresh()
+      toast.success(`已确认 ${res.confirmed} 份章纲`)
+    } catch { /* 已 toast */ } finally { setConfirming(null) }
   }
 
   const handleBatchCreate = async () => {
@@ -1495,14 +1553,20 @@ function ChapterOutlinesView({ chapterOutlines, projectId, createChapterOutline,
     <section className="hh-panel p-6">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
-          <h2 className="text-lg font-semibold tracking-tight text-content">章纲</h2>
+          <h2 className="font-serif text-lg font-semibold text-content">章纲</h2>
           <p className="mt-1 text-sm leading-6 text-content-secondary">
-            逐章的剧情要点、场景与视角，是生成正文前的最后一层规划，共 {chapterOutlines.length} 章。
+            逐章的章节契约（进入状态 → 关键事件 → 退出状态，外加禁止事项），是生成正文前的最后一层规划，共 {chapterOutlines.length} 章。
+            AI 草拟或上游改过的章纲要确认后再写正文。
           </p>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2.5">
+          {unconfirmed.length > 0 && (
+            <button onClick={() => void confirmAll()} disabled={confirming !== null} className="hh-btn-secondary">
+              {confirming === 'all' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}全部确认 ({unconfirmed.length})
+            </button>
+          )}
           {chapterOutlines.length > 0 && (
-            <button onClick={handleDeleteSelected} disabled={selectedIds.size === 0} className="hh-btn-ghost text-red-500 hover:bg-red-50 hover:text-red-600">
+            <button onClick={handleDeleteSelected} disabled={selectedIds.size === 0} className="hh-btn-ghost text-cinnabar hover:bg-cinnabar-wash">
               <Trash2 className="h-4 w-4" />删除{selectedIds.size > 0 ? ` (${selectedIds.size})` : ''}
             </button>
           )}
@@ -1531,15 +1595,19 @@ function ChapterOutlinesView({ chapterOutlines, projectId, createChapterOutline,
             <span className="text-xs text-content-secondary tabular-nums">{selectedIds.size > 0 ? `已选 ${selectedIds.size}/${chapterOutlines.length}` : '全选'}</span>
           </div>
           {sorted.map(co => (
-            <article key={co.id} className={cn('hh-subpanel p-4 transition-colors', selectedIds.has(co.id) && 'border-brand/40 bg-brand/[0.04]')}>
+            <article key={co.id} className={cn('hh-subpanel p-4 transition-colors', selectedIds.has(co.id) && 'lj-selected')}>
               <div className="flex items-start justify-between gap-3">
                 <div className="flex min-w-0 flex-1 items-start gap-3">
                   <input type="checkbox" checked={selectedIds.has(co.id)} onChange={() => toggleSelect(co.id)} className="mt-1 h-4 w-4 shrink-0" />
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className={cn(STATUS_TAG, 'shrink-0 bg-brand/10 text-brand tabular-nums')}>#{co.chapter_number}</span>
+                      <span className={cn(STATUS_TAG, 'shrink-0 rounded-sm bg-brand-100 text-brand-600 tabular-nums')}>#{co.chapter_number}</span>
                       <h3 className="min-w-0 max-w-full truncate text-[15px] font-semibold text-content">{co.title}</h3>
+                      <OutlineReviewBadge co={co} />
                     </div>
+                    {co.upstream_stale && co.upstream_reason && (
+                      <p className="mt-1 text-[11px] text-cinnabar">{co.upstream_reason}</p>
+                    )}
                     <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-content-tertiary">
                       {co.scene && <span>场景: {co.scene}</span>}
                       {co.pov && <span>视角: {co.pov}</span>}
@@ -1550,8 +1618,14 @@ function ChapterOutlinesView({ chapterOutlines, projectId, createChapterOutline,
                     {co.key_events && co.key_events.length > 0 && (
                       <div className="mt-2 flex flex-wrap gap-1.5">
                         {co.key_events.map((ev, i) => (
-                          <span key={i} className="bg-surface-hover px-2 py-0.5 text-[11px] text-content-secondary">{ev}</span>
+                          <span key={i} className="rounded-sm bg-surface-muted px-2 py-0.5 text-[11px] text-content-secondary">{ev}</span>
                         ))}
+                      </div>
+                    )}
+                    {(co.exit_state || (co.forbidden?.length ?? 0) > 0) && (
+                      <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-content-tertiary">
+                        {co.exit_state && <span>写到：{co.exit_state}</span>}
+                        {(co.forbidden?.length ?? 0) > 0 && <span>禁止：{co.forbidden!.join('；')}</span>}
                       </div>
                     )}
                     <button onClick={() => toggleLinks(co.id)} className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-brand hover:text-brand-600">
@@ -1561,9 +1635,14 @@ function ChapterOutlinesView({ chapterOutlines, projectId, createChapterOutline,
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
+                  {(co.review_status === 'draft' || co.upstream_stale) && (
+                    <button onClick={() => void confirmOne(co)} disabled={confirming !== null} className="hh-btn-secondary hh-btn-sm h-8" title="看过了，可以照这份章纲写正文">
+                      {confirming === co.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}确认
+                    </button>
+                  )}
                   <button onClick={() => setViewingChapterOutline(co)} className="hh-icon-btn-plain h-8 w-8" title="查看章纲详情"><Eye className="h-3.5 w-3.5" /></button>
                   <button onClick={() => openEdit(co)} className="hh-icon-btn-plain h-8 w-8" title="编辑"><Pencil className="h-3.5 w-3.5" /></button>
-                  <button onClick={() => handleDelete(co)} className="hh-icon-btn-plain h-8 w-8 hover:text-red-500" title="删除"><Trash2 className="h-3.5 w-3.5" /></button>
+                  <button onClick={() => handleDelete(co)} className="hh-icon-btn-plain h-8 w-8 hover:text-cinnabar" title="删除"><Trash2 className="h-3.5 w-3.5" /></button>
                 </div>
               </div>
               {expandedLinkId === co.id && (
@@ -1638,6 +1717,27 @@ function ChapterOutlinesView({ chapterOutlines, projectId, createChapterOutline,
             <div>
               <label className="hh-label">剧情要点</label>
               <textarea value={form.plot_points} onChange={e => setForm(f => ({ ...f, plot_points: e.target.value }))} rows={4} className="hh-textarea" />
+            </div>
+            <div className="space-y-4 rounded border border-surface-border bg-surface-paper p-4">
+              <p className="text-xs leading-5 text-content-secondary">
+                <span className="font-medium text-content">章节契约</span>：写正文时照「进入状态 → 关键事件 → 退出状态」推进，禁止事项不能提前发生；写完的遵循度审校也按这里核对。
+              </p>
+              <div>
+                <label className="hh-label">进入状态（开头承接什么局面）</label>
+                <textarea value={form.entry_state} onChange={e => setForm(f => ({ ...f, entry_state: e.target.value }))} rows={2} placeholder="如：林尘刚被逐出宗门，身负重伤躲在山洞" className="hh-textarea" />
+              </div>
+              <div>
+                <label className="hh-label">关键事件（每行一条，按顺序；最后一条是章末落点）</label>
+                <textarea value={form.key_events} onChange={e => setForm(f => ({ ...f, key_events: e.target.value }))} rows={4} className="hh-textarea" />
+              </div>
+              <div>
+                <label className="hh-label">退出状态（写到哪里停）</label>
+                <textarea value={form.exit_state} onChange={e => setForm(f => ({ ...f, exit_state: e.target.value }))} rows={2} placeholder="如：林尘认出画中人是年轻时的师父，章末停在他推门离开" className="hh-textarea" />
+              </div>
+              <div>
+                <label className="hh-label">禁止事项（每行一条：本章不能写的事）</label>
+                <textarea value={form.forbidden} onChange={e => setForm(f => ({ ...f, forbidden: e.target.value }))} rows={2} placeholder="如：不能揭露师父的真实身份" className="hh-textarea" />
+              </div>
             </div>
           </div>
         </Modal>
@@ -1763,7 +1863,8 @@ function ChapterOutlinesView({ chapterOutlines, projectId, createChapterOutline,
         >
           <div className="space-y-4">
             <div className="flex flex-wrap items-center gap-2 text-xs text-content-secondary">
-              <span className={cn(STATUS_TAG, 'bg-brand/10 text-brand tabular-nums')}>#{viewingChapterOutline.chapter_number}</span>
+              <span className={cn(STATUS_TAG, 'rounded-sm bg-brand-100 text-brand-600 tabular-nums')}>#{viewingChapterOutline.chapter_number}</span>
+              <OutlineReviewBadge co={viewingChapterOutline} />
               {viewingChapterOutline.scene && <span>场景：{viewingChapterOutline.scene}</span>}
               {viewingChapterOutline.pov && <span>视角：{viewingChapterOutline.pov}</span>}
               <span>目标字数：{viewingChapterOutline.target_word_count}</span>
@@ -1787,6 +1888,24 @@ function ChapterOutlinesView({ chapterOutlines, projectId, createChapterOutline,
                     </span>
                   ))}
                 </div>
+              </div>
+            )}
+            {(viewingChapterOutline.entry_state || viewingChapterOutline.exit_state || (viewingChapterOutline.forbidden?.length ?? 0) > 0) && (
+              <div className="hh-subpanel space-y-2 p-4 text-sm">
+                {viewingChapterOutline.entry_state && (
+                  <p><span className="text-xs font-medium text-content-tertiary">进入状态：</span>{viewingChapterOutline.entry_state}</p>
+                )}
+                {viewingChapterOutline.exit_state && (
+                  <p><span className="text-xs font-medium text-content-tertiary">退出状态：</span>{viewingChapterOutline.exit_state}</p>
+                )}
+                {(viewingChapterOutline.forbidden?.length ?? 0) > 0 && (
+                  <div>
+                    <p className="text-xs font-medium text-content-tertiary">禁止事项</p>
+                    <ul className="mt-1 space-y-0.5 text-content-secondary">
+                      {viewingChapterOutline.forbidden!.map((item) => <li key={item}>· {item}</li>)}
+                    </ul>
+                  </div>
+                )}
               </div>
             )}
             {viewingChapterOutline.narrative_tasks && (
@@ -1895,22 +2014,22 @@ function OverviewPanel({ plotCards, plotLines, chapterOutlines }: {
               {/* 剧情线节点 */}
               {lineNodes.map(n => (
                 <g key={n.id}>
-                  <circle cx={n.x} cy={n.y} r={Math.max(6, Math.min(14, 6 + n.linkCount * 2))} fill="#007aff" opacity={0.85} />
-                  <text x={n.x - 14} y={n.y + 4} textAnchor="end" fontSize={11} fill="#5f7090" className="select-none">{n.label}</text>
+                  <circle cx={n.x} cy={n.y} r={Math.max(6, Math.min(14, 6 + n.linkCount * 2))} fill="#285b4d" opacity={0.85} />
+                  <text x={n.x - 14} y={n.y + 4} textAnchor="end" fontSize={11} fill="#46534b" className="select-none">{n.label}</text>
                 </g>
               ))}
               {/* 章纲节点 */}
               {coNodes.map(n => (
                 <g key={n.id}>
-                  <circle cx={n.x} cy={n.y} r={Math.max(6, Math.min(14, 6 + n.linkCount * 2))} fill="#5f7090" opacity={0.85} />
-                  <text x={n.x + 14} y={n.y + 4} textAnchor="start" fontSize={11} fill="#5f7090" className="select-none">{n.label}</text>
+                  <circle cx={n.x} cy={n.y} r={Math.max(6, Math.min(14, 6 + n.linkCount * 2))} fill="#46534b" opacity={0.85} />
+                  <text x={n.x + 14} y={n.y + 4} textAnchor="start" fontSize={11} fill="#46534b" className="select-none">{n.label}</text>
                 </g>
               ))}
               {/* 图例 */}
-              <circle cx={20} cy={svgH - 20} r={6} fill="#007aff" />
-              <text x={32} y={svgH - 16} fontSize={10} fill="#5f7090">剧情线</text>
-              <circle cx={90} cy={svgH - 20} r={6} fill="#5f7090" />
-              <text x={102} y={svgH - 16} fontSize={10} fill="#5f7090">章纲</text>
+              <circle cx={20} cy={svgH - 20} r={6} fill="#285b4d" />
+              <text x={32} y={svgH - 16} fontSize={10} fill="#46534b">剧情线</text>
+              <circle cx={90} cy={svgH - 20} r={6} fill="#46534b" />
+              <text x={102} y={svgH - 16} fontSize={10} fill="#46534b">章纲</text>
             </svg>
           </div>
         </section>

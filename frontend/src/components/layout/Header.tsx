@@ -77,14 +77,14 @@ export function Header({ onMenuClick }: HeaderProps) {
   )
 
   return (
-    <header className="relative z-20 flex h-16 shrink-0 items-center justify-between gap-4 border-b border-white/80 bg-white/45 px-4 backdrop-blur-xl md:px-8">
+    <header className="lj-topbar">
       <div className="flex min-w-0 items-center gap-3">
         <button
           onClick={onMenuClick}
-          className="hh-icon-btn md:hidden"
+          className="hh-icon-btn h-8 w-8 md:hidden"
           aria-label="切换侧栏"
         >
-          <Menu className="h-5 w-5" />
+          <Menu className="h-4 w-4" />
         </button>
 
         <nav className="flex min-w-0 items-center gap-1.5 text-sm" aria-label="面包屑">
@@ -99,12 +99,12 @@ export function Header({ onMenuClick }: HeaderProps) {
       <div className="relative" ref={menuRef}>
         <button
           onClick={() => setMenuOpen((prev) => !prev)}
-          className="flex items-center gap-2.5 border border-transparent py-1 pl-1 pr-2 hover:border-surface-border hover:bg-white/70"
+          className="flex items-center gap-2 rounded border border-transparent py-0.5 pl-0.5 pr-2 hover:border-surface-border hover:bg-white"
         >
           {user?.avatar_url ? (
-            <img src={user.avatar_url} alt="" className="h-8 w-8 object-cover" />
+            <img src={user.avatar_url} alt="" className="h-7 w-7 rounded-full object-cover" />
           ) : (
-            <span className="flex h-8 w-8 items-center justify-center bg-brand/10 text-brand">
+            <span className="flex h-7 w-7 items-center justify-center rounded-full bg-brand-100 text-brand">
               <UserIcon className="h-4 w-4" />
             </span>
           )}
@@ -118,9 +118,9 @@ export function Header({ onMenuClick }: HeaderProps) {
           <div className="hh-menu absolute right-0 top-full mt-2 w-[240px]">
             <div className="flex items-center gap-3 px-3 py-3">
               {user?.avatar_url ? (
-                <img src={user.avatar_url} alt="" className="h-10 w-10 object-cover" />
+                <img src={user.avatar_url} alt="" className="h-10 w-10 rounded-full object-cover" />
               ) : (
-                <span className="flex h-10 w-10 items-center justify-center bg-brand/10 text-brand">
+                <span className="flex h-10 w-10 items-center justify-center rounded-full bg-brand-100 text-brand">
                   <UserIcon className="h-5 w-5" />
                 </span>
               )}
@@ -144,7 +144,7 @@ export function Header({ onMenuClick }: HeaderProps) {
               <KeyRound className="h-4 w-4 text-content-secondary" />
               修改密码
             </button>
-            <button onClick={handleLogout} className="hh-menu-item text-red-500 hover:bg-red-50">
+            <button onClick={handleLogout} className="hh-menu-item text-cinnabar hover:bg-cinnabar-wash">
               <LogOut className="h-4 w-4" />
               退出登录
             </button>

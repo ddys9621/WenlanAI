@@ -278,9 +278,9 @@ export default function Characters() {
 
   return (
     <div className="animate-fade-in space-y-6">
-      <section className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
+      <section className="lj-page-header">
         <div className="min-w-0">
-          <h1 className="text-[28px] font-semibold tracking-tight text-content md:text-[32px]">角色与组织</h1>
+          <h1 className="lj-page-title">角色与组织</h1>
           <p className="mt-2 max-w-[560px] text-sm leading-6 text-content-secondary">
             管理故事中的人物与势力，这些设定会作为 AI 续写时的上下文。共 {charCount} 个人物 · {orgCount} 个组织。
           </p>
