@@ -406,7 +406,6 @@ const IMPORT_STAT_LABELS: Record<string, string> = {
   characters: '角色',
   chapters: '章节',
   outlines: '总纲',
-  plot_cards: '剧情卡片',
   volumes: '卷纲',
   chapter_outlines: '章纲',
   writing_styles: '写作风格',

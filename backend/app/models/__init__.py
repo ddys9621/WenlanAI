@@ -18,10 +18,8 @@ from app.models.mcp_plugin import MCPPlugin
 from app.models.user import User, UserPassword
 from app.models.system_setting import SystemSetting
 from app.models.volume import Volume
-from app.models.plot_card import PlotCard
 from app.models.chapter_outline import ChapterOutline
 from app.models.story_outline import StoryOutline
-from app.models.plot_card_chapter_outline_link import PlotCardChapterOutlineLink
 from app.models.world_rule import WorldRule
 from app.models.chapter_causal_link import ChapterCausalLink
 from app.models.narrative_promise import NarrativePromise
@@ -65,10 +63,8 @@ __all__ = [
     "UserPassword",
     "SystemSetting",
     "Volume",
-    "PlotCard",
     "ChapterOutline",
     "StoryOutline",
-    "PlotCardChapterOutlineLink",
     "WorldRule",
     "ChapterCausalLink",
     "NarrativePromise",

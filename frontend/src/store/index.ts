@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Project, Outline, Character, Chapter, PlotCard, Volume, ChapterOutline } from '../types';
+import type { Project, Outline, Character, Chapter, Volume, ChapterOutline } from '../types';
 
 interface AppState {
   currentProject: Project | null;
@@ -33,13 +33,6 @@ interface AppState {
 
   currentChapter: Chapter | null;
   setCurrentChapter: (chapter: Chapter | null) => void;
-
-  // 剧情卡片状态
-  plotCards: PlotCard[];
-  setPlotCards: (plotCards: PlotCard[]) => void;
-  addPlotCard: (plotCard: PlotCard) => void;
-  updatePlotCard: (plotCard: PlotCard) => void;
-  removePlotCard: (id: string) => void;
 
   // 卷纲状态
   volumes: Volume[];
@@ -133,21 +126,6 @@ export const useStore = create<AppState>((set) => ({
   currentChapter: null,
   setCurrentChapter: (chapter) => set({ currentChapter: chapter }),
 
-  // 剧情卡片状态实现
-  plotCards: [],
-  setPlotCards: (plotCards) => set({ plotCards }),
-  addPlotCard: (plotCard) => set((state) => ({ 
-    plotCards: [...state.plotCards, plotCard] 
-  })),
-  updatePlotCard: (updatedPlotCard) => set((state) => ({
-    plotCards: state.plotCards.map((card) => 
-      card.id === updatedPlotCard.id ? updatedPlotCard : card
-    ),
-  })),
-  removePlotCard: (id) => set((state) => ({
-    plotCards: state.plotCards.filter((card) => card.id !== id),
-  })),
-
   // 卷纲状态实现
   volumes: [],
   setVolumes: (volumes) => set({ volumes }),
@@ -181,7 +159,6 @@ export const useStore = create<AppState>((set) => ({
     characters: [],
     chapters: [],
     currentChapter: null,
-    plotCards: [],
     volumes: [],
     chapterOutlines: [],
   }),

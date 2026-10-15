@@ -7,7 +7,7 @@
 - system：人设 + 视角 / 类型指导 + 文风 + 平台写法 + 项目风格 + 写作优先级（只说一次）+ 输出要求——跨章稳定，
   可命中各家的前缀缓存
 - user：作品设定 → 前情脉络（层级摘要）→ 近期剧情 → 相关旧事 → 出场角色与状态 → 地图与方位 → 叙事账本 → 参考资料 →
-  上一章正文 → 本段章纲 → 本章任务（章纲 / 剧情卡 / 叙事任务 / 结构要求 / 字数 / 用户微调）→ 收尾
+  上一章正文 → 本段章纲 → 本章任务（章纲 / 叙事任务 / 结构要求 / 字数 / 用户微调）→ 收尾
 - 全部上下文过预算器（context_budget），本章任务与收尾永不裁剪
 """
 from __future__ import annotations
@@ -16,15 +16,15 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from app.services.context_budget import ContextSection, budget_report, clip_text, fit_sections, render_sections
-from app.services.prompt_service import CHAPTER_OUTPUT_INSTRUCTION, CHAPTER_STYLE_RULES, CHAPTER_WRITER_PERSONA, PromptService
+from app.services.prompt_service import CHAPTER_OUTPUT_INSTRUCTION, CHAPTER_STYLE_RULES, PromptService
 from app.utils.prompt_safety import UNTRUSTED_DATA_RULE, quote_untrusted
 
 DEFAULT_BUDGET_CHARS = 36_000
 CONTINUATION_TAIL_CHARS = 1500
 
-SYSTEM_PERSONA = CHAPTER_WRITER_PERSONA.replace(
-    "下面是这本书的设定和本章要写的东西：设定、章纲、剧情卡是硬约束，文风按「叙事与文风要求」来。照着写这一章：",
-    "用户会给你这本书的设定、前情和本章任务，你照着写这一章。",
+SYSTEM_PERSONA = (
+    "你是一个在起点、番茄这类平台写了几百万字的网文老作者，习惯日更，写出来的东西读者在手机上刷着看不费劲。"
+    "用户会给你这本书的设定、前情和本章任务，你照着写这一章。"
 )
 
 PRIORITY_RULES = """## 写作优先级（冲突时按这个顺序取舍，只在这里说一次）
@@ -62,7 +62,6 @@ class ChapterPromptInput:
     chapter_title: str
     chapter_outline_text: str
     outline_window: str = ""
-    linked_cards: str = ""
     narrative_tasks: str = ""
     structure_requirements: str = ""
     hook_policy: str = "hook"
@@ -155,11 +154,6 @@ def _task_text(inp: ChapterPromptInput, closing: str) -> str:
     low = int(inp.target_word_count * (1 - inp.word_soft_range))
     high = int(inp.target_word_count * (1 + inp.word_soft_range))
     parts = [f"写第{inp.chapter_number}章《{inp.chapter_title}》。", "本章章纲：\n" + inp.chapter_outline_text.strip()]
-    if inp.linked_cards.strip():
-        parts.append(
-            "本章剧情卡（按顺序写到：卡里的事件必须发生，顺序可按逻辑微调；对话、动作、细节自由发挥，但不新增卡外的大事件）：\n"
-            + inp.linked_cards.strip()
-        )
     if inp.narrative_tasks.strip():
         parts.append("本章叙事任务（伏笔 / 承诺）：\n" + inp.narrative_tasks.strip())
     if inp.structure_requirements.strip():

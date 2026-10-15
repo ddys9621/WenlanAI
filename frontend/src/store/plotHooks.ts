@@ -4,11 +4,8 @@
 import { useCallback } from 'react';
 import { toast } from 'sonner';
 import { useStore } from './index';
-import { plotCardApi, volumeApi, chapterOutlineApi } from '../services/api';
+import { volumeApi, chapterOutlineApi } from '../services/api';
 import type {
-  PlotCardCreate,
-  PlotCardUpdate,
-  PlotCardReorderRequest,
   VolumeFields,
   ChapterOutlineCreate,
   ChapterOutlineUpdate,
@@ -16,109 +13,6 @@ import type {
   ChapterOutlineBatchCreateRequest,
   // PaginationResponse
 } from '../types';
-
-// 剧情卡片状态管理
-export function usePlotCardSync() {
-  const {
-    plotCards,
-    setPlotCards,
-    addPlotCard,
-    updatePlotCard,
-    removePlotCard,
-  } = useStore();
-
-  // 刷新剧情卡片列表
-  const refreshPlotCards = useCallback(async (projectId: string, params?: {
-    skip?: number;
-    limit?: number;
-    card_type?: string;
-    chapter_outline_id?: string;
-  }) => {
-    try {
-      const response = await plotCardApi.getPlotCards(projectId, params);
-      setPlotCards(response.items);
-      return response;
-    } catch (error) {
-      console.error('获取剧情卡片失败:', error);
-      toast.error('获取剧情卡片失败');
-      throw error;
-    }
-  }, [setPlotCards]);
-
-  // 创建剧情卡片
-  const createPlotCard = useCallback(async (data: PlotCardCreate) => {
-    try {
-      const newCard = await plotCardApi.createPlotCard(data);
-      addPlotCard(newCard);
-      toast.success('剧情卡片创建成功');
-      return newCard;
-    } catch (error) {
-      console.error('创建剧情卡片失败:', error);
-      toast.error('创建剧情卡片失败');
-      throw error;
-    }
-  }, [addPlotCard]);
-
-  // 更新剧情卡片
-  const updatePlotCardData = useCallback(async (cardId: string, data: PlotCardUpdate) => {
-    try {
-      const updatedCard = await plotCardApi.updatePlotCard(cardId, data);
-      updatePlotCard(updatedCard);
-      toast.success('剧情卡片更新成功');
-      return updatedCard;
-    } catch (error) {
-      console.error('更新剧情卡片失败:', error);
-      toast.error('更新剧情卡片失败');
-      throw error;
-    }
-  }, [updatePlotCard]);
-
-  // 删除剧情卡片
-  const deletePlotCard = useCallback(async (cardId: string) => {
-    try {
-      await plotCardApi.deletePlotCard(cardId);
-      removePlotCard(cardId);
-      toast.success('剧情卡片删除成功');
-    } catch (error) {
-      console.error('删除剧情卡片失败:', error);
-      toast.error('删除剧情卡片失败');
-      throw error;
-    }
-  }, [removePlotCard]);
-
-  // 重排序剧情卡片
-  const reorderPlotCards = useCallback(async (data: PlotCardReorderRequest) => {
-    try {
-      await plotCardApi.reorderPlotCards(data);
-      toast.success('剧情卡片排序更新成功');
-    } catch (error) {
-      console.error('重排序剧情卡片失败:', error);
-      toast.error('重排序剧情卡片失败');
-      throw error;
-    }
-  }, []);
-
-  // 获取卡片类型统计
-  const getCardTypes = useCallback(async (projectId: string) => {
-    try {
-      const response = await plotCardApi.getCardTypes(projectId);
-      return response.types;
-    } catch (error) {
-      console.error('获取卡片类型失败:', error);
-      throw error;
-    }
-  }, []);
-
-  return {
-    plotCards,
-    refreshPlotCards,
-    createPlotCard,
-    updatePlotCard: updatePlotCardData,
-    deletePlotCard,
-    reorderPlotCards,
-    getCardTypes,
-  };
-}
 
 // 卷纲状态管理（总纲 → 卷纲 → 章纲；三个 AI 生成走 volumeApi 的后台任务 + SSE，在页面里调用）
 export function useVolumeSync() {

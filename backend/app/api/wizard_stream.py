@@ -13,7 +13,6 @@ from app.models.character import Character
 from app.models.story_outline import StoryOutline
 from app.models.chapter import Chapter
 from app.models.chapter_outline import ChapterOutline
-from app.models.plot_card import PlotCard
 from app.models.relationship import CharacterRelationship, Organization, OrganizationMember
 from app.services.relationship_matcher import match_relationship_type
 from app.models.world_rule import WorldRule
@@ -1928,13 +1927,6 @@ async def cleanup_wizard_generator(
         volumes = volumes_result.scalars().all()
         volumes_count = len(volumes)
 
-        # 统计剧情卡片
-        plot_cards_result = await db.execute(
-            select(PlotCard).where(PlotCard.project_id == project_id)
-        )
-        plot_cards = plot_cards_result.scalars().all()
-        plot_cards_count = len(plot_cards)
-
         # 统计章纲
         chapter_outlines_result = await db.execute(
             select(ChapterOutline).where(ChapterOutline.project_id == project_id)
@@ -1957,7 +1949,7 @@ async def cleanup_wizard_generator(
         memories_count = len(memories)
         
         yield await SSEResponse.send_progress(
-            f"找到 {characters_count} 个角色，{outlines_count} 个大纲，{volumes_count} 卷卷纲，{plot_cards_count} 张剧情卡片，{chapter_outlines_count} 个章纲，{chapters_count} 个章节，{memories_count} 条记忆",
+            f"找到 {characters_count} 个角色，{outlines_count} 个大纲，{volumes_count} 卷卷纲，{chapter_outlines_count} 个章纲，{chapters_count} 个章节，{memories_count} 条记忆",
             30
         )
         
@@ -1989,25 +1981,19 @@ async def cleanup_wizard_generator(
             for chapter_outline in chapter_outlines:
                 await db.delete(chapter_outline)
 
-        # 4. 删除剧情卡片
-        if plot_cards_count > 0:
-            yield await SSEResponse.send_progress("删除剧情卡片...", 70)
-            for plot_card in plot_cards:
-                await db.delete(plot_card)
-
-        # 5. 删除卷纲（章纲已先删，卷纲没有下游了）
+        # 4. 删除卷纲（章纲已先删，卷纲没有下游了）
         if volumes_count > 0:
             yield await SSEResponse.send_progress("删除卷纲...", 74)
             for volume in volumes:
                 await db.delete(volume)
 
-        # 6. 删除大纲
+        # 5. 删除大纲
         if outlines_count > 0:
             yield await SSEResponse.send_progress("删除大纲...", 78)
             for outline in outlines:
                 await db.delete(outline)
 
-        # 7. 删除角色和关系
+        # 6. 删除角色和关系
         if characters_count > 0:
             yield await SSEResponse.send_progress("删除角色和关系...", 82)
             
@@ -2039,7 +2025,7 @@ async def cleanup_wizard_generator(
             for character in characters:
                 await db.delete(character)
         
-        # 8. 重置项目统计
+        # 7. 重置项目统计
         yield await SSEResponse.send_progress("重置项目统计...", 90)
         project.character_count = 0
         project.current_words = 0
@@ -2055,7 +2041,6 @@ async def cleanup_wizard_generator(
                 "characters": characters_count,
                 "outlines": outlines_count,
                 "volumes": volumes_count,
-                "plot_cards": plot_cards_count,
                 "chapter_outlines": chapter_outlines_count,
                 "chapters": chapters_count,
                 "memories": memories_count

@@ -12,13 +12,12 @@ from app.services import outline_review_service as review
 from app.services.narrative_tasks import parse_narrative_tasks
 
 logger = get_logger(__name__)
-from app.models import ChapterOutline, PlotCard, PlotCardChapterOutlineLink
+from app.models import ChapterOutline
 from app.schemas.chapter_outline import (
     ChapterOutlineCreate, ChapterOutlineUpdate, ChapterOutlineResponse,
     ChapterOutlineReorderRequest,
     ChapterOutlineListResponse, ChapterOutlineBatchCreateRequest
 )
-from app.schemas.link_schemas import PlotCardWithLinks
 
 router = APIRouter(prefix="/chapter-outlines", tags=["章纲"])
 
@@ -45,7 +44,7 @@ def _string_list(raw: Any, dict_keys: tuple[str, ...] = ()) -> list[str]:
     return out
 
 
-def _outline_response(outline: ChapterOutline, plot_card_count: int = 0) -> ChapterOutlineResponse:
+def _outline_response(outline: ChapterOutline) -> ChapterOutlineResponse:
     return ChapterOutlineResponse(
         id=outline.id,
         project_id=outline.project_id,
@@ -71,7 +70,6 @@ def _outline_response(outline: ChapterOutline, plot_card_count: int = 0) -> Chap
         unit_index=outline.unit_index,
         created_at=outline.created_at,
         updated_at=outline.updated_at,
-        plot_card_count=plot_card_count,
     )
 
 
@@ -105,23 +103,7 @@ async def get_chapter_outlines(
     query = query.order_by(ChapterOutline.chapter_number.asc(), ChapterOutline.order_index.asc())
     total = (await db.execute(select(func.count()).select_from(query.subquery()))).scalar()
     outlines = (await db.execute(query.offset(skip).limit(limit))).scalars().all()
-
-    # 关联计数一次 GROUP BY 取齐（此前每行各查 2 次 COUNT，100 章 = 200 条 SQL）
-    outline_ids = [o.id for o in outlines]
-    plot_card_counts: dict[str, int] = {}
-    if outline_ids:
-        rows = await db.execute(
-            select(PlotCardChapterOutlineLink.chapter_outline_id, func.count(PlotCardChapterOutlineLink.id))
-            .where(PlotCardChapterOutlineLink.chapter_outline_id.in_(outline_ids))
-            .group_by(PlotCardChapterOutlineLink.chapter_outline_id)
-        )
-        plot_card_counts = dict(rows.all())
-
-    items = [
-        _outline_response(o, plot_card_counts.get(o.id, 0))
-        for o in outlines
-    ]
-    return ChapterOutlineListResponse(total=total, items=items)
+    return ChapterOutlineListResponse(total=total, items=[_outline_response(o) for o in outlines])
 
 
 @router.get("/{outline_id}", response_model=ChapterOutlineResponse)
@@ -270,31 +252,3 @@ async def batch_create_chapter_outlines(
     for outline in created_outlines:
         await db.refresh(outline)
     return [_outline_response(outline) for outline in created_outlines]
-
-
-@router.get("/{outline_id}/plot-cards", response_model=List[PlotCardWithLinks])
-async def get_chapter_outline_plot_cards(outline_id: str, request: Request, db: AsyncSession = Depends(get_db)):
-    """获取章纲关联的所有剧情卡片"""
-    await _load_outline(db, request, outline_id)
-
-    rows = (await db.execute(
-        select(PlotCard, PlotCardChapterOutlineLink.usage_type)
-        .join(PlotCardChapterOutlineLink, PlotCard.id == PlotCardChapterOutlineLink.plot_card_id)
-        .where(PlotCardChapterOutlineLink.chapter_outline_id == outline_id)
-        .order_by(PlotCard.order_index.asc())
-    )).all()
-
-    plot_cards = []
-    for row in rows:
-        card = row[0]
-        chapter_count = (await db.execute(
-            select(func.count()).select_from(PlotCardChapterOutlineLink).where(PlotCardChapterOutlineLink.plot_card_id == card.id)
-        )).scalar() or 0
-        plot_cards.append(PlotCardWithLinks(
-            id=card.id,
-            title=card.title,
-            content=card.content,
-            card_type=card.card_type,
-            chapter_count=chapter_count
-        ))
-    return plot_cards

@@ -40,7 +40,6 @@ class Project(Base):
     
     # 关联关系
     story_outlines = relationship("StoryOutline", back_populates="project", cascade="all, delete-orphan")
-    plot_cards = relationship("PlotCard", back_populates="project", cascade="all, delete-orphan")
     chapter_outlines = relationship("ChapterOutline", back_populates="project", cascade="all, delete-orphan")
     
     def __repr__(self):

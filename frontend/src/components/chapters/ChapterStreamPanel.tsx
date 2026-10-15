@@ -1,11 +1,10 @@
 /** AI 创作面板：全局正文任务在页面里的视图（关面板 / 切页 / 刷新都不影响任务）。结果是候选稿，在候选稿面板审阅采用。 */
 import { useEffect, useRef } from 'react';
-import { FileCheck2, LayoutGrid, Loader2, Zap } from 'lucide-react';
+import { FileCheck2, Zap } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { AIJobProcess } from '@/components/ai-job/AIJobProcess';
 import type { StreamState } from '@/hooks/useChapterWriteJobs';
 import type { AIJobState } from '@/types/ai_job';
-import type { PlotCardWithLinks } from '@/types';
 
 interface ChapterStreamPanelProps {
   streamState: StreamState;
@@ -17,17 +16,13 @@ interface ChapterStreamPanelProps {
   onHide: () => void;
   onCancel: () => void;
   onClose: () => void;
-  relatedCards: PlotCardWithLinks[];
-  loadingCards: boolean;
   /** 打开候选稿审阅（生成 / 重写完成后） */
   onReviewCandidate: () => void;
 }
 
-const CARD_TYPE_LABEL: Record<string, string> = { plot: '剧情', character: '角色', scene: '场景', conflict: '冲突' };
-
 export function ChapterStreamPanel({
   streamState, streamJob, streamDone, batchRunning, showProcess, onToggleProcess, onHide, onCancel, onClose,
-  relatedCards, loadingCards, onReviewCandidate,
+  onReviewCandidate,
 }: ChapterStreamPanelProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isRewrite = streamJob?.kind === 'chapter_regenerate';
@@ -86,7 +81,7 @@ export function ChapterStreamPanel({
         </p>
       </div>
 
-      {/* 过程面板：阶段 / MCP 工具 / 参考资料（记忆、剧情卡、参考包） */}
+      {/* 过程面板：阶段 / MCP 工具 / 参考资料（记忆、参考包） */}
       {streamJob && showProcess && (
         <div className="border-b border-surface-border/80 bg-white/40 px-5 py-4">
           <AIJobProcess job={streamJob} />
@@ -94,35 +89,7 @@ export function ChapterStreamPanel({
       )}
 
       <div className="flex min-h-[400px]">
-        {/* 左侧：关联卡片 */}
-        {(relatedCards.length > 0 || loadingCards) && (
-          <aside className="w-64 flex-shrink-0 overflow-y-auto border-r border-surface-border/80 bg-brand/[0.03] p-4" style={{ maxHeight: '500px' }}>
-            <div className="mb-3 flex items-center gap-1.5 text-xs font-medium text-content-secondary">
-              <LayoutGrid className="h-3.5 w-3.5 text-content-tertiary" />
-              关联剧情卡片
-            </div>
-            {loadingCards ? (
-              <div className="flex items-center justify-center gap-1.5 py-4 text-xs text-content-tertiary">
-                <Loader2 className="h-3 w-3 animate-spin" />
-                加载中…
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {relatedCards.map((card) => (
-                  <div key={card.id} className="hh-subpanel p-3">
-                    <div className="mb-1 flex items-center gap-1.5">
-                      <span className="hh-tag px-1.5 py-0.5 text-[10px]">{CARD_TYPE_LABEL[card.card_type] ?? '其他'}</span>
-                      <span className="truncate text-xs font-medium text-content">{card.title}</span>
-                    </div>
-                    <p className="line-clamp-3 text-[11px] leading-relaxed text-content-tertiary">{card.content || '无内容'}</p>
-                  </div>
-                ))}
-              </div>
-            )}
-          </aside>
-        )}
-
-        {/* 右侧：流式内容编辑区 */}
+        {/* 流式内容编辑区 */}
         <div className="flex flex-1 flex-col">
           <textarea
             ref={textareaRef}

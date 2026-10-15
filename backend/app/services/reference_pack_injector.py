@@ -370,7 +370,7 @@ class ReferencePackInjector:
     ) -> str:
         """灵感语料：BM25 + 1-hop 关系扩展（V3.1.3）。
 
-        anchor_query 为检索锚点（如作者本次意图、当前章纲、剧情卡内容等）。
+        anchor_query 为检索锚点（如作者本次意图、当前章纲等）。
         没有 anchor 则跳过——corpus 是定向检索，无锚点没意义。
         """
         if not anchor_query or not anchor_query.strip():

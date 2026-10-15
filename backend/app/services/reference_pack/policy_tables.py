@@ -5,7 +5,7 @@
 
 4 张表：
 1. MODEL_TIERS    模型分档（S/M/L/XL）按上下文窗口大小
-2. POLICY_TABLE   场景×档位 → 维度策略（8 场景 × 4 档 = 32 entry）
+2. POLICY_TABLE   场景×档位 → 维度策略（7 场景 × 4 档 = 28 entry）
 3. CORPUS_TOPK    corpus 检索 top-K 查表
 4. HISTORICAL_CONTEXT_TABLE  历史接续摘要数量查表
 5. MEMORY_TOPK_TABLE         智能记忆 top-K 查表
@@ -185,13 +185,7 @@ POLICY_TABLE: dict[tuple[str, ModelTier], dict[str, Strength]] = {
                                 "bridges": "medium", "structure": "deep", "synopsis": "medium",
                                 "character_archive": "medium"},
 
-    # ============ 5b. 场景生成（卡片）============
-    ("scene_generation", "S"):  {"style": "medium", "corpus": "light"},
-    ("scene_generation", "M"):  {"style": "deep", "corpus": "medium"},
-    ("scene_generation", "L"):  {"style": "deep", "corpus": "deep", "structure": "light"},
-    ("scene_generation", "XL"): {"style": "deep", "corpus": "deep", "structure": "medium"},
-
-    # ============ 5c. 章节重生成 ============
+    # ============ 5b. 章节重生成 ============
     ("chapter_regenerate", "S"):  {"style": "medium", "corpus": "light"},
     ("chapter_regenerate", "M"):  {"style": "deep", "corpus": "medium", "methodology": "medium"},
     ("chapter_regenerate", "L"):  {"style": "deep", "corpus": "medium", "methodology": "medium"},
@@ -224,11 +218,6 @@ CORPUS_TOPK: dict[tuple[str, ModelTier], int] = {
     ("chapter_outline", "M"):  2,
     ("chapter_outline", "L"):  3,
     ("chapter_outline", "XL"): 5,
-
-    ("scene_generation", "S"):  1,
-    ("scene_generation", "M"):  2,
-    ("scene_generation", "L"):  3,
-    ("scene_generation", "XL"): 3,
 
     ("chapter_regenerate", "S"):  1,
     ("chapter_regenerate", "M"):  2,

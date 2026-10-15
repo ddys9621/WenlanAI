@@ -80,13 +80,10 @@ class AssemblyContext:
     model_name: str                           # 必填：用于查 model tier
     project_id: str                           # 必填
 
-    # 章节相关（chapter_content / scene_generation / chapter_regenerate）
+    # 章节相关（chapter_content / chapter_regenerate）
     chapter_id: Optional[str] = None
     chapter_outline_id: Optional[str] = None
     target_word_count: int = 3000
-
-    # 场景生成
-    plot_card_id: Optional[str] = None
 
     # 角色生成
     role_type: Optional[str] = None

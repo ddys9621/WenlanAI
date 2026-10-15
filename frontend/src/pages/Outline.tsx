@@ -1,17 +1,15 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { Plus, Pencil, Trash2, FileText, Loader2, Sparkles, LayoutGrid, Layers, BookOpen, Check, Eye } from 'lucide-react'
+import { Plus, Pencil, Trash2, FileText, Loader2, Sparkles, Layers, BookOpen, Check, Eye } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 import { useStore } from '@/store/index'
 import { useOutlineSync } from '@/store/hooks'
-import { usePlotCardSync, useVolumeSync, useChapterOutlineSync } from '@/store/plotHooks'
-import { useAIJobsStore, useRunningAIJobs } from '@/store/aiJobsStore'
+import { useVolumeSync, useChapterOutlineSync } from '@/store/plotHooks'
 import { useAssistantDataChange } from '@/hooks/useAssistantPage'
 import type { AssistantDataChange } from '@/store/assistantStore'
-import { wizardStreamApi, chapterOutlineApi, plotCardApi } from '@/services/api'
+import { wizardStreamApi, chapterOutlineApi } from '@/services/api'
 import { VolumesView } from '@/components/outline/VolumesView'
-import { AIJobBanner } from '@/components/ai-job/AIJobBanner'
 import { MCPSelector } from '@/components/MCPSelector'
 import {
   ReferencePackSelector,
@@ -20,21 +18,18 @@ import {
 } from '@/components/ReferencePackSelector'
 import { Modal as UiModal, type ModalSize } from '@/components/ui/Modal'
 import type {
-  Outline, OutlineCreate, OutlineUpdate,
-  PlotCard, PlotCardCreate, PlotCardUpdate,
-  PlotCardGenerateRequest, Volume,
+  Outline, OutlineCreate, OutlineUpdate, Volume,
   ChapterOutline, ChapterOutlineCreate, ChapterOutlineUpdate,
   ChapterOutlineBatchCreateRequest, NarrativeTasks,
 } from '@/types'
 
-type TabKey = 'outlines' | 'volumes' | 'chapterOutlines' | 'plotCards'
+type TabKey = 'outlines' | 'volumes' | 'chapterOutlines'
 
-/** 谋篇：总纲 → 卷纲（剧情单元 + 线索编排）→ 章纲；剧情卡片是可选的灵感素材 */
+/** 谋篇：总纲 → 卷纲（剧情单元 + 线索编排）→ 章纲 */
 const TABS: { key: TabKey; label: string; icon: React.ElementType; path: string }[] = [
   { key: 'outlines', label: '总纲', icon: FileText, path: '' },
   { key: 'volumes', label: '卷纲', icon: Layers, path: 'volumes' },
   { key: 'chapterOutlines', label: '章纲', icon: BookOpen, path: 'chapters' },
-  { key: 'plotCards', label: '剧情卡片', icon: LayoutGrid, path: 'cards' },
 ]
 
 const tabFromPath = (path?: string): TabKey => TABS.find((t) => t.path && path?.startsWith(t.path))?.key ?? 'outlines'
@@ -51,7 +46,6 @@ export default function OutlinePage() {
 
   // hooks
   const { refreshOutlines, createOutline, updateOutline, deleteOutline, activateOutline } = useOutlineSync()
-  const { plotCards, refreshPlotCards, createPlotCard, updatePlotCard, deletePlotCard } = usePlotCardSync()
   const { volumes, refreshVolumes, saveVolume, confirmVolume, deleteVolume } = useVolumeSync()
   const { chapterOutlines, refreshChapterOutlines, createChapterOutline, updateChapterOutline: updateChapterOutlineData, deleteChapterOutline, batchCreateChapterOutlines } = useChapterOutlineSync()
 
@@ -61,11 +55,10 @@ export default function OutlinePage() {
     setLoading(true)
     Promise.all([
       refreshOutlines(),
-      refreshPlotCards(projectId),
       refreshVolumes(projectId),
       refreshChapterOutlines(projectId),
     ]).finally(() => setLoading(false))
-  }, [projectId, refreshChapterOutlines, refreshOutlines, refreshPlotCards, refreshVolumes])
+  }, [projectId, refreshChapterOutlines, refreshOutlines, refreshVolumes])
 
   // 全局智能助笔改了章纲 / 总纲（改总纲会把卷纲和章纲标成「上游已改」）或规划了卷纲：刷新
   const onAssistantData = useCallback((change: AssistantDataChange) => {
@@ -131,7 +124,6 @@ export default function OutlinePage() {
             />
           )}
           {activeTab === 'chapterOutlines' && <ChapterOutlinesView chapterOutlines={chapterOutlines} volumes={volumes} projectId={projectId} createChapterOutline={createChapterOutline} updateChapterOutline={updateChapterOutlineData} deleteChapterOutline={deleteChapterOutline} batchCreateChapterOutlines={batchCreateChapterOutlines} onOpenVolumes={() => setActiveTab('volumes')} onRefresh={() => (projectId ? refreshChapterOutlines(projectId) : Promise.resolve())} />}
-          {activeTab === 'plotCards' && <PlotCardsView plotCards={plotCards} projectId={projectId} outlines={outlines} createPlotCard={createPlotCard} updatePlotCard={updatePlotCard} deletePlotCard={deletePlotCard} refreshPlotCards={refreshPlotCards} />}
         </>
       )}
     </div>
@@ -502,214 +494,6 @@ function OutlinesView({ outlines, projectId, createOutline, updateOutline, delet
           </Modal>
         );
       })()}
-    </section>
-  )
-}
-// ==================== Tab 2: 剧情卡片 ====================
-function PlotCardsView({ plotCards, projectId, outlines, createPlotCard, updatePlotCard, deletePlotCard, refreshPlotCards }: {
-  plotCards: PlotCard[]
-  projectId?: string
-  outlines: Outline[]
-  createPlotCard: (data: PlotCardCreate) => Promise<PlotCard>
-  updatePlotCard: (id: string, data: PlotCardUpdate) => Promise<PlotCard>
-  deletePlotCard: (id: string) => Promise<void>
-  refreshPlotCards: (projectId: string) => Promise<unknown>
-}) {
-  const [showModal, setShowModal] = useState(false)
-  const [editing, setEditing] = useState<PlotCard | null>(null)
-  const [form, setForm] = useState({ title: '', content: '', card_type: '起因', order_index: 0 })
-  // AI 生成走通用后台任务：禁用态由 store 派生（刷新后仍正确）
-  const startJob = useAIJobsStore((s) => s.start)
-  const generating = useRunningAIJobs(projectId, ['plot_cards_generate']).length > 0
-  const [showGenModal, setShowGenModal] = useState(false)
-  const [genForm, setGenForm] = useState({ card_type: '起因', count: 5, prompt: '', extend_from_card_id: '' })
-  const [genEnableMcp, setGenEnableMcp] = useState(false)
-  const [genPlugins, setGenPlugins] = useState<string[]>([])
-
-  const CARD_TYPES = ['起因', '经过', '高潮', '结局', '伏笔', '转折', '其他']
-
-  const openCreate = () => { setEditing(null); setForm({ title: '', content: '', card_type: '起因', order_index: plotCards.length }); setShowModal(true) }
-  const openEdit = (c: PlotCard) => { setEditing(c); setForm({ title: c.title, content: c.content || '', card_type: c.card_type, order_index: c.order_index ?? 0 }); setShowModal(true) }
-
-  const handleSubmit = async () => {
-    if (!projectId) return
-    if (!form.title.trim()) { toast.error('请填写标题'); return }
-    try {
-      if (editing) {
-        await updatePlotCard(editing.id, { title: form.title, content: form.content, card_type: form.card_type, order_index: form.order_index })
-      } else {
-        await createPlotCard({ project_id: projectId, title: form.title, content: form.content, card_type: form.card_type, order_index: form.order_index })
-      }
-      setShowModal(false)
-    } catch { /* hook 已 toast */ }
-  }
-
-  /** AI 生成剧情卡：通用后台任务（弹窗展示 MCP 规划 / 参考包 / 模型进度；可最小化、可停止、刷新后可重连） */
-  const handleGenerate = async () => {
-    if (!projectId) return
-    const activeOutline = outlines.find(o => o.is_active) || outlines[0]
-    if (!activeOutline) { toast.error('请先创建故事大纲'); return }
-    const payload: PlotCardGenerateRequest = {
-      project_id: projectId,
-      outline_id: activeOutline.id,
-      card_type: genForm.card_type,
-      count: genForm.count,
-      extend_from_card_id: genForm.extend_from_card_id || undefined,
-      prompt: genForm.prompt.trim() || undefined,
-      enable_mcp: genEnableMcp,
-      selected_plugins: genPlugins,
-    }
-    setShowGenModal(false)
-    try {
-      await startJob({
-        kind: 'plot_cards_generate',
-        title: `AI 生成剧情卡（${genForm.count} 张）`,
-        projectId,
-        connect: (options) => plotCardApi.generatePlotCardsStream(payload, options),
-        onSettled: (job) => {
-          if (job.status !== 'done') return
-          const cards = Array.isArray(job.result) ? job.result : []
-          toast.success(`成功生成 ${cards.length} 个剧情卡片`)
-          void refreshPlotCards(projectId)
-        },
-      })
-    } catch (err) { toast.error(err instanceof Error ? err.message : 'AI 生成剧情卡片失败') }
-  }
-
-  const handleDelete = async (c: PlotCard) => {
-    if (!confirm(`确定删除「${c.title}」？`)) return
-    try { await deletePlotCard(c.id) } catch { /* hook 已 toast */ }
-  }
-
-  return (
-    <section className="hh-panel space-y-4 p-6">
-      <AIJobBanner projectId={projectId} kinds={['plot_cards_generate']} />
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div className="min-w-0">
-          <h2 className="text-lg font-semibold tracking-tight text-content">剧情卡片</h2>
-          <p className="mt-1 text-sm leading-6 text-content-secondary">
-            把大纲拆成一张张可排序的剧情片段，按起因、经过、高潮、结局组织，共 {plotCards.length} 张。
-          </p>
-        </div>
-        <div className="flex shrink-0 flex-wrap items-center gap-2.5">
-          <button onClick={() => setShowGenModal(true)} disabled={generating} className="hh-btn-secondary">
-            {generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4 text-brand" />}
-            AI 生成
-          </button>
-          <button onClick={openCreate} className="hh-btn-primary">
-            <Plus className="h-4 w-4" />
-            新建卡片
-          </button>
-        </div>
-      </div>
-
-      {plotCards.length === 0 ? (
-        <EmptyBlock
-          icon={LayoutGrid}
-          title="还没有剧情卡片"
-          hint="点击右上角「新建卡片」手动添加，或用「AI 生成」基于活跃的故事大纲批量生成剧情片段。"
-        />
-      ) : (
-        <div className="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {[...plotCards].sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0)).map(c => (
-            <article key={c.id} className="hh-subpanel flex flex-col gap-2 p-4">
-              <div className="flex items-start justify-between gap-2">
-                <h3 className="min-w-0 flex-1 truncate text-[15px] font-semibold text-content">{c.title}</h3>
-                <div className="flex shrink-0 items-center gap-1">
-                  <button onClick={() => openEdit(c)} className="hh-icon-btn-plain h-8 w-8" title="编辑"><Pencil className="h-3.5 w-3.5" /></button>
-                  <button onClick={() => handleDelete(c)} className="hh-icon-btn-plain h-8 w-8 hover:text-red-500" title="删除"><Trash2 className="h-3.5 w-3.5" /></button>
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className={cn(STATUS_TAG, 'bg-brand/10 text-brand')}>{c.card_type}</span>
-                {c.order_index != null && <span className="text-xs text-content-tertiary tabular-nums">#{c.order_index + 1}</span>}
-              </div>
-              {c.content && <p className="line-clamp-3 text-[13px] leading-6 text-content-secondary">{c.content}</p>}
-            </article>
-          ))}
-        </div>
-      )}
-
-      {showGenModal && (
-        <Modal
-          title="AI 生成剧情卡片"
-          onClose={() => setShowGenModal(false)}
-          closeOnMaskClick={false}
-          footer={(
-            <>
-              <button onClick={() => setShowGenModal(false)} className="hh-btn-ghost">取消</button>
-              <button onClick={handleGenerate} disabled={generating} className="hh-btn-primary">
-                {generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-                开始生成
-              </button>
-            </>
-          )}
-        >
-          <div className="space-y-5">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <label className="hh-label">卡片类型</label>
-                <select value={genForm.card_type} onChange={e => setGenForm(f => ({ ...f, card_type: e.target.value }))} className="hh-field">
-                  {CARD_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-                </select>
-              </div>
-              <div>
-                <label className="hh-label">生成数量</label>
-                <input type="number" min={1} max={20} value={genForm.count} onChange={e => setGenForm(f => ({ ...f, count: Number(e.target.value) }))} className="hh-field" />
-              </div>
-            </div>
-            <div>
-              <label className="hh-label">从已有卡片延伸（可选）</label>
-              <select value={genForm.extend_from_card_id} onChange={e => setGenForm(f => ({ ...f, extend_from_card_id: e.target.value }))} className="hh-field">
-                <option value="">不指定</option>
-                {plotCards.map(c => <option key={c.id} value={c.id}>{c.title} [{c.card_type}]</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="hh-label">提示词（可选）</label>
-              <textarea value={genForm.prompt} onChange={e => setGenForm(f => ({ ...f, prompt: e.target.value }))} placeholder="对剧情卡片的特殊要求..." rows={2} className="hh-textarea" />
-            </div>
-            <MCPSelector value={{ enable: genEnableMcp, selected: genPlugins }} onChange={({ enable, selected }) => { setGenEnableMcp(enable); setGenPlugins(selected) }} />
-          </div>
-        </Modal>
-      )}
-
-      {showModal && (
-        <Modal
-          title={editing ? '编辑剧情卡片' : '新建剧情卡片'}
-          onClose={() => setShowModal(false)}
-          closeOnMaskClick={false}
-          footer={(
-            <>
-              <button onClick={() => setShowModal(false)} className="hh-btn-ghost">取消</button>
-              <button onClick={handleSubmit} className="hh-btn-primary">确定</button>
-            </>
-          )}
-        >
-          <div className="space-y-5">
-            <div>
-              <label className="hh-label">标题</label>
-              <input value={form.title} onChange={e => setForm(f => ({ ...f, title: e.target.value }))} className="hh-field" />
-            </div>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <label className="hh-label">类型</label>
-                <select value={form.card_type} onChange={e => setForm(f => ({ ...f, card_type: e.target.value }))} className="hh-field">
-                  {CARD_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-                </select>
-              </div>
-              <div>
-                <label className="hh-label">排序号</label>
-                <input type="number" value={form.order_index} onChange={e => setForm(f => ({ ...f, order_index: Number(e.target.value) }))} className="hh-field" />
-              </div>
-            </div>
-            <div>
-              <label className="hh-label">内容</label>
-              <textarea value={form.content} onChange={e => setForm(f => ({ ...f, content: e.target.value }))} rows={5} className="hh-textarea" />
-            </div>
-          </div>
-        </Modal>
-      )}
     </section>
   )
 }

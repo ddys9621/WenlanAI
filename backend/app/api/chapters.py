@@ -23,8 +23,6 @@ from app.models.writing_style import WritingStyle
 from app.models.analysis_task import AnalysisTask
 from app.models.memory import PlotAnalysis, StoryMemory
 from app.models.deai_prompt import DeaiPrompt
-from app.models.plot_card import PlotCard
-from app.models.plot_card_chapter_outline_link import PlotCardChapterOutlineLink
 from app.schemas.chapter import (
     ChapterBatchRequest,
     ChapterCreate,
@@ -55,6 +53,7 @@ from app.services.chapter_context_service import (
 )
 from app.services.volume_context import fetch_volume_context, render_structure
 from app.services.volume_context import hook_policy as volume_hook_policy
+from app.services.chapter_mcp_planning import plan_chapter_references
 from app.services.chapter_prompt_builder import ChapterPromptInput, build_chapter_prompt, build_continuation_prompt
 from app.services.adherence_review_service import has_reviewable_contract, review_candidate
 from app.services.chapter_candidate_service import create_candidate
@@ -1404,9 +1403,6 @@ class ChapterGenerateOptions:
 
 
 MAX_CONTINUATIONS = 2
-CARD_TYPE_LABELS = {'plot': '剧情', 'character': '角色', 'scene': '场景', 'conflict': '冲突', 'event': '事件',
-                    'dialogue': '对话', 'inner': '内心'}
-USAGE_TYPE_LABELS = {'reference': '参考', 'used': '已使用', 'planned': '计划使用'}
 
 
 def _outline_task_text(chapter_outline: ChapterOutline, target_word_count: int) -> str:
@@ -1446,7 +1442,7 @@ async def run_chapter_generation(job, *, chapter_id: str, user_id: str, ai_servi
     """
     current_user_id = user_id
     async with job_session_factory(current_user_id)() as db_session:
-        st_ctx = begin_stage("context", "加载章纲 / 世界规则 / 角色 / 剧情卡")
+        st_ctx = begin_stage("context", "加载章纲 / 世界规则 / 角色")
         current_chapter = (await db_session.execute(select(Chapter).where(Chapter.id == chapter_id))).scalar_one_or_none()
         if not current_chapter:
             raise ValueError('章节不存在')
@@ -1487,29 +1483,6 @@ async def run_chapter_generation(job, *, chapter_id: str, user_id: str, ai_servi
         current_outline_content = _outline_task_text(chapter_outline, target_word_count)
         logger.info(f"📖 使用章纲生成: 第{chapter_outline.chapter_number}章《{chapter_outline.title}》")
 
-        # 章纲关联的剧情卡
-        linked_plot_cards_data = (await db_session.execute(
-            select(PlotCard, PlotCardChapterOutlineLink.usage_type, PlotCardChapterOutlineLink.usage_notes)
-            .join(PlotCardChapterOutlineLink, PlotCard.id == PlotCardChapterOutlineLink.plot_card_id)
-            .where(PlotCardChapterOutlineLink.chapter_outline_id == chapter_outline.id)
-            .order_by(PlotCardChapterOutlineLink.created_at)
-        )).all()
-        cards_text = []
-        for card, usage_type, usage_notes in linked_plot_cards_data[:10]:
-            content_preview = (card.content or "无内容")[:200] + ("..." if len(card.content or "") > 200 else "")
-            card_text = (
-                f"【{CARD_TYPE_LABELS.get(card.card_type, '其他')}卡片】{card.title}"
-                f"（{USAGE_TYPE_LABELS.get(usage_type or 'reference', '参考')}）\n{content_preview}"
-            )
-            if usage_notes:
-                card_text += f"\n使用说明：{usage_notes}"
-            cards_text.append(card_text)
-        linked_cards_context = "\n\n".join(cards_text)
-        if linked_plot_cards_data:
-            trace_reference("plot_cards", "关联剧情卡", [
-                {"title": card.title, "detail": usage_type or "reference"} for card, usage_type, _notes in linked_plot_cards_data[:10]
-            ])
-
         # 写作风格（进 system 提示词）
         style_content = ""
         if options.style_id:
@@ -1525,7 +1498,7 @@ async def run_chapter_generation(job, *, chapter_id: str, user_id: str, ai_servi
         characters = list((await db_session.execute(
             select(Character).where(Character.project_id == current_chapter.project_id)
         )).scalars().all())
-        st_ctx.done(characters=len(characters), plot_cards=len(linked_plot_cards_data), style=bool(style_content))
+        st_ctx.done(characters=len(characters), style=bool(style_content))
 
         st_smart = begin_stage("smart_context", "组装前情脉络 / 近期剧情 / 上一章正文")
         char_ctx = await build_character_context(db_session, project.id, chapter_number, chapter_outline, characters)
@@ -1593,18 +1566,15 @@ async def run_chapter_generation(job, *, chapter_id: str, user_id: str, ai_servi
         if options.enable_mcp and current_user_id and _has_mcp_plugins:
             st_mcp = begin_stage("mcp", "MCP 规划收集参考资料")
             job.progress('🔍 尝试使用MCP工具收集参考资料...', 28)
-            from app.services.plot_generation_service import PlotGenerationService
-            plot_service = PlotGenerationService(ai_service)
-            planning_result = await plot_service._plan_with_mcp(
-                context_type="chapter_content",
-                project_data={'title': project.title, 'genre': project.genre or '未知', 'theme': project.theme or '未知'},
-                outline_content=None,
+            planning_result = await plan_chapter_references(
+                ai_service,
+                title=project.title,
+                genre=project.genre or '未知',
+                theme=project.theme or '未知',
                 chapter_outline=current_outline_content,
                 user_id=current_user_id,
                 db_session=db_session,
                 selected_plugins=options.selected_plugins,
-                provider=None,
-                model=None
             )
             mcp_reference_materials = planning_result.get("reference_materials", "")
             tools_used = planning_result.get("tools_used", [])
@@ -1663,7 +1633,6 @@ async def run_chapter_generation(job, *, chapter_id: str, user_id: str, ai_servi
             chapter_title=current_chapter.title,
             chapter_outline_text=current_outline_content,
             outline_window=await build_outline_window(db_session, project.id, chapter_outline),
-            linked_cards=linked_cards_context,
             narrative_tasks=render_narrative_tasks(planned_tasks_raw, chapter_number),
             structure_requirements=structure_requirements,
             hook_policy=volume_hook_policy(_volume_ctx),

@@ -72,8 +72,6 @@ class ChapterOutlineResponse(ChapterOutlineBase):
     unit_index: Optional[int] = Field(None, description="所属剧情单元序号")
     created_at: datetime = Field(..., description="创建时间")
     updated_at: datetime = Field(..., description="更新时间")
-    plot_cards: Optional[List[Dict[str, str]]] = Field(default_factory=list, description="关联的剧情卡片列表（用于统计）")
-    plot_card_count: int = Field(0, description="关联的剧情卡片数量")
 
     model_config = ConfigDict(from_attributes=True, extra="allow")  # 允许额外字段
 

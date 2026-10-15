@@ -1,7 +1,7 @@
 /**
  * 章节写作（原「章节管理」与「剧情分析」两页合并；版式参考岚笺写作台）。
  *
- * 满高工作台：左侧章节目录（搜索 / 新建 / 从章纲同步 / 批量生成；选中行可 生成候选稿 / 去 AI 味重写 / 场景生成 / 分析 / 删除，
+ * 满高工作台：左侧章节目录（搜索 / 新建 / 从章纲同步 / 批量生成；选中行可 生成候选稿 / 去 AI 味重写 / 分析 / 删除，
  * 并标出待审候选稿、章纲已改、章纲待确认）；右侧稿纸：正文 | 候选稿 | 历史版本 三个界面——正文直接码字（自动保存、AI 行内补全、
  * 专注模式），旁边可开记忆标注 / 叙事状态面板；正文任务运行时就地显示流式面板。
  * AI 输出一律先成候选稿，作者采用才写入正文（参考岚笺）。任务编排在 useChapterWriteJobs，页面只管选中章节与阅读态。
@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
-  BookOpen, Download, FileCheck2, Film, History, Layers, Loader2, PanelRightClose, PanelRightOpen, Plus, RefreshCw, Search,
+  BookOpen, Download, FileCheck2, History, Layers, Loader2, PanelRightClose, PanelRightOpen, Plus, RefreshCw, Search,
   Trash2, Zap,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -25,7 +25,6 @@ import { OTHER_JOB_KINDS, WRITE_JOB_KINDS, useChapterWriteJobs } from '@/hooks/u
 import { AIJobBanner } from '@/components/ai-job/AIJobBanner';
 import AnnotatedText from '@/components/AnnotatedText';
 import MemorySidebar from '@/components/MemorySidebar';
-import { SceneGenerator } from '@/components/SceneGenerator';
 import { useAssistantDataChange, useAssistantDetail } from '@/hooks/useAssistantPage';
 import { useAssistantStore, type AssistantDataChange } from '@/store/assistantStore';
 import { BatchGenerateModal } from '@/components/chapters/BatchGenerateModal';
@@ -177,7 +176,6 @@ export default function ChapterAnalysis() {
   const [genTarget, setGenTarget] = useState<{ chapter: Chapter; check: ChapterCanGenerateResponse } | null>(null);
   const [rewriteTarget, setRewriteTarget] = useState<Chapter | null>(null);
   const [showBatch, setShowBatch] = useState(false);
-  const [sceneTarget, setSceneTarget] = useState<{ outlineId: string; title: string } | null>(null);
   const [syncing, setSyncing] = useState(false);
 
   const handleSyncFromOutlines = async () => {
@@ -219,7 +217,6 @@ export default function ChapterAnalysis() {
         return;
       }
       setGenTarget({ chapter, check });
-      void jobs.loadRelatedCardsForChapter(chapter);
     } catch {
       toast.error('生成条件检查失败');
     }
@@ -498,11 +495,6 @@ export default function ChapterAnalysis() {
                           <RefreshCw className="h-3.5 w-3.5" />
                         </button>
                       )}
-                      {c.chapter_outline_id && (
-                        <button onClick={() => setSceneTarget({ outlineId: c.chapter_outline_id!, title: c.title })} className="hh-icon-btn-plain h-7 w-7 hover:text-brand" title="场景生成" aria-label="场景生成">
-                          <Film className="h-3.5 w-3.5" />
-                        </button>
-                      )}
                       {c.word_count > 0 && (
                         <button onClick={() => void jobs.handleAnalyze(c)} disabled={analyzing} className="hh-icon-btn-plain h-7 w-7 hover:text-brand" title="分析（提取记忆 / 叙事状态 / 一致性）" aria-label="分析">
                           {analyzing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
@@ -533,8 +525,6 @@ export default function ChapterAnalysis() {
                   onHide={jobs.hideStreamPanel}
                   onCancel={jobs.cancelStream}
                   onClose={jobs.closeStreamPanel}
-                  relatedCards={jobs.relatedCards}
-                  loadingCards={jobs.loadingCards}
                   onReviewCandidate={() => {
                     const id = jobs.streamState?.chapterId;
                     jobs.closeStreamPanel();
@@ -641,8 +631,6 @@ export default function ChapterAnalysis() {
           projectId={projectId}
           chapter={genTarget.chapter}
           genCheck={genTarget.check}
-          relatedCards={jobs.relatedCards}
-          loadingCards={jobs.loadingCards}
           onClose={() => setGenTarget(null)}
           onConfirm={(body) => void confirmGenerate(body)}
         />
@@ -666,15 +654,6 @@ export default function ChapterAnalysis() {
           void jobs.startBatch(args);
         }}
       />
-      {sceneTarget && (
-        <SceneGenerator
-          chapterOutlineId={sceneTarget.outlineId}
-          chapterTitle={sceneTarget.title}
-          projectId={projectId}
-          onClose={() => setSceneTarget(null)}
-          onComplete={() => void refreshChapters()}
-        />
-      )}
     </div>
   );
 }

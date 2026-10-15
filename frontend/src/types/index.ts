@@ -867,69 +867,6 @@ export interface MCPMarketplaceInstallRequest {
   enabled?: boolean;
 }
 
-// 剧情卡片类型定义
-export interface PlotCard {
-  id: string;
-  project_id: string;
-  outline_id?: string;
-  chapter_outline_id?: string;
-  title: string;
-  content?: string;
-  card_type: string;
-  order_index?: number;
-  tags?: string[];
-  created_at: string;
-  updated_at: string;
-  // 关联字段（从API返回时可能包含）
-  chapter_outlines?: ChapterOutline[];
-  // 统计字段
-  chapter_outline_count?: number;
-}
-
-export interface PlotCardCreate {
-  project_id: string;
-  outline_id?: string;
-  chapter_outline_id?: string;
-  title: string;
-  content?: string;
-  card_type: string;
-  order_index?: number;
-  tags?: string[];
-}
-
-export interface PlotCardUpdate {
-  title?: string;
-  content?: string;
-  card_type?: string;
-  order_index?: number;
-  tags?: string[];
-  chapter_outline_id?: string;
-}
-
-export interface PlotCardGenerateRequest {
-  project_id: string;
-  outline_id?: string;
-  chapter_outline_id?: string;
-  prompt?: string;
-  card_type: string;
-  count: number;
-  extend_from_card_id?: string;
-  enable_mcp?: boolean;
-  selected_plugins?: string[];
-}
-
-export interface PlotCardReorderRequest {
-  orders: Array<{
-    id: string;
-    order_index: number;
-  }>;
-}
-
-export interface PlotCardListResponse {
-  total: number;
-  items: PlotCard[];
-}
-
 // 卷纲：总纲 → 卷纲（剧情单元 + 线索编排）→ 章纲
 /** 剧情单元：一件完整的事，长短按事件大小定 */
 export interface VolumeUnit {
@@ -1044,10 +981,6 @@ export interface ChapterOutline {
   order_index?: number;
   created_at: string;
   updated_at: string;
-  // 关联字段（从API返回时可能包含）
-  plot_cards?: PlotCard[];
-  // 统计字段
-  plot_card_count?: number;
 }
 
 export interface ChapterOutlineCreate {
@@ -1111,20 +1044,6 @@ export interface ChapterOutlineBatchCreateRequest {
   outlines: ChapterOutlineCreate[];
 }
 
-// ============================================
-// 关联关系类型定义
-// ============================================
-
-export interface PlotCardWithLinks {
-  id: string;
-  title: string;
-  content?: string;
-  card_type: string;
-  chapter_count: number;
-}
-
-// 关联管理请求类型
-
 // 世界规则系统类型定义
 export interface WorldRule {
   id: string;
@@ -1161,28 +1080,6 @@ export interface WorldRuleListResponse {
   total: number;
   items: WorldRule[];
 }
-
-// ============================================
-// 场景生成相关类型定义（场景级创作循环）
-// ============================================
-
-// 创建会话请求
-
-// 会话响应
-
-// 会话状态响应
-
-// 剧情卡片状态（场景生成用）
-
-// 生成场景请求
-
-// 反馈请求
-
-// 重生成请求
-
-// 完成会话响应
-
-// SSE 流式响应数据
 
 // ============================================
 // 拆书参考（Book Dissect）

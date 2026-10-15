@@ -37,7 +37,6 @@ from app.models.generation_history import GenerationHistory  # noqa: F401
 from app.models.memory import PlotAnalysis, StoryMemory  # noqa: F401
 from app.models.narrative_promise import NarrativePromise  # noqa: F401
 from app.models.volume import Volume  # noqa: F401
-from app.models.plot_card import PlotCard  # noqa: F401
 from app.models.project import Project  # noqa: F401
 from app.models.project_default_style import ProjectDefaultStyle  # noqa: F401
 from app.models.project_ai_preference import ProjectAIPreference  # noqa: F401

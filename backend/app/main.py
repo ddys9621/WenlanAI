@@ -228,8 +228,8 @@ from app.api import (
     wizard_stream, relationships, organizations,
     auth, settings, writing_styles, memories,
     mcp_plugins, mcp_marketplace, admin, inspiration,
-    plot_cards, chapter_outlines, story_outlines, volumes,
-    world_rules, scene_generation, book_dissect,
+    chapter_outlines, story_outlines, volumes,
+    world_rules, book_dissect,
     reference_pack, imitation, announcement
 )
 
@@ -254,10 +254,9 @@ app.include_router(memories.router)  # 记忆管理API (已包含/api前缀)
 app.include_router(mcp_plugins.router, prefix="/api")  # MCP插件管理API
 app.include_router(mcp_marketplace.router, prefix="/api")  # MCP商城（内置精选目录 + 一键安装）
 
-# 规划：总纲（故事大纲）→ 卷纲（剧情单元）→ 章纲；剧情卡片
+# 规划：总纲（故事大纲）→ 卷纲（剧情单元）→ 章纲
 app.include_router(story_outlines.router, prefix="/api")
 app.include_router(volumes.router, prefix="/api")
-app.include_router(plot_cards.router, prefix="/api")
 app.include_router(chapter_outlines.router, prefix="/api")
 
 # 通用 AI 后台任务：列表 / 快照 / 回放续尾 / 取消（各业务的发起端点仍在各自模块）
@@ -266,9 +265,6 @@ app.include_router(_ai_jobs_api.router, prefix="/api")
 
 # 世界规则系统API
 app.include_router(world_rules.router, prefix="/api")
-
-# 场景生成API（场景级创作循环）
-app.include_router(scene_generation.router, prefix="/api")
 
 # 拆书参考 API（上传参考书反向拆解为创作素材）
 app.include_router(book_dissect.router, prefix="/api")

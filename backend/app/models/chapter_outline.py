@@ -60,7 +60,6 @@ class ChapterOutline(Base):
 
     # 关联关系
     project = relationship("Project", back_populates="chapter_outlines")
-    plot_card_links = relationship("PlotCardChapterOutlineLink", back_populates="chapter_outline", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<ChapterOutline(id={self.id}, chapter_number={self.chapter_number}, title={self.title})>"

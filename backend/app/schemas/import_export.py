@@ -155,24 +155,6 @@ class VolumeExportData(BaseModel):
     review_status: Optional[str] = None
 
 
-class PlotCardExportData(BaseModel):
-    """剧情卡片导出数据"""
-    title: str
-    content: Optional[str] = None
-    card_type: str = "event"
-    order_index: int = 0
-    tags: Optional[str] = None  # JSON格式标签
-    created_at: Optional[str] = None
-
-
-class PlotCardChapterOutlineLinkExportData(BaseModel):
-    """剧情卡片-章节大纲关联导出数据"""
-    card_title: str
-    chapter_outline_number: int
-    usage_type: Optional[str] = "reference"
-    usage_notes: Optional[str] = None
-
-
 class ProjectExportData(BaseModel):
     """项目完整导出数据"""
     version: str = "2.0.0"
@@ -190,8 +172,6 @@ class ProjectExportData(BaseModel):
     world_rules: List[WorldRuleExportData] = []
     volumes: List[VolumeExportData] = []
     chapter_outlines: List[ChapterOutlineExportData] = []
-    plot_cards: List[PlotCardExportData] = []
-    plot_card_chapter_outline_links: List[PlotCardChapterOutlineLinkExportData] = []
 
 
 class ImportValidationResult(BaseModel):

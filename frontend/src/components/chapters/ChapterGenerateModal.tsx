@@ -5,15 +5,13 @@ import { X, Zap } from 'lucide-react';
 import { writingStyleApi } from '@/services/api';
 import { MCPSelector } from '@/components/MCPSelector';
 import { ReferencePackSelector, DEFAULT_SELECTOR_VALUE, type ReferencePackSelectorValue } from '@/components/ReferencePackSelector';
-import type { Chapter, ChapterCanGenerateResponse, ChapterGenerateRequest, PlotCardWithLinks, WritingStyle } from '@/types';
+import type { Chapter, ChapterCanGenerateResponse, ChapterGenerateRequest, WritingStyle } from '@/types';
 
 interface ChapterGenerateModalProps {
   open: boolean;
   projectId: string;
   chapter: Chapter;
   genCheck: ChapterCanGenerateResponse;
-  relatedCards: PlotCardWithLinks[];
-  loadingCards: boolean;
   onClose: () => void;
   onConfirm: (body: ChapterGenerateRequest) => void;
 }
@@ -30,7 +28,7 @@ const DEFAULT_CONFIG: GenConfig = {
   style_id: undefined, target_word_count: 3000, enable_mcp: true, selected_plugins: [], adherence_review: true,
 };
 
-export function ChapterGenerateModal({ open, projectId, chapter, genCheck, relatedCards, loadingCards, onClose, onConfirm }: ChapterGenerateModalProps) {
+export function ChapterGenerateModal({ open, projectId, chapter, genCheck, onClose, onConfirm }: ChapterGenerateModalProps) {
   const [genConfig, setGenConfig] = useState<GenConfig>(DEFAULT_CONFIG);
   // R8：拆书参考包选择器状态
   const [genRefPack, setGenRefPack] = useState<ReferencePackSelectorValue>(DEFAULT_SELECTOR_VALUE);
@@ -63,7 +61,6 @@ export function ChapterGenerateModal({ open, projectId, chapter, genCheck, relat
 
   const completedPreviousChapters = genCheck.previous_chapters.filter((c) => c.has_content);
   const previousChapterPreview = completedPreviousChapters.slice(-3);
-  const relatedCardPreview = relatedCards.slice(0, 3);
 
   return createPortal(
     <div className="hh-modal-mask">
@@ -146,7 +143,7 @@ export function ChapterGenerateModal({ open, projectId, chapter, genCheck, relat
           <div className="hh-subpanel space-y-3 p-4">
             <div>
               <p className="text-sm font-medium text-content">本次生成会参考的内容</p>
-              <p className="mt-1 text-xs text-content-tertiary">后端会自动组合章纲、前文、关联剧情卡片、项目设定和可选 MCP 检索结果来生成正文。</p>
+              <p className="mt-1 text-xs text-content-tertiary">后端会自动组合章纲、前文、项目设定和可选 MCP 检索结果来生成正文。</p>
             </div>
             <div className="space-y-2 text-xs text-content-secondary">
               <div className="flex items-start justify-between gap-3">
@@ -163,20 +160,6 @@ export function ChapterGenerateModal({ open, projectId, chapter, genCheck, relat
                     <span key={c.id} className="border border-surface-border bg-white/80 px-2 py-0.5 text-[11px] text-content-secondary">
                       第 {c.chapter_number} 章：{c.title}
                     </span>
-                  ))}
-                </div>
-              )}
-              <div className="flex items-start justify-between gap-3">
-                <span className="font-medium text-content">关联剧情卡片</span>
-                <span>{loadingCards ? '加载中…' : relatedCards.length > 0 ? `${relatedCards.length} 张` : '暂无关联卡片'}</span>
-              </div>
-              {relatedCardPreview.length > 0 && (
-                <div className="space-y-1.5">
-                  {relatedCardPreview.map((card) => (
-                    <div key={card.id} className="border border-surface-border bg-white/80 px-3 py-2">
-                      <div className="text-[11px] font-medium text-content">{card.title}</div>
-                      <div className="mt-0.5 line-clamp-2 text-[11px] text-content-tertiary">{card.content || '无卡片描述'}</div>
-                    </div>
                   ))}
                 </div>
               )}

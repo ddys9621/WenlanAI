@@ -90,12 +90,6 @@ import type {
   MCPTool,
   MCPMarketplaceListResponse,
   MCPMarketplaceInstallRequest,
-  PlotCard,
-  PlotCardCreate,
-  PlotCardUpdate,
-  PlotCardGenerateRequest,
-  PlotCardReorderRequest,
-  PlotCardListResponse,
   Volume,
   VolumeFields,
   VolumeListResponse,
@@ -108,7 +102,6 @@ import type {
   ChapterOutlineReorderRequest,
   ChapterOutlineListResponse,
   ChapterOutlineBatchCreateRequest,
-  PlotCardWithLinks,
   WorldRule,
   WorldRuleCreate,
   WorldRuleUpdate,
@@ -1044,42 +1037,6 @@ export const announcementApi = {
   get: () => api.get<unknown, AnnouncementView>('/announcement'),
 };
 
-// 剧情卡片 API
-export const plotCardApi = {
-  // 获取项目的剧情卡片列表
-  getPlotCards: (projectId: string, params?: {
-    skip?: number;
-    limit?: number;
-    card_type?: string;
-    chapter_outline_id?: string;
-  }) =>
-    api.get<unknown, PlotCardListResponse>(`/plot-cards/project/${projectId}`, { params }),
-
-  // 获取单个剧情卡片
-  createPlotCard: (data: PlotCardCreate) =>
-    api.post<unknown, PlotCard>('/plot-cards', data),
-
-  // 更新剧情卡片
-  updatePlotCard: (cardId: string, data: PlotCardUpdate) =>
-    api.put<unknown, PlotCard>(`/plot-cards/${cardId}`, data),
-
-  // 删除剧情卡片
-  deletePlotCard: (cardId: string) =>
-    api.delete<unknown, { message: string }>(`/plot-cards/${cardId}`),
-
-  // 重排序剧情卡片
-  reorderPlotCards: (data: PlotCardReorderRequest) =>
-    api.post<unknown, { message: string }>('/plot-cards/reorder', data),
-
-  /** AI 生成剧情卡片：后台任务 + SSE（重连 / 停止走 aiJobsApi）POST /api/plot-cards/generate-stream */
-  generatePlotCardsStream: (data: PlotCardGenerateRequest, options?: SSEClientOptions<PlotCard[]>) =>
-    ssePost<PlotCard[]>('/api/plot-cards/generate-stream', data, options),
-
-  // 获取项目中使用的卡片类型
-  getCardTypes: (projectId: string) =>
-    api.get<unknown, { types: Array<{ type: string; count: number }> }>(`/plot-cards/project/${projectId}/types`),
-};
-
 // 卷纲 API：总纲 → 卷纲（剧情单元 + 线索编排）→ 章纲；三个生成都是后台任务 + SSE（重连 / 停止走 aiJobsApi）
 export const volumeApi = {
   list: (projectId: string) =>
@@ -1156,19 +1113,6 @@ export const chapterOutlineApi = {
 
 };
 
-// ============================================
-// 关联管理 API
-// ============================================
-
-
-// 章纲关联管理 API
-export const chapterOutlineLinkApi = {
-  getPlotCards: (outlineId: string) =>
-    api.get<unknown, PlotCardWithLinks[]>(`/chapter-outlines/${outlineId}/plot-cards`),
-
-};
-
-
 // 世界规则系统 API
 export const worldRulesApi = {
   // 获取世界规则列表
@@ -1189,41 +1133,6 @@ export const worldRulesApi = {
   // 删除世界规则
   delete: (ruleId: string) =>
     api.delete<unknown, { message: string }>(`/world-rules/${ruleId}`),
-};
-
-// 场景生成 API（简化版 - 按剧情卡片分段生成）
-export const sceneGenerationApi = {
-  // 获取章纲关联的剧情卡片
-  getPlotCards: (chapterOutlineId: string) =>
-    api.get<unknown, {
-      chapter_outline_id: string;
-      plot_cards: Array<{
-        id: string;
-        title: string;
-        content?: string;
-        generation_status: string;
-        word_count_target: number;
-        word_count_actual: number;
-        generation_order: number;
-      }>;
-    }>(`/scene-generation/chapter-outlines/${chapterOutlineId}/plot-cards`),
-
-  // 流式生成场景（使用 ssePost，携带认证拦截）
-  generateSceneStream: (
-    data: {
-      chapter_outline_id: string;
-      plot_card_id: string;
-      writing_style_id?: string;
-      previous_generated_content?: string;
-      // R8 拆书参考包显式参数
-      pack_ids?: string[];
-      dimensions?: string[];
-      strength?: 'light' | 'medium' | 'deep';
-    },
-    options?: SSEClientOptions
-  ) => ssePost('/api/scene-generation/generate-scene-stream', data, options),
-
-  // 流式生成场景的 URL（兼容现有裸 fetch 用法）
 };
 
 // ============================================

@@ -7,11 +7,11 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { chapterApi, chapterOutlineLinkApi, type ChapterRegenerateRequest, type ChapterRegenerateResult, type ChapterWriteResult } from '@/services/api';
+import { chapterApi, type ChapterRegenerateRequest, type ChapterRegenerateResult, type ChapterWriteResult } from '@/services/api';
 import { AIJobError, runAIJob, useAIJob, useAIJobsStore, useRunningAIJobs, waitForAIJob } from '@/store/aiJobsStore';
 import type { SSEClientOptions } from '@/utils/sseClient';
 import { countBatchTargets, describeBatchEvent, selectBatchChapters } from '@/utils/chapterBatch';
-import type { Chapter, ChapterBatchEvent, ChapterBatchResult, ChapterGenerateRequest, PlotCardWithLinks } from '@/types';
+import type { Chapter, ChapterBatchEvent, ChapterBatchResult, ChapterGenerateRequest } from '@/types';
 
 export interface StreamState {
   chapterId: string;
@@ -40,7 +40,7 @@ type WriteJobKind = 'chapter_generate' | 'chapter_regenerate';
 /** 页面自带面板承担正文任务；横幅只兜底其它任务，面板隐藏（后台运行）时才把正文任务也放进横幅 */
 export const WRITE_JOB_KINDS = ['chapter_generate', 'chapter_regenerate'];
 /** chapter_batch = 服务端批量（页面有批量进度条；横幅兜底展示，刷新 / 切页回来也能看到） */
-export const OTHER_JOB_KINDS = ['chapter_analyze', 'scene_generate', 'chapter_imitate', 'chapter_batch'];
+export const OTHER_JOB_KINDS = ['chapter_analyze', 'chapter_imitate', 'chapter_batch'];
 
 const abortError = () => new DOMException('Request aborted', 'AbortError');
 
@@ -70,8 +70,6 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
   const cancelJob = useAIJobsStore((s) => s.cancel);
   const runningWriteJobs = useRunningAIJobs(projectId, WRITE_JOB_KINDS);
   const runningAnalyses = useRunningAIJobs(projectId, ['chapter_analyze']);
-  const [relatedCards, setRelatedCards] = useState<PlotCardWithLinks[]>([]);
-  const [loadingCards, setLoadingCards] = useState(false);
 
   const [batchStatus, setBatchStatus] = useState<BatchStatusState | null>(null);
   const batchCancelRef = useRef(false);
@@ -86,23 +84,6 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
 
   // 清理：只停掉前端的批量编排循环；正在跑的任务归 store，切页不中断
   useEffect(() => () => { batchCancelRef.current = true; }, []);
-
-  const loadRelatedCardsForChapter = useCallback(async (chapter: Chapter) => {
-    setRelatedCards([]);
-    setLoadingCards(Boolean(chapter.chapter_outline_id));
-    if (!chapter.chapter_outline_id) {
-      setLoadingCards(false);
-      return;
-    }
-    try {
-      const cards = await chapterOutlineLinkApi.getPlotCards(chapter.chapter_outline_id);
-      setRelatedCards(cards || []);
-    } catch {
-      setRelatedCards([]);
-    } finally {
-      setLoadingCards(false);
-    }
-  }, []);
 
   /** 面板视图跟随任务状态：进度 / 文案 / 流式正文都来自 store */
   useEffect(() => {
@@ -160,7 +141,6 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
     setStreamDone(false);
     setPanelHidden(false);
     setStreamJobId(null);
-    await loadRelatedCardsForChapter(chapter);
 
     setStreamState({
       chapterId: chapter.id,
@@ -216,14 +196,12 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
       setStreamState(null);
       throw error;
     }
-  }, [loadRelatedCardsForChapter, refreshChapters]);
+  }, [refreshChapters]);
 
   const resetStreamView = useCallback(() => {
     setStreamState(null);
     setStreamJobId(null);
     setStreamDone(false);
-    setRelatedCards([]);
-    setLoadingCards(false);
   }, []);
 
   const closeStreamPanel = useCallback(() => resetStreamView(), [resetStreamView]);
@@ -470,9 +448,6 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
     streamBusy,
     isGenerating: (chapterId: string) => streamState?.chapterId === chapterId && !streamDone,
     analyzingChapterIds,
-    relatedCards,
-    loadingCards,
-    loadRelatedCardsForChapter,
     startStream,
     startBatch,
     cancelStream,

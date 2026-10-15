@@ -133,7 +133,7 @@ export interface AIJobState {
   kind: string;
   title: string;
   projectId: string | null;
-  /** 业务附加信息（后端 AIJob.meta，如 chapter_id / plot_card_id）；前端 start() 也可传 */
+  /** 业务附加信息（后端 AIJob.meta，如 chapter_id）；前端 start() 也可传 */
   meta: Record<string, unknown>;
   status: AIJobStatus;
   /** 毫秒时间戳 */
@@ -172,11 +172,9 @@ const AI_JOB_KIND_LABELS: Record<string, string> = {
   chapter_batch: '批量写作',
   character_generate: '角色生成',
   organization_generate: '组织生成',
-  plot_cards_generate: '剧情卡生成',
   chapter_generate: '正文生成',
   chapter_regenerate: '去 AI 味重写',
   chapter_analyze: '章节分析',
-  scene_generate: '场景生成',
   chapter_imitate: '一键仿写',
   book_dissect: '拆书抽取',
   wizard_world_building: '向导·世界构建',

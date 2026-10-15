@@ -317,7 +317,7 @@ _CORPUS_CHARS_PER_ITEM = {"light": 200, "medium": 320, "deep": 450}
 async def build_dissect_corpus(db: AsyncSession, ctx: Any) -> str:
     """corpus：BM25 检索项目挂载参考包的拆书卡（章节级动态，不缓存）。
 
-    锚文本按上下文取（章纲 → 剧情卡 → 用户输入 → 书名 + 主题）；top_k 查 CORPUS_TOPK。
+    锚文本按上下文取（章纲 → 用户输入 → 书名 + 主题）；top_k 查 CORPUS_TOPK。
     """
     from app.services.book_dissect.chapter_card_retriever import ChapterCardRetriever, format_card_hits
     from app.services.reference_pack.policy_tables import get_corpus_top_k
@@ -352,12 +352,6 @@ async def _corpus_anchor_text(db: AsyncSession, ctx: Any) -> str:
         co = (await db.execute(select(ChapterOutline).where(ChapterOutline.id == ctx.chapter_outline_id))).scalar_one_or_none()
         if co:
             parts = [co.title, co.plot_points, co.key_events]
-    if not any(parts) and getattr(ctx, "plot_card_id", None):
-        from app.models.plot_card import PlotCard
-
-        card = (await db.execute(select(PlotCard).where(PlotCard.id == ctx.plot_card_id))).scalar_one_or_none()
-        if card:
-            parts = [card.title, card.content]
     if not any(parts):
         parts = [getattr(ctx, "user_input", None)]
     if not any(parts):

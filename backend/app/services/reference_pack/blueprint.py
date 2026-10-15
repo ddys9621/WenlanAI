@@ -8,10 +8,10 @@
 
 设计：
 - Slot：单个 prompt 槽位（含 max_tokens 硬上限）
-- BLUEPRINT_TEMPLATES：8 场景的"槽位顺序模板"（不含 max_tokens）
+- BLUEPRINT_TEMPLATES：7 场景的"槽位顺序模板"（不含 max_tokens）
 - STRENGTH_BUDGET：strength 档位 → token 预算映射
 - BUSINESS_SLOT_TOKENS：业务槽位（非拆书）的固定 token 上限
-- PROMPT_BLUEPRINT：最终生成的 32 份装配单 dict[(scene, tier)] -> list[Slot]
+- PROMPT_BLUEPRINT：最终生成的 28 份装配单 dict[(scene, tier)] -> list[Slot]
 """
 from __future__ import annotations
 
@@ -113,7 +113,6 @@ MODEL_WINDOW: dict[ModelTier, int] = {
 # 输出预留（每章节生成约 4500 token 输出）
 OUTPUT_RESERVE: dict[str, int] = {
     "chapter_content":    4500,
-    "scene_generation":   2000,
     "chapter_regenerate": 4500,
     "chapter_outline":    3000,  # 批量生成 N 个章纲
     "story_outline":      2000,
@@ -152,7 +151,7 @@ DISSECT_LABELS: dict[str, str] = {
 # 场景定义：每个场景需要哪些"业务槽位"（按出现顺序）
 # ============================================================
 
-# 8 场景的业务槽位模板。拆书槽位由 POLICY_TABLE 动态决定。
+# 7 场景的业务槽位模板。拆书槽位由 POLICY_TABLE 动态决定。
 # 注：拆书槽位在 prompt 中的插入位置由本模块的 _compose_slots 决定（synopsis 靠前，corpus 末尾）
 
 SCENE_BUSINESS_TEMPLATES: dict[str, list[str]] = {
@@ -177,11 +176,6 @@ SCENE_BUSINESS_TEMPLATES: dict[str, list[str]] = {
         "system_role", "system_base_style",
         # user 段：项目骨架 → 本书角色 → 世界规则表 → 世界地图 → 输出要求（总纲 / 卷纲由卷纲服务拼在后面）
         "project_skeleton", "project_characters", "world_rules_table", "world_map", "output_spec",
-    ],
-    "scene_generation": [
-        "system_role", "system_base_style",
-        "project_skeleton", "chapter_outline", "history_full",
-        "output_spec",
     ],
     "chapter_regenerate": [
         "system_role", "system_base_style",
@@ -360,7 +354,7 @@ def _compose_blueprint(scene: str, tier: ModelTier) -> list[Slot]:
     return system_business + system_dissect + user_combined
 
 
-# 启动期一次性生成 32 份装配单（4 档 × 8 场景）
+# 启动期一次性生成 28 份装配单（4 档 × 7 场景）
 PROMPT_BLUEPRINT: dict[tuple[str, ModelTier], list[Slot]] = {
     (scene, tier): _compose_blueprint(scene, tier)
     for scene in SCENE_BUSINESS_TEMPLATES.keys()

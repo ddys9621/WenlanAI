@@ -88,9 +88,6 @@ class ImitationService:
     MAIN_CHARACTERS_LIMIT: int = 6
     # 目标章节"已写正文"结尾截选长度（续写衔接的关键上下文）
     CURRENT_CHAPTER_TAIL_CHARS: int = 2000
-    # 关联剧情卡注入上限
-    LINKED_PLOT_CARDS_LIMIT: int = 5
-    LINKED_PLOT_CARD_CHARS: int = 160
 
     def __init__(self, ai_service: AIService):
         self.ai_service = ai_service
@@ -410,8 +407,7 @@ class ImitationService:
             except Exception as e:  # pragma: no cover - 防御性兜底
                 logger.warning("[V3-R5] 项目文风加载失败，已忽略：%s", e)
 
-        # ====== 业务上下文块（剧情卡 / 卷纲位置 / 长期记忆） ======
-        cards_block = await self._build_linked_cards_block(db, ctx)
+        # ====== 业务上下文块（卷纲位置 / 长期记忆） ======
         position_block = await self._build_volume_position_block(
             db, project_id, ctx, target_word_count
         )
@@ -431,8 +427,6 @@ class ImitationService:
             project_state,
             intent_block,
         ]
-        if cards_block:
-            user_prompt_parts.append(cards_block)
         if position_block:
             user_prompt_parts.append(position_block)
         if memory_block:
@@ -457,45 +451,8 @@ class ImitationService:
         }
 
     # ----------------------------------------------------------------
-    # 业务上下文块构建（剧情卡 / 桥段约束 / 长期记忆）
+    # 业务上下文块构建（卷纲位置 / 长期记忆）
     # ----------------------------------------------------------------
-
-    async def _build_linked_cards_block(
-        self, db: AsyncSession, ctx: _ProjectContext
-    ) -> str:
-        """目标章纲关联的剧情卡片（与普通正文生成对齐）。"""
-        if ctx.target_outline is None:
-            return ""
-        try:
-            from app.models.plot_card import PlotCard
-            from app.models.plot_card_chapter_outline_link import (
-                PlotCardChapterOutlineLink,
-            )
-
-            rows = await db.execute(
-                select(PlotCard)
-                .join(
-                    PlotCardChapterOutlineLink,
-                    PlotCard.id == PlotCardChapterOutlineLink.plot_card_id,
-                )
-                .where(
-                    PlotCardChapterOutlineLink.chapter_outline_id
-                    == ctx.target_outline.id
-                )
-                .order_by(PlotCardChapterOutlineLink.created_at)
-            )
-            cards = list(rows.scalars().all())[: self.LINKED_PLOT_CARDS_LIMIT]
-            if not cards:
-                return ""
-            lines = [
-                f"- 【{c.card_type or '剧情'}】{c.title}："
-                f"{_truncate(c.content or '', self.LINKED_PLOT_CARD_CHARS)}"
-                for c in cards
-            ]
-            return "[本章关联剧情卡片（草稿应体现这些设计）]\n" + "\n".join(lines)
-        except Exception as e:  # pragma: no cover - 防御性降级
-            logger.warning("[V3-R5] 剧情卡注入失败（已跳过）：%s", e)
-            return ""
 
     async def _build_volume_position_block(
         self,
