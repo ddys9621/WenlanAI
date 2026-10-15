@@ -1,5 +1,5 @@
 /** 共创室（智能助笔）的纯函数：@成员 提及、成员配色、草案卡片的确认对象与跳转。 */
-import type { AssistantPlan } from '@/types/assistant'
+import type { AssistantPlan, AssistantRunView } from '@/types/assistant'
 
 /** 开头的「@成员」（与后端 cocreation_team.parse_mention 的写法一致：@名称 + 空白或标点） */
 const LEADING_MENTION = /^\s*@\S+?[\s，,:：]+/
@@ -22,6 +22,10 @@ const TONES: Record<string, string> = {
 
 export function memberTone(color: string | undefined): string {
   return TONES[color ?? ''] ?? TONES.slate
+}
+
+export function questionCardKey(run: Pick<AssistantRunView, 'id' | 'question'>): string {
+  return `${run.id}:${(run.question?.questions ?? []).map((q) => q.id).join(',')}`
 }
 
 export function planConfirmTargets(plan: AssistantPlan): { volumeIds: string[]; outlineIds: string[] } {

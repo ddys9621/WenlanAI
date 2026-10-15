@@ -18,7 +18,7 @@ import type {
   AssistantPreview, AssistantProgress, AssistantRunResult, AssistantSessionView, AssistantTeam,
 } from '@/types/assistant';
 import { appendQuote, appendRequest, HISTORY_LIMIT } from '@/utils/assistantText';
-import { mentionMember } from '@/utils/cocreation';
+import { mentionMember, questionCardKey } from '@/utils/cocreation';
 import type { SSEClientOptions, SSEMessage } from '@/utils/sseClient';
 import { AuthorQuestionCard } from './AuthorQuestionCard';
 import { FieldCandidateCard } from './FieldCandidateCard';
@@ -265,9 +265,9 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
       return false;
     } finally {
       jobIdRef.current = null;
+      await reload();
       setBusy(false);
       setLive(null);
-      await reload();
       flushPending();
       void loadProgress();
       scrollToEnd();
@@ -479,7 +479,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
           </article>
         )}
         {waitingRun?.question && !busy && (
-          <AuthorQuestionCard key={waitingRun.id} question={waitingRun.question} busy={busy} onSubmit={(a) => void answer(a)} />
+          <AuthorQuestionCard key={questionCardKey(waitingRun)} question={waitingRun.question} busy={busy} onSubmit={(a) => void answer(a)} />
         )}
         {preview && (
           <section className={cn('rounded border bg-white px-3 py-2.5', previewCurrent ? 'border-brand/40' : 'border-gold-300')}>
