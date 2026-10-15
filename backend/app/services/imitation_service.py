@@ -41,8 +41,6 @@ from app.services.reference_pack_injector import (  # noqa: F401  re-export
     _ResolvedPack,
     _dedup_keep_order,
     _safe_json,
-    _serialize_dimension,
-    _serialize_style,
     _truncate,
 )
 
@@ -412,9 +410,9 @@ class ImitationService:
             except Exception as e:  # pragma: no cover - 防御性兜底
                 logger.warning("[V3-R5] 项目文风加载失败，已忽略：%s", e)
 
-        # ====== 业务上下文块（剧情卡 / 桥段位置 / 长期记忆） ======
+        # ====== 业务上下文块（剧情卡 / 卷纲位置 / 长期记忆） ======
         cards_block = await self._build_linked_cards_block(db, ctx)
-        bridge_block = await self._build_bridge_constraint_block(
+        position_block = await self._build_volume_position_block(
             db, project_id, ctx, target_word_count
         )
         memory_block = await self._build_memory_state_block(
@@ -435,8 +433,8 @@ class ImitationService:
         ]
         if cards_block:
             user_prompt_parts.append(cards_block)
-        if bridge_block:
-            user_prompt_parts.append(bridge_block)
+        if position_block:
+            user_prompt_parts.append(position_block)
         if memory_block:
             user_prompt_parts.append(memory_block)
         if ref_sections:
@@ -499,42 +497,20 @@ class ImitationService:
             logger.warning("[V3-R5] 剧情卡注入失败（已跳过）：%s", e)
             return ""
 
-    async def _build_bridge_constraint_block(
+    async def _build_volume_position_block(
         self,
         db: AsyncSession,
         project_id: str,
         ctx: _ProjectContext,
         target_word_count: int,
     ) -> str:
-        """K2 桥段位置约束：目标章纲绑定桥段时注入 C1/C2/C3/C4 位置纪律。
-
-        修复点：此前仿写完全无桥段感——C3 该"装到底不留钩子"的章节
-        可能被写成留悬念，C1 代入章可能被写成大结算。
-        """
+        """本章在卷纲中的位置（卷 → 剧情单元 → 第几章）：目标章纲挂了卷纲时注入单元开场 / 推进 / 收束的软指导。"""
         outline = ctx.target_outline
-        if outline is None or not getattr(outline, "bridge_id", None):
+        if outline is None:
             return ""
-        try:
-            from app.services.reference_pack import (
-                build_v4_bridge_constraint_only,
-                fetch_bridge_context,
-            )
+        from app.services.volume_context import fetch_volume_context, render_structure
 
-            bridge_ctx = await fetch_bridge_context(db, outline)
-            if not bridge_ctx:
-                return ""
-            return await build_v4_bridge_constraint_only(
-                db,
-                project_id,
-                scene="chapter_content",
-                bridge_position=getattr(outline, "bridge_position", None),
-                bridge_context=bridge_ctx,
-                chapter_outline_id=outline.id,
-                target_word_count=target_word_count,
-            )
-        except Exception as e:  # pragma: no cover - 防御性降级
-            logger.warning("[V3-R5] 桥段约束注入失败（已跳过）：%s", e)
-            return ""
+        return render_structure(await fetch_volume_context(db, outline))
 
     async def _build_memory_state_block(
         self,

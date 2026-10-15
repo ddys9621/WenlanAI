@@ -24,7 +24,6 @@ class StoryOutline(Base):
 
     # 关联关系
     project = relationship("Project", back_populates="story_outlines")
-    plot_lines = relationship("PlotLine", back_populates="story_outline")
 
     def __repr__(self):
         return f"<StoryOutline(id={self.id}, title={self.title}, version={self.version})>"

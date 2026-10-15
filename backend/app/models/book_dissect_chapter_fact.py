@@ -1,21 +1,4 @@
-"""拆书 V2: 章节事实模型
-
-每章一条 ChapterFact JSON，由 ChapterFactExtractor 在逐章 LLM 抽取阶段写入。
-
-字段 fact_json 结构（详见 agent-docs/features/book_dissect_v2_design.md §4.1）:
-{
-  "chapter_number": int,
-  "chapter_title": str,
-  "summary": str,
-  "characters": [...],
-  "relationships": [...],
-  "locations": [...],
-  "events": [...],
-  "item_events": [...],
-  "org_events": [...],
-  "new_concepts": [...]
-}
-"""
+"""拆书卡：每章一条。fact_json 存 v5_types.ChapterCard（章纲 / 功能标签 / 节奏 / 张力 / 章末钩子 / 高点 / 出场人物…），summary 冗存章纲供列表直接显示。"""
 
 import uuid
 
@@ -26,7 +9,7 @@ from app.db_base import Base
 
 
 class BookDissectChapterFact(Base):
-    """章节级 LLM 抽取产出的结构化事实"""
+    """拆书卡（每章一条）"""
 
     __tablename__ = "book_dissect_chapter_facts"
 
@@ -44,8 +27,8 @@ class BookDissectChapterFact(Base):
     chapter_title = Column(String(500), nullable=True, comment="章节标题")
 
     # 抽取产出
-    fact_json = Column(Text, nullable=True, comment="ChapterFact JSON（参见设计文档 §4.1）")
-    summary = Column(Text, nullable=True, comment="章节摘要（用于注入下章 prompt）")
+    fact_json = Column(Text, nullable=True, comment="拆书卡 JSON（v5_types.ChapterCard）")
+    summary = Column(Text, nullable=True, comment="章纲（冗存自拆书卡 outline）")
 
     # 抽取状态
     extraction_status = Column(

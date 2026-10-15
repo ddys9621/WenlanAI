@@ -1,10 +1,10 @@
-"""层级剧情摘要：单元（桥段 / 4 章）→ 阶段（节点阶段 / 16 章）→ 卷（主线节点 / 64 章）。
+"""层级剧情摘要：单元（卷纲里的剧情单元）→ 卷（Volume）。
 
-- resolve_arcs：章节属于哪个单元 / 阶段 / 卷。桥段模式按桥段实际章号区间、主线节点与节点阶段；
-  不在任何桥段里的章节退回固定分块（4 / 16 / 64 章）。
-- maybe_rollup：每章分析完调用。所在单元 / 阶段 / 卷的章节全部有摘要时汇总（先补齐缺失的子摘要），
-  子摘要指纹不变就跳过；卷汇总同时产出「卷末复盘」并回写到下一主线节点的 review_note，
-  下一卷的桥段填充 / 章纲展开会读到它（计划随实际写出来的内容修正）。
+- resolve_arcs：章节属于哪个单元 / 卷。按卷纲的章号区间与剧情单元区间；卷没细化单元时按 4 章分块；
+  不在任何卷里的章节退回固定分块（4 / 16 / 64 章，含阶段级）。
+- maybe_rollup：每章分析完调用。所在单元 / 卷的章节全部有摘要时汇总（先补齐缺失的子摘要），
+  子摘要指纹不变就跳过；卷汇总同时产出「卷末复盘」并回写到下一卷的 review_note，
+  下一卷细化剧情单元 / 生成章纲时会读到它（计划随实际写出来的内容修正）。
   另外每次顺带补几个更早的缺口（项目中途启用本功能时逐步追平）。
 - invalidate_covering：某章被重新分析 / 覆盖后，删掉覆盖它的各级摘要（之后自然重算）。
 - render_story_so_far：「前情脉络」——对每段章节取能覆盖它的最高一级摘要，超预算先压缩最早的。
@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -23,9 +22,8 @@ from app.logger import get_logger
 from app.models.arc_summary import ArcSummary
 from app.models.chapter import Chapter
 from app.models.memory import StoryMemory
-from app.models.plot_bridge import PlotBridge
-from app.models.plot_line import PlotLine
-from app.services.bridge_slot_planner import bridge_chapter_range
+from app.models.volume import Volume
+from app.services.volume_planning import loads_units
 from app.services.context_budget import clip_text
 
 logger = get_logger(__name__)
@@ -45,8 +43,7 @@ class ArcRef:
     start: int
     end: int
     title: str = ""
-    plot_line_id: Optional[str] = None
-    beat_index: Optional[int] = None
+    volume_id: Optional[str] = None
 
 
 @dataclass
@@ -57,74 +54,53 @@ class ChapterArcs:
 
 
 @dataclass
-class _BridgeInfo:
+class _VolumeInfo:
+    id: str
     number: int
-    beat_index: Optional[int]
-    plot_line_id: Optional[str]
+    title: str
     start: int
     end: int
-    title: str
+    summary: str
+    units: list[dict[str, Any]]
 
 
 @dataclass
 class ArcIndex:
-    """一次查库把桥段 / 主线节点 / 节点阶段装进内存，之后按章号纯计算三级归属。"""
+    """一次查库把卷纲与剧情单元装进内存，之后按章号纯计算归属。"""
 
-    bridges: list[_BridgeInfo] = field(default_factory=list)
-    beats: dict[int, dict[str, Any]] = field(default_factory=dict)
-    main_line_id: Optional[str] = None
+    volumes: list[_VolumeInfo] = field(default_factory=list)
 
     @classmethod
     async def load(cls, db: AsyncSession, project_id: str) -> "ArcIndex":
         rows = (await db.execute(
-            select(PlotBridge).where(PlotBridge.project_id == project_id).order_by(PlotBridge.bridge_number)
+            select(Volume).where(Volume.project_id == project_id).order_by(Volume.volume_number)
         )).scalars().all()
-        bridges = []
-        for b in rows:
-            start, end = bridge_chapter_range(b)
-            bridges.append(_BridgeInfo(b.bridge_number, b.beat_index, b.plot_line_id, start, end, b.title or ""))
-        beats: dict[int, dict[str, Any]] = {}
-        main_line_id = next((b.plot_line_id for b in bridges if b.plot_line_id), None)
-        if main_line_id:
-            line = (await db.execute(select(PlotLine).where(PlotLine.id == main_line_id))).scalar_one_or_none()
-            if line is not None and line.timeline_data:
-                try:
-                    data = json.loads(line.timeline_data)
-                except (json.JSONDecodeError, TypeError):
-                    data = {}
-                for raw in (data.get("beats") or []) if isinstance(data, dict) else []:
-                    if isinstance(raw, dict) and str(raw.get("index", "")).lstrip("-").isdigit():
-                        beats[int(raw["index"])] = raw
-        return cls(bridges=bridges, beats=beats, main_line_id=main_line_id)
+        return cls(volumes=[
+            _VolumeInfo(v.id, v.volume_number, v.title or "", v.chapter_start, v.chapter_end, v.summary or "",
+                        loads_units(v.units))
+            for v in rows
+        ])
 
     # ---------------- 归属 ----------------
 
-    def _bridge_at(self, chapter_number: int) -> Optional[_BridgeInfo]:
-        return next((b for b in self.bridges if b.start <= chapter_number <= b.end), None)
+    def _volume_at(self, chapter_number: int) -> Optional[_VolumeInfo]:
+        return next((v for v in self.volumes if v.start <= chapter_number <= v.end), None)
 
-    def _beat_bridges(self, beat_index: int) -> list[_BridgeInfo]:
-        return [b for b in self.bridges if b.beat_index == beat_index]
+    def volume_by_id(self, volume_id: Optional[str]) -> Optional[_VolumeInfo]:
+        return next((v for v in self.volumes if v.id == volume_id), None)
 
-    def _phases(self, beat_index: int) -> list[dict[str, Any]]:
-        phases = (self.beats.get(beat_index) or {}).get("phases") or []
-        return [p for p in phases if isinstance(p, dict) and p.get("bridge_start") and p.get("bridge_end")]
+    @staticmethod
+    def _unit_refs(v: _VolumeInfo) -> list[ArcRef]:
+        if v.units:
+            return [ArcRef("unit", f"unit:{v.id}:{u.get('index')}", int(u["chapter_start"]), int(u["chapter_end"]),
+                           str(u.get("title") or ""), v.id) for u in v.units]
+        size = BLOCK_SIZES["unit"]
+        return [ArcRef("unit", f"vchunk:{v.id}:{s}", s, min(s + size - 1, v.end), "", v.id)
+                for s in range(v.start, v.end + 1, size)]
 
-    def _unit_ref(self, b: _BridgeInfo) -> ArcRef:
-        return ArcRef("unit", f"bridge:{b.number}", b.start, b.end, b.title, b.plot_line_id, b.beat_index)
-
-    def _phase_ref(self, beat_index: int, phase: dict[str, Any]) -> Optional[ArcRef]:
-        members = [b for b in self._beat_bridges(beat_index)
-                   if int(phase["bridge_start"]) <= b.number <= int(phase["bridge_end"])]
-        if not members:
-            return None
-        return ArcRef("phase", f"phase:{beat_index}:{phase.get('index')}", min(b.start for b in members),
-                      max(b.end for b in members), str(phase.get("title") or ""), self.main_line_id, beat_index)
-
-    def _volume_ref(self, beat_index: int) -> ArcRef:
-        members = self._beat_bridges(beat_index)
-        title = str((self.beats.get(beat_index) or {}).get("title") or "")
-        return ArcRef("volume", f"beat:{beat_index}", min(b.start for b in members), max(b.end for b in members),
-                      title, self.main_line_id, beat_index)
+    @staticmethod
+    def _volume_ref(v: _VolumeInfo) -> ArcRef:
+        return ArcRef("volume", f"volume:{v.id}", v.start, v.end, v.title, v.id)
 
     @staticmethod
     def _block_ref(level: str, chapter_number: int) -> ArcRef:
@@ -133,17 +109,13 @@ class ArcIndex:
         return ArcRef(level, f"block{size}:{index}", index * size + 1, (index + 1) * size)
 
     def arcs_for(self, chapter_number: int) -> ChapterArcs:
-        bridge = self._bridge_at(chapter_number)
-        if bridge is None or bridge.beat_index is None:
-            unit = self._unit_ref(bridge) if bridge else self._block_ref("unit", chapter_number)
-            return ChapterArcs(unit, self._block_ref("phase", chapter_number), self._block_ref("volume", chapter_number))
-        phase = next(
-            (ref for p in self._phases(bridge.beat_index)
-             if int(p["bridge_start"]) <= bridge.number <= int(p["bridge_end"])
-             and (ref := self._phase_ref(bridge.beat_index, p)) is not None),
-            None,
-        )
-        return ChapterArcs(self._unit_ref(bridge), phase, self._volume_ref(bridge.beat_index))
+        v = self._volume_at(chapter_number)
+        if v is None:
+            return ChapterArcs(self._block_ref("unit", chapter_number), self._block_ref("phase", chapter_number),
+                               self._block_ref("volume", chapter_number))
+        unit = next((u for u in self._unit_refs(v) if u.start <= chapter_number <= u.end),
+                    self._block_ref("unit", chapter_number))
+        return ChapterArcs(unit, None, self._volume_ref(v))
 
     def children(self, arc: ArcRef) -> list[ArcRef]:
         if arc.level == "unit":
@@ -152,11 +124,8 @@ class ArcIndex:
             child_level = "unit" if arc.level == "phase" else "phase"
             size = BLOCK_SIZES[child_level]
             return [self._block_ref(child_level, n) for n in range(arc.start, arc.end + 1, size)]
-        if arc.level == "volume" and arc.beat_index is not None:
-            phases = [ref for p in self._phases(arc.beat_index) if (ref := self._phase_ref(arc.beat_index, p))]
-            if phases:
-                return sorted(phases, key=lambda r: r.start)
-        return [self._unit_ref(b) for b in self.bridges if arc.start <= b.start and b.end <= arc.end]
+        v = self.volume_by_id(arc.volume_id)
+        return self._unit_refs(v) if v is not None else []
 
     def all_arcs(self, upto_chapter: int) -> list[ArcRef]:
         """upto_chapter 之前已结束的全部各级弧（按结束章、层级排序），供补缺口。"""
@@ -204,7 +173,7 @@ UNIT_PROMPT = """你是长篇网文的编辑助理。下面是第{start}-{end}�
 
 直接输出摘要正文。"""
 
-VOLUME_PROMPT = """你是长篇网文的主编，现在做「卷末复盘」。下面是第{start}-{end}章（主线节点《{title}》）的分段摘要，以及该节点原计划：
+VOLUME_PROMPT = """你是长篇网文的主编，现在做「卷末复盘」。下面是第{start}-{end}章（卷《{title}》）的分段摘要，以及本卷原计划：
 
 【原计划】
 {plan}
@@ -252,23 +221,18 @@ async def _generate(ai_service: Any, arc: ArcRef, items: list[str], plan: str = 
 
 
 async def _write_back_review(db: AsyncSession, arc: ArcRef, review: str) -> None:
-    """卷末复盘回写到下一个主线节点的 review_note（不改原描述）。"""
-    if not arc.plot_line_id or arc.beat_index is None or not review:
+    """卷末复盘回写到下一卷的 review_note（不改原卷纲内容）。"""
+    if arc.level != "volume" or not arc.volume_id or not review:
         return
-    line = (await db.execute(select(PlotLine).where(PlotLine.id == arc.plot_line_id))).scalar_one_or_none()
-    if line is None or not line.timeline_data:
+    current = await db.get(Volume, arc.volume_id)
+    if current is None:
         return
-    try:
-        data = json.loads(line.timeline_data)
-    except (json.JSONDecodeError, TypeError):
-        return
-    beats = [b for b in (data.get("beats") or []) if isinstance(b, dict)] if isinstance(data, dict) else []
-    following = sorted((b for b in beats if str(b.get("index", "")).isdigit() and int(b["index"]) > arc.beat_index),
-                       key=lambda b: int(b["index"]))
-    if not following:
-        return
-    following[0]["review_note"] = f"（第{arc.start}-{arc.end}章复盘）{review}"
-    line.timeline_data = json.dumps(data, ensure_ascii=False)
+    following = (await db.execute(
+        select(Volume).where(Volume.project_id == current.project_id, Volume.volume_number > current.volume_number)
+        .order_by(Volume.volume_number)
+    )).scalars().first()
+    if following is not None:
+        following.review_note = f"（第{arc.start}-{arc.end}章复盘）{review}"
 
 
 class _Rollup:
@@ -299,8 +263,9 @@ class _Rollup:
         if row is not None and row.source_signature == signature:
             return row
         plan = ""
-        if arc.level == "volume" and arc.beat_index is not None:
-            plan = str((self.index.beats.get(arc.beat_index) or {}).get("description") or "")
+        if arc.level == "volume":
+            volume = self.index.volume_by_id(arc.volume_id)
+            plan = volume.summary if volume is not None else ""
         content, review = await _generate(self.ai, arc, items, plan)
         self.llm_calls += 1
         if row is None:

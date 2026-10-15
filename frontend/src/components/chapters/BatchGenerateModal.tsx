@@ -24,7 +24,7 @@ interface BatchGenerateModalProps {
   onStart: (args: BatchStartArgs) => void;
 }
 
-/** 允许把结束章号填到现有章节之后：服务端会按滚动规划自动展开桥段补出章纲（最多往后 200 章） */
+/** 允许把结束章号填到现有章节之后：服务端会按卷纲自动细化剧情单元、补出章纲（最多往后 200 章） */
 const MAX_LOOKAHEAD = 200;
 
 export function BatchGenerateModal({ open, chapters, onClose, onStart }: BatchGenerateModalProps) {
@@ -84,9 +84,9 @@ export function BatchGenerateModal({ open, chapters, onClose, onStart }: BatchGe
           {option(adherenceGate, setAdherenceGate, '章纲遵循度审校',
             '（漏写关键事件、没写到章末落点、抢跑下一章、新增未确认设定时重写一次；每章多一次模型调用）')}
           {option(requireConfirmedOutline, setRequireConfirmedOutline, '只写已确认的章纲',
-            '（遇到 AI 草拟未确认、或上游桥段 / 剧情线 / 大纲改过的章纲就停下，先去确认）')}
+            '（遇到 AI 草拟未确认、或上游卷纲 / 总纲改过的章纲就停下，先去确认）')}
           {option(autoExpand, setAutoExpand, '缺章纲时自动规划',
-            '（写到还没展开的桥段时，先自动填充 / 展开再写；配合「滚动规划」使用）')}
+            '（写到还没有章纲的章节时，先按卷纲细化剧情单元、生成这一件事的章纲再写）')}
           {option(pipeline, setPipeline, '流水线加速',
             '（上一章分析和下一章生成同时进行，整体快约一半；严重问题会晚一章发现）')}
           <div className="flex items-end gap-3">

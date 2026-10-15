@@ -1,7 +1,7 @@
 """V3 R5+ 通用拆书参考资料注入服务（Reference Pack Injector）
 
 职责：
-1. 加载项目挂载的参考包，按强度档位组装 5 维度 + corpus 的可注入文本块
+1. 加载项目挂载的参考包，按强度档位组装 6 维度 + corpus 的可注入文本块（各维度文本由 v5_compressor 产出）
 2. 对外提供两种粒度的 API：
    - 高层：``build_reference_block(...)`` 一次性返回 ReferenceBlock（含 user_segment / system_segment）
    - 低层：``resolve_packs / resolve_dimensions / resolve_strength``（细粒度，供 imitation_service 复用）
@@ -49,40 +49,20 @@ logger = get_logger(__name__)
 
 @dataclass(frozen=True)
 class StrengthProfile:
-    """强度→各维度的预算（字符上限/语料 top-k）。
-
-    字段命名贴 ReferencePack 的 JSON 维度，便于裁剪函数直接索引。
-    V5 包各维度直接复用 v5_compressor 的三档文本（light/medium/deep 与 name 对齐），
-    这里的 *_chars 只约束老包（pipeline_version < 5）的通用序列化。
-    """
+    """强度档位：各维度文本直接用 v5_compressor 的同名三档（light / medium / deep），这里只管拆书卡检索的条数与长度。"""
 
     name: str  # light / medium / deep
-    methodology_chars: int
-    structure_chars: int
-    style_chars: int
-    synopsis_chars: int
     corpus_top_k: int
     corpus_chars_per_item: int  # 每条语料摘要上限
-    bridges_chars: int = 900
-    character_archive_chars: int = 900
 
     @classmethod
     def for_strength(cls, strength: str) -> "StrengthProfile":
         s = (strength or "medium").lower()
         if s == "light":
-            return cls(
-                name="light", methodology_chars=600, structure_chars=600, style_chars=400, synopsis_chars=400,
-                corpus_top_k=1, corpus_chars_per_item=300, bridges_chars=400, character_archive_chars=400,
-            )
+            return cls(name="light", corpus_top_k=1, corpus_chars_per_item=300)
         if s == "deep":
-            return cls(
-                name="deep", methodology_chars=3500, structure_chars=3500, style_chars=1200, synopsis_chars=1000,
-                corpus_top_k=3, corpus_chars_per_item=600, bridges_chars=1800, character_archive_chars=1800,
-            )
-        return cls(
-            name="medium", methodology_chars=1500, structure_chars=1500, style_chars=800, synopsis_chars=700,
-            corpus_top_k=2, corpus_chars_per_item=450, bridges_chars=900, character_archive_chars=900,
-        )
+            return cls(name="deep", corpus_top_k=3, corpus_chars_per_item=600)
+        return cls(name="medium", corpus_top_k=2, corpus_chars_per_item=450)
 
 
 # ============================================================
@@ -106,12 +86,7 @@ class _ResolvedPack:
     synopsis: Optional[Dict[str, Any]] = None
     bridges: Optional[Dict[str, Any]] = None
     character_archive: Optional[Dict[str, Any]] = None
-    # 2 = V2-V4 老包（各维度走通用序列化）；5 = V5（走 v5_compressor）
-    pipeline_version: int = 2
 
-    @property
-    def is_v5(self) -> bool:
-        return self.pipeline_version >= 5
 
 @dataclass
 class ReferenceBlock:
@@ -187,51 +162,6 @@ def _dedup_keep_order(items: Iterable[str]) -> List[str]:
     return out
 
 
-def _serialize_dimension(data: Dict[str, Any]) -> str:
-    """把 5 个 tab 的 dict 序列化成 LLM 可读自然文本。
-
-    通用策略：
-    - 若 dict 里含 prompt_content / content / text / summary 字段 → 优先取
-    - 否则 fallback 为对 dict 进行可读化（key: value 折行）
-    """
-    if not isinstance(data, dict):
-        return _truncate(str(data), 2000)
-    for key in ("prompt_content", "content", "text", "markdown", "summary"):
-        v = data.get(key)
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-    lines: List[str] = []
-    for k, v in data.items():
-        if v is None:
-            continue
-        if isinstance(v, (str, int, float)):
-            lines.append(f"{k}: {v}")
-        elif isinstance(v, list):
-            preview = "; ".join(str(x) for x in v[:8])
-            lines.append(f"{k}: {preview}")
-        elif isinstance(v, dict):
-            sub = "; ".join(f"{kk}={vv}" for kk, vv in list(v.items())[:6])
-            lines.append(f"{k}: {sub}")
-    return "\n".join(lines)
-
-
-def _serialize_style(style: Dict[str, Any]) -> str:
-    """style tab 的特化处理：prompt_content 优先，其次 traits/句式特征。"""
-    if not isinstance(style, dict):
-        return _truncate(str(style), 1000)
-    if isinstance(style.get("prompt_content"), str) and style["prompt_content"].strip():
-        return style["prompt_content"].strip()
-    parts: List[str] = []
-    if isinstance(style.get("name"), str):
-        parts.append(f"风格：{style['name']}")
-    if isinstance(style.get("description"), str):
-        parts.append(f"描述：{style['description']}")
-    traits = style.get("traits") or style.get("features")
-    if isinstance(traits, list):
-        parts.append("特征：" + "；".join(str(t) for t in traits[:8]))
-    return "\n".join(parts)
-
-
 # ============================================================
 # 主服务：ReferencePackInjector
 # ============================================================
@@ -251,9 +181,7 @@ class ReferencePackInjector:
     线程/连接模型：实例本身无状态，可全局复用；DB session 由调用方传入。
     """
 
-    # 当用户未给 explicit、且 pack 的 default_dimensions 也为空时的兜底维度
-    # V3.2：默认包含 synopsis，让新拆任务自动获得 Story Bible 层全局引导；
-    # 老 pack 没生成 synopsis 时由 valid 过滤自动跳过，向后兼容。
+    # 当用户未给 explicit、且 pack 的 default_dimensions 也为空时的兜底维度（含全书骨架：先看全局再看手法）
     DEFAULT_DIMENSION_FALLBACK: Tuple[str, ...] = (
         "synopsis", "methodology", "style", "corpus"
     )
@@ -323,7 +251,6 @@ class ReferencePackInjector:
                     generated_dimensions=_safe_json(pack.generated_dimensions, []) or [],
                     default_dimensions=_safe_json(link.default_dimensions, []) or [],
                     default_strength=link.default_strength or "medium",
-                    pipeline_version=int(getattr(pack, "pipeline_version", None) or 2),
                 )
             )
 
@@ -346,8 +273,7 @@ class ReferencePackInjector:
         generated_union: set[str] = set()
         for p in packs:
             generated_union.update(p.generated_dimensions or [])
-        # corpus 永远可用（拆书卡 / 章节事实表，未挂载到 generated_dimensions）；
-        # 已删除的维度（archetypes / worldbuilding / entities / relations / events）即使老包 generated 里有也不再生效
+        # corpus 永远可用（拆书卡检索，不在 generated_dimensions 里）；不认识的维度一律不生效
         valid = (generated_union & set(V5_DIMENSIONS)) | {"corpus"}
 
         if explicit is not None:
@@ -387,187 +313,53 @@ class ReferencePackInjector:
         return winner or "medium"
 
     # ----------------------------------------------------------------
-    # 维度组装（6 维 + corpus）
-    # V5 包：各维度直接复用 v5_compressor 的三档文本（与装配单 / 预压缩字段同一套格式）
-    # 老包（pipeline_version < 5）：保留原通用序列化，保证存量参考包继续可用
+    # 维度组装（6 维 + corpus）：每本书一段 v5_compressor 文本（与装配单 / 预压缩字段同一套格式）
     # ----------------------------------------------------------------
 
-    def _format_v5_sections(
+    def _format_sections(
         self, packs: List[_ResolvedPack], *, attr: str, section_title: str, profile: StrengthProfile,
     ) -> str:
-        """V5 包某维度的合并段落：每本书一段 compress_v5 文本。"""
+        """某维度的合并段落：每本书一段 compress_v5 文本。"""
         bodies: List[str] = []
         for p in packs:
-            data = getattr(p, attr, None)
-            if not p.is_v5 or not isinstance(data, dict):
-                continue
-            text = compress_v5(attr, data, profile.name)
+            text = compress_v5(attr, getattr(p, attr, None), profile.name)
             if text:
                 bodies.append(f"《{p.source_book_title}》：\n{text}")
         if not bodies:
             return ""
         return f"[{section_title}]\n" + "\n\n".join(bodies)
 
-    def _legacy_packs(self, packs: List[_ResolvedPack]) -> List[_ResolvedPack]:
-        return [p for p in packs if not p.is_v5]
-
-    def _format_methodology(
-        self, packs: List[_ResolvedPack], profile: StrengthProfile
-    ) -> str:
-        """写法手册：金手指/钩子/打脸/升级/爽点（V3 五键形状，新老包同一格式）。"""
-        return self._format_dimension_section(
-            packs,
-            attr="methodology",
-            section_title="参考方法论（原书写作手法，作为参考而非复刻）",
-            chars_budget=profile.methodology_chars,
+    def _format_synopsis(self, packs: List[_ResolvedPack], profile: StrengthProfile) -> str:
+        """全书骨架（≈ 原书的总纲）放最前：让模型先看到全局再看具体手法。"""
+        return self._format_sections(
+            packs, attr="synopsis", profile=profile,
+            section_title="参考全书骨架（原书的梗概 / 全书主线 / 分卷 / 成长路线，只借鉴结构，不照搬人物、设定与情节）",
         )
 
-    def _format_structure(
-        self, packs: List[_ResolvedPack], profile: StrengthProfile
-    ) -> str:
-        v5 = self._format_v5_sections(
+    def _format_methodology(self, packs: List[_ResolvedPack], profile: StrengthProfile) -> str:
+        return self._format_sections(
+            packs, attr="methodology", profile=profile,
+            section_title="参考写法手册（原书的开篇 / 分卷 / 剧情单元 / 张弛节奏写法，作为参考而非复刻）",
+        )
+
+    def _format_structure(self, packs: List[_ResolvedPack], profile: StrengthProfile) -> str:
+        return self._format_sections(
             packs, attr="structure", profile=profile,
-            section_title="参考结构统计（原书节奏 / 章末钩子 / 爽点密度 / 张力曲线，仅作节奏参考）",
+            section_title="参考结构统计（原书节奏 / 章末钩子 / 剧情单元长短与强弱，仅作节奏参考）",
         )
-        legacy = self._format_dimension_section(
-            self._legacy_packs(packs),
-            attr="structure",
-            section_title="参考结构手法（开篇钩 / 中段冲突 / 结尾钩）",
-            chars_budget=profile.structure_chars,
-        )
-        return "\n\n".join(x for x in (v5, legacy) if x)
 
-    def _format_bridges(
-        self, packs: List[_ResolvedPack], profile: StrengthProfile
-    ) -> str:
-        """桥段库：V5 情节单元（结构 / 行动链 / 爽点）；老包沿用 V4.1 桥段类型分布的抽象描述。"""
-        v5 = self._format_v5_sections(
+    def _format_bridges(self, packs: List[_ResolvedPack], profile: StrengthProfile) -> str:
+        """剧情单元库（维度键沿用 bridges）：一件事怎么起因-经过-结果、多长、怎么接下一件。"""
+        return self._format_sections(
             packs, attr="bridges", profile=profile,
-            section_title="参考情节单元（原书桥段的结构 / 行动链 / 兑现方式，学写法不复刻具体情节）",
+            section_title="参考剧情单元（原书一件事的经过、长短与强弱交替，学写法不复刻具体情节）",
         )
-        bodies: List[str] = []
-        for p in self._legacy_packs(packs):
-            data = p.bridges
-            if not isinstance(data, dict):
-                continue
-            lines: List[str] = []
-            total = data.get("total_bridges_detected")
-            if total is not None:
-                lines.append(f"- 全书识别桥段：{total} 个")
-            bridge_types = data.get("bridge_types") or []
-            if isinstance(bridge_types, list) and bridge_types:
-                type_bits = [
-                    f"{bt.get('type', '?')}×{bt.get('count', '?')}" for bt in bridge_types[:6] if isinstance(bt, dict)
-                ]
-                if type_bits:
-                    lines.append(f"- 桥段类型分布：{', '.join(type_bits)}")
-            if lines:
-                bodies.append(_truncate(f"《{p.source_book_title}》：\n" + "\n".join(lines), profile.bridges_chars))
-        legacy = (
-            "[参考桥段范本（原书桥段的类型/节奏，仅作结构参考，禁止复刻具体情节）]\n" + "\n\n".join(bodies)
-            if bodies else ""
-        )
-        return "\n\n".join(x for x in (v5, legacy) if x)
 
-    def _format_character_archive(
-        self, packs: List[_ResolvedPack], profile: StrengthProfile
-    ) -> str:
-        """人物功能谱：V5 主角 / 盟友 / 反派 / 功能位；老包沿用 V4.1 角色档案的手法抽取。"""
-        v5 = self._format_v5_sections(
+    def _format_character_archive(self, packs: List[_ResolvedPack], profile: StrengthProfile) -> str:
+        return self._format_sections(
             packs, attr="character_archive", profile=profile,
             section_title="参考人物功能谱（原书每个人物在结构里承担什么功能、作者怎么用，禁止照搬原书角色）",
         )
-        SECTION_MAP = (
-            ("protagonist_archetypes", "主角塑造"),
-            ("antagonist_progression", "反派递进"),
-            ("support_character_techniques", "配角手法"),
-        )
-        bodies: List[str] = []
-        for p in self._legacy_packs(packs):
-            data = p.character_archive
-            if not isinstance(data, dict):
-                continue
-            lines: List[str] = []
-            for key, label in SECTION_MAP:
-                for item in (data.get(key) or [])[:2]:
-                    if not isinstance(item, dict):
-                        continue
-                    bits = [
-                        f"{k}={str(v).strip()}" for k, v in item.items()
-                        if isinstance(v, str) and v.strip() and k != "name"
-                    ][:3]
-                    if bits:
-                        lines.append(f"- 【{label}】{'；'.join(bits)}")
-            if lines:
-                bodies.append(_truncate(f"《{p.source_book_title}》：\n" + "\n".join(lines), profile.character_archive_chars))
-        legacy = (
-            "[参考角色档案手法（如何引出/递进/赋予功能，仅作塑造方法参考，禁止照搬原书角色）]\n" + "\n\n".join(bodies)
-            if bodies else ""
-        )
-        return "\n\n".join(x for x in (v5, legacy) if x)
-
-    def _format_synopsis(
-        self, packs: List[_ResolvedPack], profile: StrengthProfile
-    ) -> str:
-        """全书骨架：V5 骨架（题材 / 一句话 / 大矛盾 / 金手指 / 阶段 / 爽点 / 成长体系）；老包沿用 V3.2 类型骨架。
-
-        Hierarchical RAG 最佳实践：Story Bible 放最前，让 LLM 先看到全局再看具体手法。
-        """
-        v5 = self._format_v5_sections(
-            packs, attr="synopsis", profile=profile,
-            section_title="参考全书骨架（原书的题材 / 前提 / 大矛盾 / 阶段 / 成长体系，仅供方向参考）",
-        )
-        LABEL_MAP = (
-            ("genre_tag", "题材"),
-            ("core_premise", "故事前提"),
-            ("golden_finger_concept", "金手指"),
-            ("power_system_overview", "力量体系"),
-            ("central_conflict", "核心冲突"),
-            ("ultimate_goal", "终极目标"),
-            ("selling_points", "卖点"),
-            ("target_audience_signals", "目标受众"),
-        )
-        bodies: List[str] = []
-        for p in self._legacy_packs(packs):
-            if not p.synopsis:
-                continue
-            lines: List[str] = []
-            for key, label in LABEL_MAP:
-                v = p.synopsis.get(key)
-                if not v:
-                    continue
-                v_text = " / ".join(str(x).strip() for x in v if x) if isinstance(v, list) else str(v).strip()
-                if v_text:
-                    lines.append(f"- {label}：{v_text}")
-            if lines:
-                bodies.append(_truncate(f"《{p.source_book_title}》：\n" + "\n".join(lines), profile.synopsis_chars))
-        legacy = (
-            "[参考故事类型骨架（仅供方向参考，禁止复刻原书具体人名/地名/物品名）]\n" + "\n\n".join(bodies)
-            if bodies else ""
-        )
-        return "\n\n".join(x for x in (v5, legacy) if x)
-
-    def _format_dimension_section(
-        self,
-        packs: List[_ResolvedPack],
-        *,
-        attr: str,
-        section_title: str,
-        chars_budget: int,
-    ) -> str:
-        """通用：从多 pack 取同一个维度并合并。"""
-        bodies: List[str] = []
-        for p in packs:
-            data = getattr(p, attr, None)
-            if not data:
-                continue
-            text = _serialize_dimension(data)
-            text = _truncate(text, chars_budget)
-            bodies.append(f"《{p.source_book_title}》：\n{text}")
-        if not bodies:
-            return ""
-        joined = "\n\n".join(bodies)
-        return f"[{section_title}]\n{joined}"
 
     async def _format_corpus(
         self,
@@ -612,21 +404,12 @@ class ReferencePackInjector:
         packs: List[_ResolvedPack],
         profile: StrengthProfile,
     ) -> str:
-        """文风维度注入到 system prompt（影响 tone/句式而非具体内容）。
-
-        V5 包：v5_compressor 三档（含量化指标 / 例句）；老包：prompt_content 优先的通用序列化。
-        """
+        """文风维度注入到 system prompt（影响 tone / 句式而非具体内容），v5_compressor 三档（含量化指标 / 例句）。"""
         bodies: List[str] = []
         for p in packs:
-            if not p.style:
-                continue
-            if p.is_v5:
-                text = compress_v5("style", p.style, profile.name)
-            else:
-                text = _truncate(_serialize_style(p.style), profile.style_chars)
-            if not text:
-                continue
-            bodies.append(f"参考《{p.source_book_title}》的文风指引：\n{text}")
+            text = compress_v5("style", p.style, profile.name)
+            if text:
+                bodies.append(f"参考《{p.source_book_title}》的文风指引：\n{text}")
         if not bodies:
             return ""
         return "\n\n".join(bodies)
@@ -673,7 +456,7 @@ class ReferencePackInjector:
 
         # ---- user_segment ----
         # 拼装顺序遵循 Hierarchical RAG 最佳实践：全书骨架（粗）→ 写法手册 / 结构统计（中）→
-        # 情节单元 / 人物功能谱（中）→ 拆书卡（细）。
+        # 剧情单元 / 人物功能谱（中）→ 拆书卡（细）。
         # produced_dimensions 记录"实际产出非空段落"的维度，
         # 保证 used_dimensions 对前端/日志如实（选了但内容为空的维度不再谎报）。
         ref_sections: List[str] = []

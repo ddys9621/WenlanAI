@@ -373,4 +373,86 @@
   .lj-manuscript {
     @apply font-serif text-[17px] leading-[1.95] text-content;
   }
+
+  /* ─── 码字稿纸（参考岚笺 ManuscriptEditor）：纸色 / 墨色 / 横线随「版式」切换；
+     横线画在 CodeMirror 的 .cm-content 上，行高用像素值，横线与每一行对齐、随内容滚动 ─── */
+  .lj-paper {
+    --manuscript-paper: #fffdf7;
+    --manuscript-ink: #262b28;
+    --manuscript-rule: rgba(139, 108, 67, 0.28);
+    --manuscript-ghost: #a39d8e;
+    --manuscript-caret: #a84337;
+    --manuscript-selection: rgba(150, 115, 68, 0.22);
+    --manuscript-pad-top: 22px;
+    --manuscript-pad-x: clamp(20px, 4vw, 48px);
+    --manuscript-rule-inset: calc(var(--manuscript-pad-x) - 8px);
+    background: var(--manuscript-paper);
+    color: var(--manuscript-ink);
+    box-shadow: 0 8px 28px rgba(74, 61, 42, 0.06), inset 0 0 0 1px rgba(185, 174, 155, 0.46);
+  }
+
+  .lj-paper[data-paper='green'] {
+    --manuscript-paper: #edf4e9;
+    --manuscript-ink: #25312b;
+    --manuscript-rule: rgba(68, 105, 81, 0.3);
+    --manuscript-ghost: #8fa395;
+  }
+
+  .lj-paper[data-paper='gray'] {
+    --manuscript-paper: #eff1ef;
+    --manuscript-ink: #28302d;
+    --manuscript-rule: rgba(70, 83, 76, 0.28);
+    --manuscript-ghost: #959e98;
+  }
+
+  .lj-paper[data-paper='night'] {
+    --manuscript-paper: #242a28;
+    --manuscript-ink: #dce3dd;
+    --manuscript-rule: rgba(204, 218, 207, 0.2);
+    --manuscript-ghost: rgba(220, 227, 221, 0.4);
+    --manuscript-caret: #d69b78;
+    --manuscript-selection: rgba(214, 155, 120, 0.25);
+  }
+
+  .lj-paper .cm-content {
+    background-image: repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent calc(var(--manuscript-line-height) - 1px),
+      var(--manuscript-rule) calc(var(--manuscript-line-height) - 1px),
+      var(--manuscript-rule) var(--manuscript-line-height)
+    );
+    background-size: calc(100% - 2 * var(--manuscript-rule-inset)) var(--manuscript-line-height);
+    background-repeat: repeat-y;
+    background-position: center var(--manuscript-pad-top);
+  }
+
+  .lj-paper[data-guide='dashed'] .cm-content {
+    background-image:
+      repeating-linear-gradient(to right, transparent 0 6px, var(--manuscript-paper) 6px 10px),
+      repeating-linear-gradient(
+        to bottom,
+        transparent 0,
+        transparent calc(var(--manuscript-line-height) - 1px),
+        var(--manuscript-rule) calc(var(--manuscript-line-height) - 1px),
+        var(--manuscript-rule) var(--manuscript-line-height)
+      );
+    background-size:
+      calc(100% - 2 * var(--manuscript-rule-inset)) 100%,
+      calc(100% - 2 * var(--manuscript-rule-inset)) var(--manuscript-line-height);
+  }
+
+  .lj-paper[data-guide='off'] .cm-content {
+    background-image: none;
+  }
+
+  /* 写作工具栏按钮（扁平文字按钮；激活态 = 浅墨绿底 + 底部墨绿线） */
+  .lj-tool {
+    @apply inline-flex h-8 shrink-0 items-center gap-1.5 rounded-sm px-2 text-xs font-medium text-content-secondary hover:bg-surface-hover hover:text-content disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
+  .lj-tool--active {
+    @apply bg-brand-100 text-brand-600;
+    box-shadow: inset 0 -2px #285b4d;
+  }
 }

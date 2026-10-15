@@ -17,7 +17,9 @@ logger = get_logger(__name__)
 # 注意：这里不能再走 app.models 聚合入口，否则会触发
 # database -> app.models -> model -> database 的循环导入。
 from app.models.analysis_task import AnalysisTask  # noqa: F401
-from app.models.assistant import AssistantFieldCandidate, AssistantMessage, AssistantRun, AssistantSession  # noqa: F401
+from app.models.assistant import (  # noqa: F401
+    AssistantFieldCandidate, AssistantMessage, AssistantRun, AssistantSession, AssistantTeamSetting,
+)
 from app.models.book_dissect_task import BookDissectTask  # noqa: F401
 from app.models.book_dissect_chapter_fact import BookDissectChapterFact  # noqa: F401
 from app.models.book_dissect_story_arc import BookDissectStoryArc  # noqa: F401
@@ -34,9 +36,8 @@ from app.models.character_known_info import CharacterKnownInfo  # noqa: F401
 from app.models.generation_history import GenerationHistory  # noqa: F401
 from app.models.memory import PlotAnalysis, StoryMemory  # noqa: F401
 from app.models.narrative_promise import NarrativePromise  # noqa: F401
-from app.models.plot_bridge import PlotBridge  # noqa: F401
+from app.models.volume import Volume  # noqa: F401
 from app.models.plot_card import PlotCard  # noqa: F401
-from app.models.plot_line import PlotLine  # noqa: F401
 from app.models.project import Project  # noqa: F401
 from app.models.project_default_style import ProjectDefaultStyle  # noqa: F401
 from app.models.project_ai_preference import ProjectAIPreference  # noqa: F401

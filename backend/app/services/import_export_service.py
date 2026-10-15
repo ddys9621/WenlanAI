@@ -1,7 +1,7 @@
 """导入导出服务"""
 import json
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.models.project import Project
@@ -12,12 +12,10 @@ from app.models.relationship import CharacterRelationship, Organization, Organiz
 from app.models.writing_style import WritingStyle
 from app.models.generation_history import GenerationHistory
 from app.models.world_rule import WorldRule
-from app.models.plot_line import PlotLine
 from app.models.chapter_outline import ChapterOutline
+from app.models.volume import Volume
 from app.models.plot_card import PlotCard
-from app.models.plot_card_plot_line_link import PlotCardPlotLineLink
 from app.models.plot_card_chapter_outline_link import PlotCardChapterOutlineLink
-from app.models.chapter_outline_plot_line_link import ChapterOutlinePlotLineLink
 from app.services.narrative_tasks import parse_narrative_tasks
 from app.schemas.import_export import (
     ProjectExportData,
@@ -30,24 +28,31 @@ from app.schemas.import_export import (
     WritingStyleExportData,
     GenerationHistoryExportData,
     WorldRuleExportData,
-    PlotLineExportData,
+    VolumeExportData,
     ChapterOutlineExportData,
     PlotCardExportData,
-    ChapterOutlinePlotLineLinkExportData,
-    PlotCardPlotLineLinkExportData,
     PlotCardChapterOutlineLinkExportData,
     ImportValidationResult,
     ImportResult
 )
 from app.logger import get_logger
+from app.services.volume_planning import loads_threads, loads_units
 
 logger = get_logger(__name__)
+
+
+def _json_list(raw: Optional[str]) -> Optional[List[str]]:
+    try:
+        value = json.loads(raw) if raw else None
+    except (TypeError, ValueError):
+        return None
+    return [str(x) for x in value] if isinstance(value, list) else None
 
 
 class ImportExportService:
     """导入导出服务类"""
 
-    SUPPORTED_VERSION = "1.1.0"
+    SUPPORTED_VERSION = "2.0.0"
     
     @staticmethod
     async def export_project(
@@ -93,10 +98,7 @@ class ImportExportService:
             "chapter_count": project.chapter_count,
             "narrative_perspective": project.narrative_perspective,
             "character_count": project.character_count,
-            "c3_hook_style": project.c3_hook_style,
             "platform_preset": project.platform_preset,
-            "bridge_rhythm": project.bridge_rhythm,
-            "rolling_planning": project.rolling_planning,
             "user_id": project.user_id,
             "created_at": project.created_at.isoformat() if project.created_at else None,
         }
@@ -141,9 +143,9 @@ class ImportExportService:
         world_rules = await ImportExportService._export_world_rules(project_id, db)
         logger.info(f"导出世界规则数: {len(world_rules)}")
 
-        # 导出剧情线
-        plot_lines = await ImportExportService._export_plot_lines(project_id, db)
-        logger.info(f"导出剧情线数: {len(plot_lines)}")
+        # 导出卷纲
+        volumes = await ImportExportService._export_volumes(project_id, db)
+        logger.info(f"导出卷纲数: {len(volumes)}")
 
         # 导出章节大纲
         chapter_outlines = await ImportExportService._export_chapter_outlines(project_id, db)
@@ -153,13 +155,7 @@ class ImportExportService:
         plot_cards = await ImportExportService._export_plot_cards(project_id, db)
         logger.info(f"导出剧情卡片数: {len(plot_cards)}")
 
-        # 导出关联关系(v1.1.0新增)
-        chapter_outline_plot_line_links = await ImportExportService._export_chapter_outline_plot_line_links(project_id, db)
-        logger.info(f"导出章节大纲-剧情线关联数: {len(chapter_outline_plot_line_links)}")
-
-        plot_card_plot_line_links = await ImportExportService._export_plot_card_plot_line_links(project_id, db)
-        logger.info(f"导出剧情卡片-剧情线关联数: {len(plot_card_plot_line_links)}")
-
+        # 导出剧情卡片-章纲关联
         plot_card_chapter_outline_links = await ImportExportService._export_plot_card_chapter_outline_links(project_id, db)
         logger.info(f"导出剧情卡片-章节大纲关联数: {len(plot_card_chapter_outline_links)}")
 
@@ -176,11 +172,9 @@ class ImportExportService:
             writing_styles=writing_styles,
             generation_history=generation_history,
             world_rules=world_rules,
-            plot_lines=plot_lines,
+            volumes=volumes,
             chapter_outlines=chapter_outlines,
             plot_cards=plot_cards,
-            chapter_outline_plot_line_links=chapter_outline_plot_line_links,
-            plot_card_plot_line_links=plot_card_plot_line_links,
             plot_card_chapter_outline_links=plot_card_chapter_outline_links
         )
 
@@ -447,37 +441,6 @@ class ImportExportService:
             for rule in rules
         ]
 
-    @staticmethod
-    async def _export_plot_lines(project_id: str, db: AsyncSession) -> List[PlotLineExportData]:
-        """导出剧情线(含时间线节点)"""
-        result = await db.execute(
-            select(PlotLine)
-            .where(PlotLine.project_id == project_id)
-            .order_by(PlotLine.order_index)
-        )
-        lines = result.scalars().all()
-
-        exported = []
-        for line in lines:
-            # 解析时间线节点数据
-            timeline_data = None
-            if line.timeline_data:
-                try:
-                    timeline_data = json.loads(line.timeline_data)
-                except (json.JSONDecodeError, TypeError):
-                    logger.warning(f"剧情线 {line.title} 的 timeline_data 解析失败,跳过")
-
-            exported.append(PlotLineExportData(
-                name=line.title,
-                description=line.description,
-                line_type=line.line_type or "main",
-                status="active",
-                order_index=line.order_index or 0,
-                timeline_data=timeline_data,
-                created_at=line.created_at.isoformat() if line.created_at else None
-            ))
-
-        return exported
 
     @staticmethod
     async def _export_chapter_outlines(project_id: str, db: AsyncSession) -> List[ChapterOutlineExportData]:
@@ -488,6 +451,9 @@ class ImportExportService:
             .order_by(ChapterOutline.chapter_number)
         )
         outlines = result.scalars().all()
+        volume_numbers = dict((await db.execute(
+            select(Volume.id, Volume.volume_number).where(Volume.project_id == project_id)
+        )).all())
 
         exported = []
         for outline in outlines:
@@ -521,116 +487,45 @@ class ImportExportService:
                 emotional_arc=getattr(outline, 'emotional_arc', None),
                 chapter_hook=getattr(outline, 'chapter_hook', None),
                 narrative_tasks=parse_narrative_tasks(outline.narrative_tasks) if outline.narrative_tasks else None,
+                entry_state=outline.entry_state,
+                exit_state=outline.exit_state,
+                forbidden=_json_list(outline.forbidden),
+                volume_number=volume_numbers.get(outline.volume_id),
+                unit_index=outline.unit_index,
                 created_at=outline.created_at.isoformat() if outline.created_at else None
             ))
 
         return exported
 
     @staticmethod
-    async def _export_chapter_outline_plot_line_links(
-        project_id: str,
-        db: AsyncSession
-    ) -> List[ChapterOutlinePlotLineLinkExportData]:
-        """导出章节大纲-剧情线关联关系"""
-        # 查询所有属于该项目的章节大纲-剧情线关联
-        result = await db.execute(
-            select(ChapterOutlinePlotLineLink, ChapterOutline, PlotLine)
-            .join(ChapterOutline, ChapterOutlinePlotLineLink.chapter_outline_id == ChapterOutline.id)
-            .join(PlotLine, ChapterOutlinePlotLineLink.plot_line_id == PlotLine.id)
-            .where(ChapterOutline.project_id == project_id)
-        )
-        links = result.all()
+    async def _export_volumes(project_id: str, db: AsyncSession) -> List[VolumeExportData]:
+        """导出卷纲（剧情单元 / 线索编排原样带上）"""
+        rows = (await db.execute(
+            select(Volume).where(Volume.project_id == project_id).order_by(Volume.volume_number)
+        )).scalars().all()
+        return [VolumeExportData(
+            volume_number=v.volume_number, title=v.title or "", chapter_start=v.chapter_start, chapter_end=v.chapter_end,
+            summary=v.summary, goal=v.goal, climax=v.climax, ending_hook=v.ending_hook,
+            units=loads_units(v.units), threads=loads_threads(v.threads), review_note=v.review_note,
+            review_status=v.review_status,
+        ) for v in rows]
 
-        exported = []
-        for link, outline, plot_line in links:
-            # 解析时间线覆盖数据
-            timeline_coverage = None
-            if link.timeline_coverage:
-                try:
-                    timeline_coverage = json.loads(link.timeline_coverage)
-                except (json.JSONDecodeError, TypeError):
-                    logger.warning(f"章节 {outline.chapter_number} 与剧情线 {plot_line.title} 的 timeline_coverage 解析失败")
-
-            exported.append(ChapterOutlinePlotLineLinkExportData(
-                chapter_outline_number=outline.chapter_number,
-                plot_line_name=plot_line.title,
-                role=link.role,
-                order_index=link.order_index,
-                timeline_coverage=timeline_coverage
-            ))
-
-        return exported
 
     @staticmethod
     async def _export_plot_cards(project_id: str, db: AsyncSession) -> List[PlotCardExportData]:
-        """导出剧情卡片(兼容字段用于v1.0.0)"""
-        # 获取项目的所有剧情卡片
-        result = await db.execute(
-            select(PlotCard)
-            .where(PlotCard.project_id == project_id)
-            .order_by(PlotCard.order_index)
-        )
-        cards = result.scalars().all()
+        """导出剧情卡片（与章纲的关联单独导出）"""
+        cards = (await db.execute(
+            select(PlotCard).where(PlotCard.project_id == project_id).order_by(PlotCard.order_index)
+        )).scalars().all()
+        return [PlotCardExportData(
+            title=card.title,
+            content=card.content,
+            card_type=card.card_type or "event",
+            order_index=card.order_index or 0,
+            tags=card.tags,
+            created_at=card.created_at.isoformat() if card.created_at else None,
+        ) for card in cards]
 
-        exported = []
-        for card in cards:
-            # 获取第一个关联的剧情线(兼容字段,用于v1.0.0)
-            plot_line_result = await db.execute(
-                select(PlotLine)
-                .join(PlotCardPlotLineLink, PlotLine.id == PlotCardPlotLineLink.plot_line_id)
-                .where(PlotCardPlotLineLink.plot_card_id == card.id)
-                .limit(1)
-            )
-            plot_line = plot_line_result.scalar_one_or_none()
-
-            # 获取第一个关联的章纲(兼容字段,用于v1.0.0)
-            chapter_result = await db.execute(
-                select(ChapterOutline)
-                .join(PlotCardChapterOutlineLink, ChapterOutline.id == PlotCardChapterOutlineLink.chapter_outline_id)
-                .where(PlotCardChapterOutlineLink.plot_card_id == card.id)
-                .limit(1)
-            )
-            chapter = chapter_result.scalar_one_or_none()
-
-            # 处理tags - 保持为JSON字符串格式
-            tags = card.tags  # 直接使用原始的JSON字符串,不解析
-
-            exported.append(PlotCardExportData(
-                plot_line_name=plot_line.title if plot_line else None,
-                chapter_outline_number=chapter.chapter_number if chapter else None,
-                title=card.title,
-                content=card.content,
-                card_type=card.card_type or "event",
-                order_index=card.order_index or 0,
-                tags=tags,
-                created_at=card.created_at.isoformat() if card.created_at else None
-            ))
-
-        return exported
-
-    @staticmethod
-    async def _export_plot_card_plot_line_links(
-        project_id: str,
-        db: AsyncSession
-    ) -> List[PlotCardPlotLineLinkExportData]:
-        """导出剧情卡片-剧情线关联关系"""
-        # 查询所有属于该项目的剧情卡片-剧情线关联
-        result = await db.execute(
-            select(PlotCardPlotLineLink, PlotCard, PlotLine)
-            .join(PlotCard, PlotCardPlotLineLink.plot_card_id == PlotCard.id)
-            .join(PlotLine, PlotCardPlotLineLink.plot_line_id == PlotLine.id)
-            .where(PlotCard.project_id == project_id)
-        )
-        links = result.all()
-
-        exported = []
-        for _link, card, plot_line in links:
-            exported.append(PlotCardPlotLineLinkExportData(
-                card_title=card.title,
-                plot_line_name=plot_line.title
-            ))
-
-        return exported
 
     @staticmethod
     async def _export_plot_card_chapter_outline_links(
@@ -677,10 +572,8 @@ class ImportExportService:
         version = data.get("version", "")
         if not version:
             errors.append("缺少版本信息")
-        elif version not in ["1.0.0", "1.1.0"]:
-            warnings.append(f"版本不匹配: 导入文件版本为 {version}, 当前支持版本为 1.0.0/1.1.0")
-        elif version == "1.0.0":
-            warnings.append("导入v1.0.0格式文件,部分关联关系可能无法完整还原(时间线节点、多对多关联)")
+        elif version != ImportExportService.SUPPORTED_VERSION:
+            errors.append(f"不支持的导出文件版本 {version}：当前只支持 {ImportExportService.SUPPORTED_VERSION}")
         
         # 检查必需字段
         if "project" not in data:
@@ -701,12 +594,9 @@ class ImportExportService:
             "writing_styles": len(data.get("writing_styles", [])),
             "generation_history": len(data.get("generation_history", [])),
             "world_rules": len(data.get("world_rules", [])),
-            "plot_lines": len(data.get("plot_lines", [])),
+            "volumes": len(data.get("volumes") or []),
             "chapter_outlines": len(data.get("chapter_outlines", [])),
             "plot_cards": len(data.get("plot_cards", [])),
-            # v1.1.0新增字段
-            "chapter_outline_plot_line_links": len(data.get("chapter_outline_plot_line_links", [])),
-            "plot_card_plot_line_links": len(data.get("plot_card_plot_line_links", [])),
             "plot_card_chapter_outline_links": len(data.get("plot_card_chapter_outline_links", []))
         }
         
@@ -781,10 +671,7 @@ class ImportExportService:
                 chapter_count=project_data.get("chapter_count"),
                 narrative_perspective=project_data.get("narrative_perspective"),
                 character_count=project_data.get("character_count"),
-                c3_hook_style=project_data.get("c3_hook_style") or "none",
                 platform_preset=project_data.get("platform_preset"),
-                bridge_rhythm=project_data.get("bridge_rhythm"),
-                rolling_planning=project_data.get("rolling_planning"),
                 current_words=project_data.get("current_words", 0),  # 保留原项目的字数
                 wizard_step=4,  # 导入的项目设置为向导完成状态
                 wizard_status="completed"  # 标记向导已完成
@@ -843,16 +730,13 @@ class ImportExportService:
             statistics["world_rules"] = world_rules_count
             logger.info(f"导入世界规则数: {world_rules_count}")
 
-            # 导入剧情线
-            plot_line_mapping = await ImportExportService._import_plot_lines(
-                new_project.id, data.get("plot_lines", []), db
-            )
-            statistics["plot_lines"] = len(plot_line_mapping)
-            logger.info(f"导入剧情线数: {len(plot_line_mapping)}")
+            # 导入卷纲（章纲按卷序号挂到新卷上）
+            volume_mapping = await ImportExportService._import_volumes(new_project.id, data.get("volumes") or [], db)
+            statistics["volumes"] = len(volume_mapping)
 
             # 导入章节大纲
             chapter_outline_mapping = await ImportExportService._import_chapter_outlines(
-                new_project.id, data.get("chapter_outlines", []), db
+                new_project.id, data.get("chapter_outlines", []), db, volume_mapping
             )
             statistics["chapter_outlines"] = len(chapter_outline_mapping)
             logger.info(f"导入章节大纲数: {len(chapter_outline_mapping)}")
@@ -867,42 +751,14 @@ class ImportExportService:
             statistics["chapters"] = chapters_count
             logger.info(f"导入章节数: {chapters_count}")
 
-            # 导入章节大纲-剧情线关联(v1.1.0新增)
-            chapter_outline_plot_line_links_count = 0
-            if "chapter_outline_plot_line_links" in data:
-                chapter_outline_plot_line_links_count = await ImportExportService._import_chapter_outline_plot_line_links(
-                    data.get("chapter_outline_plot_line_links", []),
-                    plot_line_mapping,
-                    chapter_outline_mapping,
-                    db
-                )
-                statistics["chapter_outline_plot_line_links"] = chapter_outline_plot_line_links_count
-                logger.info(f"导入章节大纲-剧情线关联数: {chapter_outline_plot_line_links_count}")
-
             # 导入剧情卡片
             plot_card_mapping = await ImportExportService._import_plot_cards(
-                new_project.id,
-                data.get("plot_cards", []),
-                plot_line_mapping,
-                chapter_outline_mapping,
-                db
+                new_project.id, data.get("plot_cards", []), db
             )
             statistics["plot_cards"] = len(plot_card_mapping)
             logger.info(f"导入剧情卡片数: {len(plot_card_mapping)}")
 
-            # 导入剧情卡片-剧情线关联(v1.1.0新增)
-            plot_card_plot_line_links_count = 0
-            if "plot_card_plot_line_links" in data:
-                plot_card_plot_line_links_count = await ImportExportService._import_plot_card_plot_line_links(
-                    data.get("plot_card_plot_line_links", []),
-                    plot_card_mapping,
-                    plot_line_mapping,
-                    db
-                )
-                statistics["plot_card_plot_line_links"] = plot_card_plot_line_links_count
-                logger.info(f"导入剧情卡片-剧情线关联数: {plot_card_plot_line_links_count}")
-
-            # 导入剧情卡片-章节大纲关联(v1.1.0新增)
+            # 导入剧情卡片-章节大纲关联
             plot_card_chapter_outline_links_count = 0
             if "plot_card_chapter_outline_links" in data:
                 plot_card_chapter_outline_links_count = await ImportExportService._import_plot_card_chapter_outline_links(
@@ -1202,43 +1058,38 @@ class ImportExportService:
         logger.info(f"✅ 导入世界规则完成: {count} 条，已向量化")
         return count
 
+
     @staticmethod
-    async def _import_plot_lines(
-        project_id: str,
-        lines_data: List[Dict],
-        db: AsyncSession
-    ) -> Dict[str, str]:
-        """导入剧情线(含时间线节点)，返回名称到ID的映射"""
-        mapping = {}
-        for line_data in lines_data:
-            # 处理时间线节点数据
-            timeline_data = line_data.get("timeline_data")
-            if timeline_data and isinstance(timeline_data, (list, dict)):
-                # 将JSON结构序列化为字符串存入数据库
-                timeline_data = json.dumps(timeline_data, ensure_ascii=False)
-
-            line = PlotLine(
-                project_id=project_id,
-                title=line_data.get("name"),
-                description=line_data.get("description"),
-                line_type=line_data.get("line_type", "main"),
-                order_index=line_data.get("order_index", 0),
-                timeline_data=timeline_data
+    async def _import_volumes(project_id: str, volumes_data: List[Dict], db: AsyncSession) -> Dict[int, str]:
+        """导入卷纲，返回卷序号到新 ID 的映射"""
+        mapping: Dict[int, str] = {}
+        for item in volumes_data:
+            if not isinstance(item, dict) or item.get("volume_number") is None:
+                continue
+            volume = Volume(
+                project_id=project_id, volume_number=int(item["volume_number"]), title=item.get("title") or "",
+                chapter_start=int(item.get("chapter_start") or 1), chapter_end=int(item.get("chapter_end") or 1),
+                summary=item.get("summary"), goal=item.get("goal"), climax=item.get("climax"),
+                ending_hook=item.get("ending_hook"), review_note=item.get("review_note"),
+                review_status=item.get("review_status") or "confirmed",
+                units=json.dumps(item.get("units") or [], ensure_ascii=False),
+                threads=json.dumps(item.get("threads") or [], ensure_ascii=False),
             )
-            db.add(line)
-            await db.flush()  # 获取ID
-            mapping[line.title] = line.id
-
+            db.add(volume)
+            await db.flush()
+            mapping[volume.volume_number] = volume.id
         return mapping
 
     @staticmethod
     async def _import_chapter_outlines(
         project_id: str,
         outlines_data: List[Dict],
-        db: AsyncSession
+        db: AsyncSession,
+        volume_mapping: Optional[Dict[int, str]] = None,
     ) -> Dict[int, str]:
         """导入章节大纲，返回章节号到ID的映射"""
         mapping = {}
+        volume_mapping = volume_mapping or {}
         for outline_data in outlines_data:
             # 还原为数据库中的 JSON 字符串格式
             key_events = outline_data.get("key_events")
@@ -1262,10 +1113,14 @@ class ImportExportService:
                 # v1.2.0新增：导入完整字段
                 scene=outline_data.get("scene"),
                 pov=outline_data.get("pov"),
-                emotional_arc=outline_data.get("emotional_arc"),
-                chapter_hook=outline_data.get("chapter_hook"),
                 narrative_tasks=(json.dumps(outline_data["narrative_tasks"], ensure_ascii=False)
                                  if isinstance(outline_data.get("narrative_tasks"), dict) else None),
+                entry_state=outline_data.get("entry_state"),
+                exit_state=outline_data.get("exit_state"),
+                forbidden=(json.dumps(outline_data["forbidden"], ensure_ascii=False)
+                           if isinstance(outline_data.get("forbidden"), list) and outline_data["forbidden"] else None),
+                volume_id=volume_mapping.get(outline_data.get("volume_number")),
+                unit_index=outline_data.get("unit_index") if outline_data.get("volume_number") in volume_mapping else None,
             )
             db.add(outline)
             await db.flush()  # 获取ID
@@ -1273,50 +1128,11 @@ class ImportExportService:
 
         return mapping
 
-    @staticmethod
-    async def _import_chapter_outline_plot_line_links(
-        links_data: List[Dict],
-        plot_line_mapping: Dict[str, str],
-        chapter_outline_mapping: Dict[int, str],
-        db: AsyncSession
-    ) -> int:
-        """导入章节大纲-剧情线关联关系"""
-        count = 0
-        for link_data in links_data:
-            plot_line_name = link_data.get("plot_line_name")
-            chapter_outline_number = link_data.get("chapter_outline_number")
-
-            # 查找对应的ID
-            plot_line_id = plot_line_mapping.get(plot_line_name)
-            chapter_outline_id = chapter_outline_mapping.get(chapter_outline_number)
-
-            if not plot_line_id or not chapter_outline_id:
-                logger.warning(f"跳过章节大纲-剧情线关联: 章节{chapter_outline_number} - 剧情线{plot_line_name} (ID未找到)")
-                continue
-
-            # 处理时间线覆盖数据
-            timeline_coverage = link_data.get("timeline_coverage")
-            if timeline_coverage and isinstance(timeline_coverage, (list, dict)):
-                timeline_coverage = json.dumps(timeline_coverage, ensure_ascii=False)
-
-            link = ChapterOutlinePlotLineLink(
-                chapter_outline_id=chapter_outline_id,
-                plot_line_id=plot_line_id,
-                role=link_data.get("role", "main"),
-                order_index=link_data.get("order_index"),
-                timeline_coverage=timeline_coverage
-            )
-            db.add(link)
-            count += 1
-
-        return count
 
     @staticmethod
     async def _import_plot_cards(
         project_id: str,
         cards_data: List[Dict],
-        plot_line_mapping: Dict[str, str],
-        chapter_outline_mapping: Dict[int, str],
         db: AsyncSession
     ) -> Dict[str, str]:
         """导入剧情卡片,返回标题到ID的映射(用于后续导入关联关系)"""
@@ -1342,35 +1158,6 @@ class ImportExportService:
 
         return mapping
 
-    @staticmethod
-    async def _import_plot_card_plot_line_links(
-        links_data: List[Dict],
-        plot_card_mapping: Dict[str, str],
-        plot_line_mapping: Dict[str, str],
-        db: AsyncSession
-    ) -> int:
-        """导入剧情卡片-剧情线关联关系"""
-        count = 0
-        for link_data in links_data:
-            card_title = link_data.get("card_title")
-            plot_line_name = link_data.get("plot_line_name")
-
-            # 查找对应的ID
-            card_id = plot_card_mapping.get(card_title)
-            plot_line_id = plot_line_mapping.get(plot_line_name)
-
-            if not card_id or not plot_line_id:
-                logger.warning(f"跳过剧情卡片-剧情线关联: 卡片'{card_title}' - 剧情线'{plot_line_name}' (ID未找到)")
-                continue
-
-            link = PlotCardPlotLineLink(
-                plot_card_id=card_id,
-                plot_line_id=plot_line_id
-            )
-            db.add(link)
-            count += 1
-
-        return count
 
     @staticmethod
     async def _import_plot_card_chapter_outline_links(

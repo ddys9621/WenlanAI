@@ -4,14 +4,12 @@
 import { useCallback } from 'react';
 import { toast } from 'sonner';
 import { useStore } from './index';
-import { plotCardApi, plotLineApi, chapterOutlineApi } from '../services/api';
+import { plotCardApi, volumeApi, chapterOutlineApi } from '../services/api';
 import type {
   PlotCardCreate,
   PlotCardUpdate,
   PlotCardReorderRequest,
-  PlotLineCreate,
-  PlotLineUpdate,
-  PlotLineReorderRequest,
+  VolumeFields,
   ChapterOutlineCreate,
   ChapterOutlineUpdate,
   ChapterOutlineReorderRequest,
@@ -122,132 +120,40 @@ export function usePlotCardSync() {
   };
 }
 
-// 剧情线状态管理
-export function usePlotLineSync() {
-  const {
-    plotLines,
-    setPlotLines,
-    addPlotLine,
-    updatePlotLine,
-    removePlotLine,
-  } = useStore();
+// 卷纲状态管理（总纲 → 卷纲 → 章纲；三个 AI 生成走 volumeApi 的后台任务 + SSE，在页面里调用）
+export function useVolumeSync() {
+  const { volumes, setVolumes, updateVolume, removeVolume } = useStore();
 
-  // 刷新剧情线列表
-  const refreshPlotLines = useCallback(async (projectId: string, params?: {
-    skip?: number;
-    limit?: number;
-    line_type?: string;
-  }) => {
+  const refreshVolumes = useCallback(async (projectId: string) => {
     try {
-      const response = await plotLineApi.getPlotLines(projectId, params);
-      setPlotLines(response.items);
+      const response = await volumeApi.list(projectId);
+      setVolumes(response.items);
       return response;
     } catch (error) {
-      console.error('获取剧情线失败:', error);
-      toast.error('获取剧情线失败');
+      console.error('获取卷纲失败:', error);
+      toast.error('获取卷纲失败');
       throw error;
     }
-  }, [setPlotLines]);
+  }, [setVolumes]);
 
-  // 创建剧情线
-  const createPlotLine = useCallback(async (data: PlotLineCreate) => {
-    try {
-      const newLine = await plotLineApi.createPlotLine(data);
-      addPlotLine(newLine);
-      toast.success('剧情线创建成功');
-      return newLine;
-    } catch (error) {
-      console.error('创建剧情线失败:', error);
-      toast.error('创建剧情线失败');
-      throw error;
-    }
-  }, [addPlotLine]);
+  const saveVolume = useCallback(async (volumeId: string, data: VolumeFields) => {
+    const saved = await volumeApi.update(volumeId, data);
+    updateVolume(saved);
+    return saved;
+  }, [updateVolume]);
 
-  // 更新剧情线
-  const updatePlotLineData = useCallback(async (lineId: string, data: PlotLineUpdate) => {
-    try {
-      const updatedLine = await plotLineApi.updatePlotLine(lineId, data);
-      updatePlotLine(updatedLine);
-      toast.success('剧情线更新成功');
-      return updatedLine;
-    } catch (error) {
-      console.error('更新剧情线失败:', error);
-      toast.error('更新剧情线失败');
-      throw error;
-    }
-  }, [updatePlotLine]);
+  const confirmVolume = useCallback(async (volumeId: string) => {
+    const saved = await volumeApi.confirm(volumeId);
+    updateVolume(saved);
+    return saved;
+  }, [updateVolume]);
 
-  // 删除剧情线
-  const deletePlotLine = useCallback(async (lineId: string) => {
-    try {
-      await plotLineApi.deletePlotLine(lineId);
-      removePlotLine(lineId);
-      toast.success('剧情线删除成功');
-    } catch (error) {
-      console.error('删除剧情线失败:', error);
-      toast.error('删除剧情线失败');
-      throw error;
-    }
-  }, [removePlotLine]);
+  const deleteVolume = useCallback(async (volumeId: string) => {
+    await volumeApi.remove(volumeId);
+    removeVolume(volumeId);
+  }, [removeVolume]);
 
-  // 重排序剧情线
-  const reorderPlotLines = useCallback(async (data: PlotLineReorderRequest) => {
-    try {
-      await plotLineApi.reorderPlotLines(data);
-      toast.success('剧情线排序更新成功');
-    } catch (error) {
-      console.error('重排序剧情线失败:', error);
-      toast.error('重排序剧情线失败');
-      throw error;
-    }
-  }, []);
-
-  // 获取剧情线类型统计
-  const getLineTypes = useCallback(async (projectId: string) => {
-    try {
-      const response = await plotLineApi.getLineTypes(projectId);
-      return response.types;
-    } catch (error) {
-      console.error('获取剧情线类型失败:', error);
-      throw error;
-    }
-  }, []);
-
-  // 向剧情线添加卡片
-  const addCardsToLine = useCallback(async (lineId: string, cardIds: string[]) => {
-    try {
-      await plotLineApi.addCardsToLine(lineId, cardIds);
-      toast.success('剧情卡片添加成功');
-    } catch (error) {
-      console.error('添加剧情卡片失败:', error);
-      toast.error('添加剧情卡片失败');
-      throw error;
-    }
-  }, []);
-
-  // 从剧情线移除卡片
-  const removeCardsFromLine = useCallback(async (lineId: string, cardIds: string[]) => {
-    try {
-      await plotLineApi.removeCardsFromLine(lineId, cardIds);
-      toast.success('剧情卡片移除成功');
-    } catch (error) {
-      console.error('移除剧情卡片失败:', error);
-      toast.error('移除剧情卡片失败');
-      throw error;
-    }
-  }, []);
-
-  return {
-    plotLines,
-    refreshPlotLines,
-    createPlotLine,
-    updatePlotLine: updatePlotLineData,
-    deletePlotLine,
-    reorderPlotLines,
-    getLineTypes,
-    addCardsToLine,
-    removeCardsFromLine,
-  };
+  return { volumes, refreshVolumes, saveVolume, confirmVolume, deleteVolume };
 }
 
 // 章纲状态管理
@@ -264,7 +170,7 @@ export function useChapterOutlineSync() {
   const refreshChapterOutlines = useCallback(async (projectId: string, params?: {
     skip?: number;
     limit?: number;
-    plot_line_id?: string;
+    volume_id?: string;
   }) => {
     try {
       const response = await chapterOutlineApi.getChapterOutlines(projectId, params);
@@ -344,17 +250,6 @@ export function useChapterOutlineSync() {
     }
   }, [addChapterOutline]);
 
-  // 获取章纲统计信息
-  const getChapterOutlineStatistics = useCallback(async (projectId: string) => {
-    try {
-      const response = await chapterOutlineApi.getChapterOutlineStatistics(projectId);
-      return response;
-    } catch (error) {
-      console.error('获取章纲统计失败:', error);
-      throw error;
-    }
-  }, []);
-
   return {
     chapterOutlines,
     refreshChapterOutlines,
@@ -363,6 +258,5 @@ export function useChapterOutlineSync() {
     deleteChapterOutline,
     reorderChapterOutlines,
     batchCreateChapterOutlines,
-    getChapterOutlineStatistics,
   };
 }

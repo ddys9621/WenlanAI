@@ -1,14 +1,13 @@
 /**
- * 拆书 V5 浏览视图（拆书任务页与参考包详情页共用）
+ * 拆书浏览视图（拆书任务页与参考包详情页共用），与作者自己的 总纲 → 卷纲 → 章纲 一一对应：
  *
- * 5 tab：
- *   1. 全书骨架   —— pack.synopsis（阶段 / 金手指 / 爽点 / 长线伏笔）+ 写法手册 + 结构统计（折叠）
- *   2. 桥段库     —— pack.bridges 聚合 + GET /book-dissect/{id}/arcs 情节单元列表
- *   3. 逐章拆书表 —— GET /cards 表格，点击章号拉整张拆书卡
+ *   1. 全书骨架   —— pack.synopsis（梗概 / 全书主线 / 分卷 / 卖点 / 高光 / 长线伏笔，≈ 总纲）+ 写法手册 + 结构统计（折叠）
+ *   2. 剧情单元   —— pack.bridges 聚合 + GET /book-dissect/{id}/arcs 剧情单元列表（≈ 卷纲里的一件件事）
+ *   3. 逐章拆书表 —— GET /cards 表格，点击章号拉整张拆书卡（≈ 章纲）
  *   4. 文风指纹   —— pack.style（prompt_content / 量化指标 / 例句），可复制 / 导入写作风格库
  *   5. 人物功能谱 —— pack.character_archive
  *
- * 拆书卡 / 情节单元直接读任务表，抽取进行中也能逐步看到；维度 tab 依赖参考包就绪。
+ * 拆书卡 / 剧情单元直接读任务表，抽取进行中也能逐步看到；维度 tab 依赖参考包就绪。
  */
 import { useEffect, useMemo, useState } from 'react'
 import {
@@ -30,13 +29,14 @@ import { toast } from 'sonner'
 import { bookDissectApi } from '@/services/api'
 import type { BookDissectChapterCard, BookDissectChapterCardListItem, BookDissectStoryArc } from '@/types'
 import type {
-  BridgesV5Data,
   CharacterFunctionsData,
   MethodologyData,
+  MethodologyItem,
   ReferencePackDetail,
   SkeletonData,
   StructureStatsData,
   StyleFingerprintData,
+  UnitsData,
 } from '@/types/reference_pack'
 import {
   CHAPTER_ROLE_LABEL,
@@ -58,8 +58,8 @@ import { Card, CardTitle, CenterLoader, DecileBars, DistributionBars, Field, NoD
 export type V5Tab = 'skeleton' | 'arcs' | 'cards' | 'style' | 'characters'
 
 const TABS: Array<{ key: V5Tab; label: string; hint: string; icon: React.ComponentType<{ className?: string }> }> = [
-  { key: 'skeleton', label: '全书骨架', hint: '类型 / 前提 / 金手指 / 阶段 / 爽点 + 写法手册 + 结构统计', icon: Sparkles },
-  { key: 'arcs', label: '桥段库', hint: '情节单元（多章一组的起承爽收）与爽点类型分布', icon: GitBranch },
+  { key: 'skeleton', label: '全书骨架', hint: '梗概 / 全书主线 / 分卷 / 卖点 / 高光（≈ 原书的总纲）+ 写法手册 + 结构统计', icon: Sparkles },
+  { key: 'arcs', label: '剧情单元', hint: '一件件完整的事：经过、结束时的变化、长短与强弱交替（≈ 原书的卷纲）', icon: GitBranch },
   { key: 'cards', label: '逐章拆书表', hint: '每章功能标签 / 节奏 / 张力 / 章末钩子，点击看整卡', icon: LayoutList },
   { key: 'style', label: '文风指纹', hint: 'prompt_content + 量化指标 + 原书例句，可导入写作风格库', icon: Palette },
   { key: 'characters', label: '人物功能谱', hint: '主角 / 盟友 / 对手在故事里承担的功能', icon: Users },
@@ -125,7 +125,7 @@ export function BookDissectV5View({ taskId, pack, packLoading = false, initialTa
             )}
           </PackGate>
         )}
-        {tab === 'arcs' && <ArcsTab taskId={taskId} bridges={(pack?.bridges as BridgesV5Data | null) ?? null} />}
+        {tab === 'arcs' && <ArcsTab taskId={taskId} units={(pack?.bridges as UnitsData | null) ?? null} />}
         {tab === 'cards' && <CardsTab taskId={taskId} />}
         {tab === 'style' && (
           <PackGate pack={pack} loading={packLoading}>
@@ -174,92 +174,105 @@ export function SkeletonTab({
   return (
     <div className="space-y-4">
       {skeleton ? <SkeletonSection data={skeleton} /> : <NoDataHint label="全书骨架" />}
-      <Collapsible title="写法手册" icon={Flame} hint="金手指 / 开篇 / 打脸 / 升级 / 爽点密度的可借鉴写法" defaultOpen={!skeleton}>
+      <Collapsible title="写法手册" icon={Flame} hint="开篇 / 分卷节奏 / 剧情单元 / 张弛 / 成长 / 特殊能力的可借鉴写法" defaultOpen={!skeleton}>
         <MethodologySection data={methodology} />
       </Collapsible>
-      <Collapsible title="结构统计" icon={Activity} hint="按拆书卡统计：节奏 / 张力 / 钩子 / 爽点密度">
+      <Collapsible title="结构统计" icon={Activity} hint="按拆书卡统计：节奏 / 张力 / 钩子 / 兑现密度 / 单元强弱">
         <StructureSection data={structure} />
       </Collapsible>
     </div>
   )
 }
 
+function advantageText(value: SkeletonData['golden_finger']): string {
+  if (typeof value === 'string') return value === '无' ? '' : value
+  if (!value || !value.what || value.what === '无') return ''
+  return [
+    value.what,
+    value.how_it_works && `运作：${value.how_it_works}`,
+    value.limits && `限制：${value.limits}`,
+    asStringList(value.evolution).length > 0 && `演进：${asStringList(value.evolution).join(' → ')}`,
+  ]
+    .filter(Boolean)
+    .join('\n')
+}
+
 function SkeletonSection({ data }: { data: SkeletonData }) {
-  const golden = data.golden_finger
-  const goldenText =
-    typeof golden === 'string'
-      ? golden
-      : golden
-        ? [golden.what, golden.how_it_works && `运作：${golden.how_it_works}`, asStringList(golden.evolution).length > 0 && `演化：${asStringList(golden.evolution).join(' → ')}`]
-            .filter(Boolean)
-            .join('\n')
-        : ''
-  const stages = asRecordList(data.stages)
-  const payoffs = asRecordList(data.top_payoffs)
+  const volumes = asRecordList(data.volumes)
+  const highPoints = asRecordList(data.high_points)
   const foreshadowing = asRecordList(data.long_foreshadowing)
 
   return (
     <>
       <Card>
         <CardTitle icon={Sparkles} extra={data.genre_tag ? <span className="hh-tag">{asString(data.genre_tag)}</span> : undefined}>
-          一句话骨架
+          全书骨架（≈ 原书的总纲）
         </CardTitle>
-        <Field label="一句话前提" value={data.one_line_premise} multiline />
+        <Field label="故事梗概" value={data.premise} multiline />
+        <Field label="全书主线" value={data.main_plot} multiline />
         <Field label="主线矛盾" value={data.main_conflict} multiline />
-        <Field label="金手指" value={goldenText} multiline />
-        <Field label="成长体系" value={data.growth_system} multiline />
-        <Field label="力量体系" value={data.power_system} multiline />
-        <Field label="阅读承诺（读者为什么追）" value={data.reading_promise} multiline />
+        <Field label="主角特殊能力" value={advantageText(data.golden_finger)} multiline />
+        <Field label="卖点" value={asStringList(data.selling_points).join('；')} multiline />
+        <Field label="主要套路" value={asStringList(data.main_tropes).join('、')} />
+        <Field label="成长路线" value={data.growth_route} multiline />
+        <Field label="力量体系" value={data.power_system !== '无' ? data.power_system : ''} multiline />
+        <Field label="终极目标" value={data.ultimate_goal} multiline />
         <Field label="开篇策略" value={data.opening_strategy} multiline />
       </Card>
 
-      {stages.length > 0 && (
+      {volumes.length > 0 && (
         <Card>
-          <CardTitle icon={BookMarked} extra={`${stages.length} 个阶段`}>
-            阶段划分
+          <CardTitle icon={BookMarked} extra={`${volumes.length} 卷`}>
+            分卷（≈ 原书的卷纲）
           </CardTitle>
           <ol className="space-y-2">
-            {stages.map((s, i) => (
+            {volumes.map((v, i) => (
               <li key={i} className="rounded-lg bg-surface-deeper px-3 py-2">
                 <div className="flex flex-wrap items-center gap-2 text-sm font-medium text-content">
                   <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-brand/10 text-[11px] text-brand">{i + 1}</span>
-                  {asString(s.title) || `阶段 ${i + 1}`}
+                  {asString(v.title) || `第 ${i + 1} 卷`}
                   <span className="text-xs font-normal text-content-tertiary">
-                    {chapterRange(s.chapter_start as number | undefined, s.chapter_end as number | undefined)}
-                    {s.arc_start != null && ` · 情节单元 #${asString(s.arc_start)}${s.arc_end != null && s.arc_end !== s.arc_start ? `-#${asString(s.arc_end)}` : ''}`}
+                    {chapterRange(v.chapter_start as number | undefined, v.chapter_end as number | undefined)}
+                    {v.arc_start != null && ` · 剧情单元 #${asString(v.arc_start)}${v.arc_end != null && v.arc_end !== v.arc_start ? `-#${asString(v.arc_end)}` : ''}`}
                   </span>
-                  {s.origin === 'fallback' && <span className="text-[10px] text-amber-600">（规则切分）</span>}
+                  {v.origin === 'fallback' && <span className="text-[10px] text-amber-600">（规则切分）</span>}
                 </div>
+                {asString(v.summary) && <p className="mt-1 text-xs leading-5 text-content-secondary">{asString(v.summary)}</p>}
                 <div className="mt-1 grid gap-x-4 gap-y-1 text-xs text-content-secondary sm:grid-cols-2">
-                  <KV k="核心冲突" v={s.core_conflict} />
-                  <KV k="主角目标" v={s.protagonist_goal} />
-                  <KV k="关键升级" v={s.key_upgrades} />
-                  <KV k="代表桥段" v={s.signature_arc} />
-                  <KV k="阶段末钩子" v={s.ending_hook} />
+                  <KV k="目标与冲突" v={v.goal} />
+                  <KV k="卷末高潮" v={v.climax} />
+                  <KV k="卷末钩子" v={v.ending_hook} />
+                  <KV k="成长与收获" v={v.growth} />
                 </div>
+                {asStringList(v.threads).length > 0 && (
+                  <div className="mt-1 text-xs text-content-secondary">
+                    <span className="font-medium text-content-tertiary">线索：</span>
+                    {asStringList(v.threads).join('；')}
+                  </div>
+                )}
               </li>
             ))}
           </ol>
         </Card>
       )}
 
-      {payoffs.length > 0 && (
+      {highPoints.length > 0 && (
         <Card>
-          <CardTitle icon={Flame}>全书最强爽点</CardTitle>
+          <CardTitle icon={Flame}>高光时刻</CardTitle>
           <ul className="space-y-2">
-            {payoffs.map((p, i) => (
+            {highPoints.map((p, i) => (
               <li key={i} className="rounded-lg bg-surface-deeper px-3 py-2 text-xs text-content-secondary">
                 <div className="mb-0.5 text-sm font-medium text-content">
-                  {asString(p.reward) || asString(p.trigger) || `爽点 ${i + 1}`}
-                  {(asString(p.stage) || asString(p.arcs)) && (
+                  {asString(p.result) || asString(p.trigger) || `高光 ${i + 1}`}
+                  {(asString(p.volume) || asString(p.arcs)) && (
                     <span className="ml-2 text-xs font-normal text-content-tertiary">
-                      {[asString(p.stage), asString(p.arcs) && `情节单元 ${asString(p.arcs)}`].filter(Boolean).join(' · ')}
+                      {[asString(p.volume), asString(p.arcs) && `剧情单元 ${asString(p.arcs)}`].filter(Boolean).join(' · ')}
                     </span>
                   )}
                 </div>
-                <KV k="铺垫" v={p.buildup} />
-                <KV k="触发" v={p.trigger} />
-                {asString(p.reward) && asString(p.trigger) ? <KV k="兑现" v={p.reward} /> : null}
+                <KV k="铺垫" v={p.setup} />
+                <KV k="转折" v={p.trigger} />
+                {asString(p.result) && asString(p.trigger) ? <KV k="结果" v={p.result} /> : null}
               </li>
             ))}
           </ul>
@@ -284,32 +297,19 @@ function SkeletonSection({ data }: { data: SkeletonData }) {
   )
 }
 
-const METHODOLOGY_SECTIONS: Array<{ key: keyof MethodologyData; title: string; fields: Array<[string, string]> }> = [
-  {
-    key: 'golden_finger_pattern',
-    title: '金手指模式',
-    fields: [['type', '类型'], ['balance_mechanism', '平衡机制'], ['evolution_pattern', '演化模式'], ['writing_tips', '怎么用']],
-  },
-  {
-    key: 'opening_hook_pattern',
-    title: '开篇钩子',
-    fields: [['hook_type', '钩子类型'], ['first_chapter_strategy', '首章策略'], ['writing_tips', '怎么用']],
-  },
-  {
-    key: 'facepunch_rhythm',
-    title: '打脸节奏',
-    fields: [['small_facepunch_freq', '小打脸频率'], ['big_facepunch_freq', '大打脸频率'], ['three_elements_pattern', '三要素模式'], ['writing_tips', '怎么用']],
-  },
-  {
-    key: 'power_progression',
-    title: '升级路线',
-    fields: [['system_type', '体系类型'], ['level_count', '层级数'], ['pace', '节奏'], ['writing_tips', '怎么用']],
-  },
-  {
-    key: 'highlight_density',
-    title: '爽点密度',
-    fields: [['small_per_n_chapters', '每 N 章一小爽点'], ['medium_per_n_chapters', '每 N 章一中爽点'], ['big_per_n_chapters', '每 N 章一大爽点'], ['writing_tips', '怎么用']],
-  },
+const METHODOLOGY_SECTIONS: Array<{ key: keyof MethodologyData; title: string }> = [
+  { key: 'opening_pattern', title: '开篇' },
+  { key: 'volume_rhythm', title: '分卷节奏' },
+  { key: 'unit_design', title: '剧情单元设计' },
+  { key: 'tension_rhythm', title: '张弛节奏' },
+  { key: 'growth_progression', title: '成长颗粒度' },
+  { key: 'advantage_usage', title: '特殊能力用法' },
+]
+
+const METHODOLOGY_FIELDS: Array<[keyof MethodologyItem, string]> = [
+  ['pattern', '模式'],
+  ['evidence', '依据'],
+  ['writing_tips', '怎么用'],
 ]
 
 function MethodologySection({ data }: { data: MethodologyData | null }) {
@@ -320,13 +320,13 @@ function MethodologySection({ data }: { data: MethodologyData | null }) {
         总结的是<strong>“作者怎么写”</strong>，不是剧情复述；把 <em>怎么用</em> 当成写自己项目时的借鉴清单。
       </SectionTip>
       <div className="grid gap-3 md:grid-cols-2">
-        {METHODOLOGY_SECTIONS.map(({ key, title, fields }) => {
-          const section = data[key] as Record<string, unknown> | null | undefined
+        {METHODOLOGY_SECTIONS.map(({ key, title }) => {
+          const section = data[key]
           if (!section) return null
           return (
             <div key={key} className="rounded-lg bg-surface-deeper px-3 py-2">
               <div className="mb-1 text-sm font-medium text-content">{title}</div>
-              {fields.map(([k, label]) => {
+              {METHODOLOGY_FIELDS.map(([k, label]) => {
                 const v = section[k]
                 if (v == null || v === '') return null
                 const isTip = k === 'writing_tips'
@@ -354,11 +354,13 @@ function StructureSection({ data }: { data: StructureStatsData | null }) {
         <Stat label="章数" value={data.chapter_count} />
         <Stat label="平均每章字数" value={data.avg_chapter_words} />
         <Stat label="章末带钩率" value={pct(data.hook_rate)} />
-        <Stat label="有爽点章占比" value={pct(data.payoff_chapter_rate)} />
-        <Stat label="情节单元数" value={data.arc_count} />
+        <Stat label="有兑现的章占比" value={pct(data.payoff_chapter_rate)} />
+        <Stat label="剧情单元数" value={data.arc_count} />
         <Stat label="平均单元长度（章）" value={data.avg_arc_length} />
-        <Stat label="爽点密度" value={data.payoff_density_chapters ? `每 ${data.payoff_density_chapters} 章` : '—'} />
+        <Stat label="兑现密度" value={data.payoff_density_chapters ? `每 ${data.payoff_density_chapters} 章` : '—'} />
+        <Stat label="强单元后接缓和" value={pct(data.relief_after_strong)} />
       </div>
+      {data.unit_rhythm && <UnitRhythm rhythm={data.unit_rhythm} />}
       <div className="grid gap-3 md:grid-cols-2">
         <div className="rounded-lg bg-surface-deeper px-3 py-2">
           <div className="mb-2 text-xs font-medium text-content-tertiary">张力走势（全书十等分，1-5）</div>
@@ -396,10 +398,10 @@ function StructureSection({ data }: { data: StructureStatsData | null }) {
 }
 
 // ============================================================
-// Tab 2：桥段库（bridges 聚合 + 情节单元列表）
+// Tab 2：剧情单元（剧情单元库聚合 + 单元列表）
 // ============================================================
 
-function ArcsTab({ taskId, bridges }: { taskId: string; bridges: BridgesV5Data | null }) {
+function ArcsTab({ taskId, units }: { taskId: string; units: UnitsData | null }) {
   const [arcs, setArcs] = useState<BookDissectStoryArc[] | null>(null)
   const [loading, setLoading] = useState(true)
 
@@ -414,7 +416,7 @@ function ArcsTab({ taskId, bridges }: { taskId: string; bridges: BridgesV5Data |
       .catch(() => {
         if (!cancelled) {
           setArcs([])
-          toast.error('加载情节单元失败')
+          toast.error('加载剧情单元失败')
         }
       })
       .finally(() => {
@@ -427,11 +429,11 @@ function ArcsTab({ taskId, bridges }: { taskId: string; bridges: BridgesV5Data |
 
   return (
     <div className="space-y-4">
-      {bridges && <BridgesSummary data={bridges} />}
+      {units && <UnitsSummary data={units} />}
       {loading && !arcs ? (
-        <CenterLoader text="加载情节单元…" />
+        <CenterLoader text="加载剧情单元…" />
       ) : !arcs || arcs.length === 0 ? (
-        <NoDataHint label="情节单元" hint="情节单元在拆书卡全部抽完后划分；抽取进行中请稍后再看" />
+        <NoDataHint label="剧情单元" hint="剧情单元在拆书卡全部抽完后划分；抽取进行中请稍后再看" />
       ) : (
         <ArcList arcs={arcs} />
       )}
@@ -439,22 +441,42 @@ function ArcsTab({ taskId, bridges }: { taskId: string; bridges: BridgesV5Data |
   )
 }
 
-export function BridgesSummary({ data }: { data: BridgesV5Data }) {
-  const role = data.role_pattern
+const RHYTHM_TONE: Record<string, string> = {
+  强: 'bg-rose-500/70',
+  中: 'bg-brand/50',
+  弱: 'bg-sky-500/40',
+}
+
+/** 单元强弱序列：一格一件事，看原书怎么安排张弛 */
+export function UnitRhythm({ rhythm }: { rhythm: string }) {
+  return (
+    <div className="rounded-lg bg-surface-deeper px-3 py-2">
+      <div className="mb-2 text-xs font-medium text-content-tertiary">单元强弱（按顺序，强 / 中 / 弱）</div>
+      <div className="flex flex-wrap gap-0.5" aria-label={`单元强弱：${rhythm}`}>
+        {[...rhythm].map((mark, i) => (
+          <span key={i} title={`#${i + 1} ${mark}`} className={`h-3 w-2 rounded-sm ${RHYTHM_TONE[mark] ?? 'bg-surface'}`} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+export function UnitsSummary({ data }: { data: UnitsData }) {
   return (
     <Card>
       <CardTitle icon={GitBranch} extra={data.payoff_density ? asString(data.payoff_density) : undefined}>
-        桥段库总览
+        剧情单元总览
       </CardTitle>
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-        <Stat label="情节单元数" value={data.arc_count} />
+        <Stat label="剧情单元数" value={data.arc_count} />
         <Stat label="平均长度（章）" value={data.avg_arc_length} />
-        {role && <Stat label="铺垫占比（起+承）" value={pct((Number(role.avg_intro_chapters) || 0) + (Number(role.avg_build_chapters) || 0))} />}
-        {role && <Stat label="爽点章占比" value={pct(role.payoff_position_ratio)} />}
+        <Stat label="强单元后接缓和" value={pct(data.relief_after_strong)} />
+        {data.role_pattern && <Stat label="转折章占比" value={pct(data.role_pattern.turn_position_ratio)} />}
       </div>
+      {data.unit_rhythm && <div className="mt-3"><UnitRhythm rhythm={data.unit_rhythm} /></div>}
       <div className="mt-3 grid gap-3 md:grid-cols-2">
         <div className="rounded-lg bg-surface-deeper px-3 py-2">
-          <div className="mb-2 text-xs font-medium text-content-tertiary">爽点类型分布</div>
+          <div className="mb-2 text-xs font-medium text-content-tertiary">兑现方式分布</div>
           <DistributionBars data={data.payoff_type_distribution} />
         </div>
         <div className="rounded-lg bg-surface-deeper px-3 py-2">
@@ -471,7 +493,7 @@ export function ArcList({ arcs }: { arcs: BookDissectStoryArc[] }) {
   return (
     <Card>
       <CardTitle icon={LayoutList} extra={`${arcs.length} 个`}>
-        情节单元
+        剧情单元
       </CardTitle>
       <ul className="space-y-2">
         {arcs.map((arc) => {
@@ -503,19 +525,20 @@ function ArcDetail({ arc }: { arc: BookDissectStoryArc }) {
   const roles = Object.entries(arc.chapter_roles ?? {}).sort((a, b) => Number(a[0]) - Number(b[0]))
   return (
     <div className="space-y-1.5 border-t border-surface-border-light px-3 py-2 text-xs text-content-secondary">
-      <KV k="功能" v={arc.function} />
-      <KV k="结构" v={arc.structure} />
-      <KV k="主角行动链" v={arc.protagonist_chain} />
+      <KV k="作用" v={arc.function} />
+      <KV k="经过" v={arc.story} />
+      <KV k="落到章" v={arc.structure} />
+      <KV k="主角靠" v={arc.approach} />
+      <KV k="结束时" v={arc.turn} />
       <KV k="情绪曲线" v={arc.emotion_curve} />
-      <KV k="爽点兑现" v={arc.payoff} />
-      <KV k="金手指用法" v={arc.golden_finger_usage} />
+      <KV k="高点" v={arc.payoff} />
       <KV k="人物变化" v={arc.character_changes} />
       <KV k="得失" v={arc.gains_costs} />
       <KV k="伏笔" v={arc.foreshadowing} />
       <KV k="切分依据" v={arc.boundary_reason} />
       {roles.length > 0 && (
         <div className="flex flex-wrap items-center gap-1 pt-1">
-          <span className="mr-1 font-medium text-content-tertiary">章内分工：</span>
+          <span className="mr-1 font-medium text-content-tertiary">章内位置：</span>
           {roles.map(([ch, role]) => (
             <span
               key={ch}
@@ -633,7 +656,7 @@ function CardsTab({ taskId }: { taskId: string }) {
                 <th className="px-2 py-1.5 font-medium">节奏</th>
                 <th className="px-2 py-1.5 font-medium">张力</th>
                 <th className="px-2 py-1.5 font-medium">章末钩子</th>
-                <th className="px-2 py-1.5 text-right font-medium">爽点</th>
+                <th className="px-2 py-1.5 text-right font-medium">高点</th>
               </tr>
             </thead>
             <tbody>
@@ -729,7 +752,7 @@ export function ChapterCardDetail({ card }: { card: BookDissectChapterCard }) {
           </div>
         </div>
       )}
-      <ListField label="爽点" items={card.payoff_points} />
+      <ListField label="高点 / 兑现" items={card.payoff_points} />
       <ListField label="亮点 / 可借鉴处" items={card.highlights} />
       <Field label="主角变化" value={card.protagonist_delta !== '无' ? card.protagonist_delta : ''} multiline />
       <ListField label="新设定" items={card.new_settings} />
@@ -871,7 +894,7 @@ export function CharacterFunctionsTab({ data }: { data: CharacterFunctionsData |
         <Card>
           <CardTitle icon={Users}>主角 · {asString(protagonist.name) || '（未命名）'}</CardTitle>
           <Field label="人设" value={protagonist.persona} multiline />
-          <Field label="金手指" value={protagonist.golden_finger} multiline />
+          <Field label="核心优势" value={protagonist.advantage !== '无' ? protagonist.advantage : ''} multiline />
           <Field label="缺陷与压力" value={protagonist.flaws_and_pressure} multiline />
           {growth.length > 0 && (
             <div className="mt-2">
@@ -879,7 +902,7 @@ export function CharacterFunctionsTab({ data }: { data: CharacterFunctionsData |
               <ol className="space-y-1">
                 {growth.map((g, i) => (
                   <li key={i} className="flex gap-2 text-xs">
-                    <span className="shrink-0 rounded bg-brand/10 px-1.5 text-brand">{asString(g.stage) || `阶段 ${i + 1}`}</span>
+                    <span className="shrink-0 rounded bg-brand/10 px-1.5 text-brand">{asString(g.volume) || `第 ${i + 1} 卷`}</span>
                     <span className="text-content">{asString(g.state)}</span>
                   </li>
                 ))}

@@ -15,7 +15,6 @@ from app.models.chapter_causal_link import ChapterCausalLink
 from app.models.character import Character
 from app.models.character_known_info import CharacterKnownInfo
 from app.models.narrative_promise import NarrativePromise
-from app.models.plot_line import PlotLine
 from app.models.relationship import CharacterRelationship, Organization, OrganizationMember
 from app.models.relationship_event import RelationshipEvent
 from app.models.timeline_event import TimelineEvent
@@ -66,15 +65,14 @@ class NarrativeStateService:
     ) -> Dict[str, int]:
         """Persist analysis-derived state in idempotent way."""
         characters = await self._load_character_map(db, project_id)
-        plot_lines = await self._load_plot_line_map(db, project_id)
 
         await self.clear_chapter_state(db, chapter.id)
 
-        causal_count = await self._store_causal_links(db, project_id, chapter, analysis, characters, plot_lines)
-        promise_count = await self._store_promises(db, project_id, chapter, analysis, characters, plot_lines)
+        causal_count = await self._store_causal_links(db, project_id, chapter, analysis, characters)
+        promise_count = await self._store_promises(db, project_id, chapter, analysis, characters)
         await self._finish_promise_reconcile(db, chapter)
         relationship_count = await self._store_relationship_events(db, project_id, chapter, analysis, characters)
-        timeline_count = await self._store_timeline_events(db, project_id, chapter, analysis, characters, plot_lines)
+        timeline_count = await self._store_timeline_events(db, project_id, chapter, analysis, characters)
         knowledge_count = await self._store_known_info(db, project_id, chapter, analysis, characters)
 
         logger.info(
@@ -166,10 +164,6 @@ class NarrativeStateService:
         # 正式名 + 曾用名都指向同一角色（改名后 AI 仍可能沿用旧名）
         return build_name_index(result.scalars().all(), key=self._normalize_key)
 
-    async def _load_plot_line_map(self, db: AsyncSession, project_id: str) -> dict[str, PlotLine]:
-        result = await db.execute(select(PlotLine).where(PlotLine.project_id == project_id))
-        return {self._normalize_key(item.title): item for item in result.scalars().all() if item.title}
-
     async def _find_character_by_name(self, db: AsyncSession, project_id: str, name: Optional[str]) -> Optional[Character]:
         """按名字找角色：走正式名 + 曾用名索引。characters.name 无唯一约束，同名多条时取索引里的第一条，
         不能用 scalar_one_or_none()（会抛 MultipleResultsFound，直接把整章生成打断）。"""
@@ -224,7 +218,6 @@ class NarrativeStateService:
         chapter: Chapter,
         analysis: Dict[str, Any],
         characters: dict[str, Character],
-        plot_lines: dict[str, PlotLine],
     ) -> int:
         causal_links = analysis.get("causal_links", []) or []
         count = 0
@@ -242,7 +235,6 @@ class NarrativeStateService:
                     decision=(item.get("decision") or "").strip() or None,
                     actor_ids=self._map_character_ids(item.get("actor_names", []), characters),
                     target_ids=self._map_character_ids(item.get("target_names", []), characters),
-                    plot_line_id=self._match_plot_line_id(item.get("plot_line_hint"), plot_lines),
                     importance_score=self._clamp_float(item.get("importance"), 0.0, 1.0, 0.5),
                     is_reversible=bool(item.get("reversible", False)),
                     evidence_text=(item.get("evidence") or "").strip() or None,
@@ -258,13 +250,12 @@ class NarrativeStateService:
         chapter: Chapter,
         analysis: Dict[str, Any],
         characters: dict[str, Character],
-        plot_lines: dict[str, PlotLine],
     ) -> int:
         count = 0
 
         # 1) explicit narrative promises
         for item in analysis.get("narrative_promises", []) or []:
-            count += await self._upsert_promise_from_item(db, project_id, chapter, item, characters, plot_lines)
+            count += await self._upsert_promise_from_item(db, project_id, chapter, item, characters)
 
         # 2) fallback from foreshadow extraction
         for index, item in enumerate(analysis.get("foreshadows", []) or []):
@@ -279,7 +270,7 @@ class NarrativeStateService:
                 "deadline_chapter": item.get("deadline_chapter"),
                 "evidence": item.get("keyword") or "",
             }
-            count += await self._upsert_promise_from_item(db, project_id, chapter, promise_item, characters, plot_lines)
+            count += await self._upsert_promise_from_item(db, project_id, chapter, promise_item, characters)
 
         return count
 
@@ -307,7 +298,6 @@ class NarrativeStateService:
         chapter: Chapter,
         item: Dict[str, Any],
         characters: dict[str, Character],
-        plot_lines: dict[str, PlotLine],
     ) -> int:
         promise_type = self._normalize_promise_type(item.get("promise_type"))
         title = (item.get("title") or item.get("content") or "").strip()[:200]
@@ -353,7 +343,6 @@ class NarrativeStateService:
             reconciled.content = content
             reconciled.owner_character_id = self._match_character_id(item.get("owner_character_name"), characters)
             reconciled.target_character_id = self._match_character_id(item.get("target_character_name"), characters)
-            reconciled.plot_line_id = self._match_plot_line_id(item.get("plot_line_hint"), plot_lines) or reconciled.plot_line_id
             reconciled.priority = self._normalize_priority(item.get("priority"))
             reconciled.deadline_chapter = self._safe_int(item.get("deadline_chapter")) or reconciled.deadline_chapter
             reconciled.evidence_text = (item.get("evidence") or "").strip() or reconciled.evidence_text
@@ -375,7 +364,6 @@ class NarrativeStateService:
                 content=content,
                 owner_character_id=self._match_character_id(item.get("owner_character_name"), characters),
                 target_character_id=self._match_character_id(item.get("target_character_name"), characters),
-                plot_line_id=self._match_plot_line_id(item.get("plot_line_hint"), plot_lines),
                 priority=self._normalize_priority(item.get("priority")),
                 status=status,
                 deadline_chapter=self._safe_int(item.get("deadline_chapter")),
@@ -537,7 +525,6 @@ class NarrativeStateService:
         chapter: Chapter,
         analysis: Dict[str, Any],
         characters: dict[str, Character],
-        plot_lines: dict[str, PlotLine],
     ) -> int:
         count = 0
         for item in analysis.get("timeline_events", []) or []:
@@ -557,7 +544,6 @@ class NarrativeStateService:
                     time_marker=(item.get("time_marker") or "").strip()[:200] or None,
                     actor_ids=self._map_character_ids(item.get("actor_names", []), characters),
                     target_ids=self._map_character_ids(item.get("target_names", []), characters),
-                    plot_line_ids=self._map_plot_line_ids(item.get("plot_line_hints", []), plot_lines),
                     public_visibility=self._normalize_visibility(item.get("public_visibility")),
                 )
             )
@@ -947,19 +933,7 @@ class NarrativeStateService:
                 ids.append(character_id)
         return ids
 
-    def _match_plot_line_id(self, hint: Optional[str], plot_lines: dict[str, PlotLine]) -> Optional[str]:
-        if not hint:
-            return None
-        line = plot_lines.get(self._normalize_key(hint))
-        return line.id if line else None
 
-    def _map_plot_line_ids(self, hints: Iterable[str], plot_lines: dict[str, PlotLine]) -> list[str]:
-        ids: list[str] = []
-        for hint in hints or []:
-            plot_line_id = self._match_plot_line_id(hint, plot_lines)
-            if plot_line_id and plot_line_id not in ids:
-                ids.append(plot_line_id)
-        return ids
 
     def _normalize_promise_type(self, value: Optional[str]) -> str:
         return self.PROMISE_TYPE_MAP.get((value or "").strip().lower(), "promise")

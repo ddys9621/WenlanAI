@@ -239,7 +239,7 @@ async def write_field(db: AsyncSession, project_id: str, field_id: str, target_i
     changed = get_value(spec, obj) != normalized
     setattr(obj, spec.attr, json.dumps(normalized, ensure_ascii=False) if spec.kind == "list" else normalized)
     if changed and spec.entity == "story_outline":
-        await outline_review.mark_project_outlines(db, project_id, "故事大纲（故事前提）已修改")
+        await outline_review.mark_project_outlines(db, project_id, "总纲（故事大纲）已修改")
     if changed and spec.entity == "location":
         world_map = await load_map(db, project_id)
         if world_map is not None:

@@ -3,11 +3,15 @@ import { withProjectHeader } from './activeProject';
 export interface SSEMessage {
   type:
     | 'progress' | 'chunk' | 'result' | 'error' | 'done' | 'start' | 'content' | 'meta'
-    | 'thinking' | 'partial' | 'bridges'
+    | 'thinking' | 'partial'
     | 'stage' | 'tool_call' | 'reference' | 'llm'
     | 'batch_chapter'
     // 全局智能助笔：处理记录一步 / 清掉误推的回复 / 内容修改候选 / 章节候选稿 / 打开页面 / 向作者提问
-    | 'tool' | 'content_reset' | 'candidate' | 'chapter_candidate' | 'navigate' | 'question';
+    | 'tool' | 'content_reset' | 'candidate' | 'chapter_candidate' | 'navigate' | 'question'
+    // 共创室：本轮发言成员 / 主编交给成员 / 成员回复 / 规划草案卡片 / 启动的后台任务
+    | 'speaker' | 'member_start' | 'member_message' | 'plan' | 'job'
+    // 编辑器行内补全：截至目前的完整建议
+    | 'suggestion';
   message?: string;
   progress?: number;
   word_count?: number;
@@ -152,7 +156,7 @@ class SSEPostClient<TResult = unknown, TRequest = unknown> {
       }
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {
-        console.log('Request aborted');
+        console.debug('Request aborted');
         reject(error);
       } else {
         const message = error instanceof Error ? error.message : 'Request failed';
@@ -232,13 +236,24 @@ class SSEPostClient<TResult = unknown, TRequest = unknown> {
 
       case 'thinking':
       case 'partial':
-      case 'bridges':
       case 'batch_chapter':
       case 'start':
       case 'stage':
       case 'tool_call':
       case 'reference':
       case 'llm':
+      case 'suggestion':
+      case 'tool':
+      case 'content_reset':
+      case 'candidate':
+      case 'chapter_candidate':
+      case 'navigate':
+      case 'question':
+      case 'speaker':
+      case 'member_start':
+      case 'member_message':
+      case 'plan':
+      case 'job':
         this.options.onEvent?.(message);
         break;
 

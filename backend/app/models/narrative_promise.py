@@ -22,7 +22,6 @@ class NarrativePromise(Base):
 
     owner_character_id = Column(String(36), ForeignKey("characters.id", ondelete="SET NULL"), nullable=True, index=True)
     target_character_id = Column(String(36), ForeignKey("characters.id", ondelete="SET NULL"), nullable=True, index=True)
-    plot_line_id = Column(String(36), ForeignKey("plot_lines.id", ondelete="SET NULL"), nullable=True, index=True)
 
     priority = Column(String(20), default="medium", index=True)
     status = Column(String(20), default="open", index=True)  # open/progressing/resolved/broken

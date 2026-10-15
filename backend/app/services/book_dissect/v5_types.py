@@ -1,8 +1,7 @@
-"""拆书 V5 领域类型：拆书卡（ChapterCard）与情节单元（StoryArc）。
+"""拆书领域类型：拆书卡（ChapterCard，对应章纲）与剧情单元（StoryArc，对应卷纲里的「一件事」）。
 
 LLM 输出一律经 from_llm 归一化：枚举落词表、数值夹范围、字符串截长、列表去空去重。
 持久化：ChapterCard → book_dissect_chapter_facts.fact_json；StoryArc → book_dissect_story_arcs.arc_json。
-设计：agent-docs/features/book_dissect_v5_design.md §2
 """
 from __future__ import annotations
 
@@ -16,11 +15,14 @@ FUNCTION_TAGS = (
 )
 HOOK_TYPES = ("悬念", "危机", "反转", "新谜团", "信息揭露", "期待", "无")
 PACES = ("快", "中", "慢")
+# 剧情单元的兑现方式：与卷纲提示词「兑现方式要多样」同一套，不只是打脸 / 装逼
 PAYOFF_TYPES = (
-    "打脸", "扮猪吃虎", "收获机缘", "反差揭底", "护人", "绝境反杀", "以弱胜强",
-    "反转揭示", "情感兑现", "规则破局", "无强爽点",
+    "成长突破", "智斗破局", "反转揭示", "真相揭秘", "情感推进", "关系转变", "配角高光",
+    "打脸逆袭", "以弱胜强", "收获机缘", "失去与代价", "缓和过渡",
 )
-CHAPTER_ROLES = ("intro", "build", "payoff", "aftermath", "transition")
+NO_PAYOFF = "缓和过渡"
+# 章在单元里的位置：开启（起因 / 新麻烦）→ 推进（阻碍、选择、代价）→ 转折或兑现 → 收束（结果与余波）；过渡 = 缓和章
+CHAPTER_ROLES = ("open", "advance", "turn", "close", "transition")
 
 OUTLINE_MAX = 800
 HOOK_TEXT_MAX = 60
@@ -57,8 +59,9 @@ def _int_in(value: Any, lo: int, hi: int, default: int) -> int:
     return max(lo, min(hi, n))
 
 
-def _enum(value: Any, vocab: tuple[str, ...], default: str, *, fuzzy: bool = True) -> str:
-    """精确命中优先；fuzzy 时再取第一个作为子串出现在文本里的词表项；再否则 default。
+def _enum(value: Any, vocab: tuple[str, ...], default: str, *, fuzzy: bool = True, abbrev: bool = False) -> str:
+    """精确命中优先；fuzzy 时再取第一个作为子串出现在文本里的词表项；abbrev 时再认词表项的简称
+    （「打脸」→「打脸逆袭」，至少 2 字）；再否则 default。
 
     单字词表（如 pace 快/中/慢）必须 fuzzy=False：「极快」「不快」子串命中会得出错误档位。
     """
@@ -68,6 +71,10 @@ def _enum(value: Any, vocab: tuple[str, ...], default: str, *, fuzzy: bool = Tru
     if fuzzy:
         for v in vocab:
             if v != "无" and v in text:
+                return v
+    if abbrev and len(text) >= 2:
+        for v in vocab:
+            if text in v:
                 return v
     return default
 
@@ -135,8 +142,8 @@ class ChapterCard:
 
 
 def normalize_chapter_roles(roles: Any, chapters: list[int], peak: Optional[int]) -> dict[str, str]:
-    """保留 LLM 给的合法位置值，缺失的按规则补：1 章=payoff；2 章=build+payoff；
-    ≥3 章：峰值章（无则取中间偏后）payoff，峰值前第一章 intro、其余 build，峰值后全部 aftermath。"""
+    """保留 LLM 给的合法位置值，缺失的按规则补：1 章=turn；2 章=open+turn；
+    ≥3 章：峰值章（无则取中间偏后）turn，峰值前第一章 open、其余 advance，峰值后全部 close。"""
     keys = [str(c) for c in chapters]
     given: dict[str, str] = {}
     if isinstance(roles, dict):
@@ -146,37 +153,39 @@ def normalize_chapter_roles(roles: Any, chapters: list[int], peak: Optional[int]
     if n == 0:
         return {}
     if n == 1:
-        default = {keys[0]: "payoff"}
+        default = {keys[0]: "turn"}
     elif n == 2:
-        default = {keys[0]: "build", keys[1]: "payoff"}
+        default = {keys[0]: "open", keys[1]: "turn"}
     else:
         peak_key = str(peak) if peak is not None and str(peak) in keys else keys[(n - 1) * 2 // 3]
         pk = keys.index(peak_key)
         default = {}
         for i, k in enumerate(keys):
             if i == pk:
-                default[k] = "payoff"
+                default[k] = "turn"
             elif i < pk:
-                default[k] = "intro" if i == 0 else "build"
+                default[k] = "open" if i == 0 else "advance"
             else:
-                default[k] = "aftermath"
+                default[k] = "close"
     return {k: given.get(k, default[k]) for k in keys}
 
 
 @dataclass
 class StoryArc:
+    """剧情单元：一件完整的事（起因 → 经过 → 结果，结束时局面变化）。主角靠什么推进如实记录，不单列金手指。"""
     arc_index: int = 0
     start_chapter: int = 0
     end_chapter: int = 0
     title: str = ""
-    function: str = ""
+    function: str = ""                       # 这件事在全书里的作用
     boundary_reason: str = ""
-    structure: str = ""
-    protagonist_chain: str = ""
+    story: str = ""                          # 起因 → 经过（阻碍、选择、代价）→ 结果
+    structure: str = ""                      # 落到章：起因(第X章) → 推进 → 转折 / 兑现 → 收束
+    approach: str = ""                       # 主角靠什么推进 / 解决
+    turn: str = ""                           # 单元结束时局面怎样变化
     emotion_curve: str = ""
     payoff: str = ""
-    payoff_type: str = "无强爽点"
-    golden_finger_usage: str = "无"
+    payoff_type: str = NO_PAYOFF
     character_changes: str = ""
     gains_costs: str = ""
     foreshadowing: str = ""
@@ -209,12 +218,13 @@ class StoryArc:
             title=_s(item.get("title"), 60) or f"第{chapters[0]}-{chapters[-1]}章",
             function=_s(item.get("function"), SHORT_MAX),
             boundary_reason=_s(item.get("boundary_reason"), SHORT_MAX),
+            story=_s(item.get("story"), LONG_MAX),
             structure=_s(item.get("structure"), LONG_MAX),
-            protagonist_chain=_s(item.get("protagonist_chain"), LONG_MAX),
+            approach=_s(item.get("approach"), SHORT_MAX * 2),
+            turn=_s(item.get("turn"), SHORT_MAX * 2),
             emotion_curve=_s(item.get("emotion_curve"), SHORT_MAX * 2),
             payoff=_s(item.get("payoff"), SHORT_MAX * 2),
-            payoff_type=_enum(item.get("payoff_type"), PAYOFF_TYPES, "无强爽点"),
-            golden_finger_usage=_s(item.get("golden_finger_usage"), SHORT_MAX) or "无",
+            payoff_type=_enum(item.get("payoff_type"), PAYOFF_TYPES, NO_PAYOFF, abbrev=True),
             character_changes=_s(item.get("character_changes"), SHORT_MAX * 2),
             gains_costs=_s(item.get("gains_costs"), SHORT_MAX * 2),
             foreshadowing=_s(item.get("foreshadowing"), SHORT_MAX * 2),

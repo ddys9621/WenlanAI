@@ -17,13 +17,10 @@ from app.models.project_default_style import ProjectDefaultStyle
 from app.models.mcp_plugin import MCPPlugin
 from app.models.user import User, UserPassword
 from app.models.system_setting import SystemSetting
-from app.models.plot_bridge import PlotBridge
+from app.models.volume import Volume
 from app.models.plot_card import PlotCard
-from app.models.plot_line import PlotLine
 from app.models.chapter_outline import ChapterOutline
 from app.models.story_outline import StoryOutline
-from app.models.chapter_outline_plot_line_link import ChapterOutlinePlotLineLink
-from app.models.plot_card_plot_line_link import PlotCardPlotLineLink
 from app.models.plot_card_chapter_outline_link import PlotCardChapterOutlineLink
 from app.models.world_rule import WorldRule
 from app.models.chapter_causal_link import ChapterCausalLink
@@ -39,7 +36,9 @@ from app.models.arc_summary import ArcSummary
 from app.models.chapter_version import ChapterVersion
 from app.models.chapter_candidate import ChapterCandidate
 from app.models.world_map import WorldMap, WorldMapLocation
-from app.models.assistant import AssistantFieldCandidate, AssistantMessage, AssistantRun, AssistantSession
+from app.models.assistant import (
+    AssistantFieldCandidate, AssistantMessage, AssistantRun, AssistantSession, AssistantTeamSetting,
+)
 
 __all__ = [
     "Project",
@@ -65,13 +64,10 @@ __all__ = [
     "User",
     "UserPassword",
     "SystemSetting",
-    "PlotBridge",
+    "Volume",
     "PlotCard",
-    "PlotLine",
     "ChapterOutline",
     "StoryOutline",
-    "ChapterOutlinePlotLineLink",
-    "PlotCardPlotLineLink",
     "PlotCardChapterOutlineLink",
     "WorldRule",
     "ChapterCausalLink",
@@ -92,4 +88,5 @@ __all__ = [
     "AssistantMessage",
     "AssistantRun",
     "AssistantFieldCandidate",
+    "AssistantTeamSetting",
 ]

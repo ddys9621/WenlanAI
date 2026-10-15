@@ -18,7 +18,6 @@ import {
   Wrench,
   Loader2,
   Library,
-  Rocket,
   ChevronRight,
   Map as MapIcon,
   Sparkles,
@@ -57,8 +56,7 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
   {
     label: '规划',
     items: [
-      { label: '故事大纲', icon: FileText, path: 'outline' },
-      { label: '桥段规划', icon: Rocket, path: 'plot-bridges' },
+      { label: '谋篇（总纲·卷纲·章纲）', icon: FileText, path: 'outline' },
     ],
   },
   {

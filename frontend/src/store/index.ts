@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Project, Outline, Character, Chapter, PlotCard, PlotLine, ChapterOutline } from '../types';
+import type { Project, Outline, Character, Chapter, PlotCard, Volume, ChapterOutline } from '../types';
 
 interface AppState {
   currentProject: Project | null;
@@ -41,12 +41,11 @@ interface AppState {
   updatePlotCard: (plotCard: PlotCard) => void;
   removePlotCard: (id: string) => void;
 
-  // 剧情线状态
-  plotLines: PlotLine[];
-  setPlotLines: (plotLines: PlotLine[]) => void;
-  addPlotLine: (plotLine: PlotLine) => void;
-  updatePlotLine: (plotLine: PlotLine) => void;
-  removePlotLine: (id: string) => void;
+  // 卷纲状态
+  volumes: Volume[];
+  setVolumes: (volumes: Volume[]) => void;
+  updateVolume: (volume: Volume) => void;
+  removeVolume: (id: string) => void;
 
   // 章纲状态
   chapterOutlines: ChapterOutline[];
@@ -149,19 +148,14 @@ export const useStore = create<AppState>((set) => ({
     plotCards: state.plotCards.filter((card) => card.id !== id),
   })),
 
-  // 剧情线状态实现
-  plotLines: [],
-  setPlotLines: (plotLines) => set({ plotLines }),
-  addPlotLine: (plotLine) => set((state) => ({ 
-    plotLines: [...state.plotLines, plotLine] 
+  // 卷纲状态实现
+  volumes: [],
+  setVolumes: (volumes) => set({ volumes }),
+  updateVolume: (updated) => set((state) => ({
+    volumes: state.volumes.map((v) => (v.id === updated.id ? updated : v)),
   })),
-  updatePlotLine: (updatedPlotLine) => set((state) => ({
-    plotLines: state.plotLines.map((line) => 
-      line.id === updatedPlotLine.id ? updatedPlotLine : line
-    ),
-  })),
-  removePlotLine: (id) => set((state) => ({
-    plotLines: state.plotLines.filter((line) => line.id !== id),
+  removeVolume: (id) => set((state) => ({
+    volumes: state.volumes.filter((v) => v.id !== id),
   })),
 
   // 章纲状态实现
@@ -188,7 +182,7 @@ export const useStore = create<AppState>((set) => ({
     chapters: [],
     currentChapter: null,
     plotCards: [],
-    plotLines: [],
+    volumes: [],
     chapterOutlines: [],
   }),
 }));

@@ -3,9 +3,8 @@
 替代 V3.1.3 的「摘要 BM25 + 实体 1-hop 扩展」：实体图谱随 V2-V4 抽取核心一并删除，
 拆书卡本身已带功能标签 / 章末钩子 / 爽点，检索直接落在这些字段上，不再做实体扩展。
 
-文档文本 = outline（无则 summary 兼容老包）+ function_tags + ending_hook_text + payoff_points。
-boost_tags 命中任一功能标签 → 分数 ×TAG_BOOST（桥段位置 → 标签映射见 BRIDGE_POSITION_TAGS）。
-设计：agent-docs/features/book_dissect_v5_design.md §5
+文档文本 = outline + function_tags + ending_hook_text + payoff_points。
+boost_tags 命中任一功能标签 → 分数 ×TAG_BOOST。
 """
 from __future__ import annotations
 
@@ -27,15 +26,6 @@ BM25_B = 0.75
 MIN_SCORE_FLOOR = 0.01
 # 功能标签命中加权
 TAG_BOOST = 1.3
-
-# 桥段位置 → 该位置典型的功能标签（v5_types.FUNCTION_TAGS 子集）
-BRIDGE_POSITION_TAGS: dict[str, tuple[str, ...]] = {
-    "intro":     ("开局立足", "日常代入", "信息差铺垫", "转场换地图", "伏笔埋设"),
-    "build":     ("危机铺垫", "拉扯试探", "信息差铺垫", "支线推进", "情感推进"),
-    "payoff":    ("爽点兑现", "打脸", "升级突破", "战斗", "伏笔回收", "信息揭露"),
-    "aftermath": ("善后收获", "过渡", "情感推进", "转场换地图"),
-    "breather":  ("过渡", "日常代入", "情感推进", "善后收获"),
-}
 
 _STOPWORDS = {
     "的", "了", "和", "与", "及", "以", "但是", "因为", "所以", "如果", "可以",
@@ -135,8 +125,7 @@ class ChapterCardRetriever:
 
     用法：
         hits = await ChapterCardRetriever().retrieve(
-            db, task_ids=[pack.task_id], query="林七第一次拜师", top_k=3,
-            boost_tags=BRIDGE_POSITION_TAGS.get(bridge_position, ()),
+            db, task_ids=[pack.task_id], query="林七第一次拜师", top_k=3, boost_tags=("爽点兑现", "打脸"),
         )
     """
 
@@ -187,13 +176,13 @@ class ChapterCardRetriever:
         rows = (await db.execute(
             select(
                 BookDissectChapterFact.task_id, BookDissectChapterFact.chapter_number,
-                BookDissectChapterFact.chapter_title, BookDissectChapterFact.fact_json, BookDissectChapterFact.summary,
+                BookDissectChapterFact.chapter_title, BookDissectChapterFact.fact_json,
             ).where(BookDissectChapterFact.task_id.in_(task_ids))
         )).all()
         docs: list[_CardDoc] = []
-        for task_id, number, title, fact_json, summary in rows:
+        for task_id, number, title, fact_json in rows:
             card = _parse_card(fact_json)
-            outline = " ".join(str(card.get("outline") or summary or "").split())
+            outline = " ".join(str(card.get("outline") or "").split())
             if not outline:
                 continue
             tags = _str_list(card.get("function_tags"))

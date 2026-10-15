@@ -242,7 +242,7 @@ export default function WorldMap() {
       <PageHeader
         eyebrow="设定"
         title="世界地图"
-        description="世界规则里的地点和故事里出现过的地点标在一张纸质地图上：拖动平移、滚轮缩放，点地点看档案和按章节的出处。AI 写正文、展开章纲、规划桥段时会参考这里的方位远近；改坐标不会改动任何故事内容。"
+        description="世界规则里的地点和故事里出现过的地点标在一张纸质地图上：拖动平移、滚轮缩放，点地点看档案和按章节的出处。AI 写正文、规划卷纲与章纲时会参考这里的方位远近；改坐标不会改动任何故事内容。"
         badges={<span className="lj-badge lj-badge--muted">{placedCount}/{total} 已定位</span>}
         actions={
           <>

@@ -34,6 +34,10 @@ class SettingsBase(BaseModel):
         default=None,
         description="分析 / 实体抽取 / 剧情摘要专用模型（同一接口下的便宜快模型）；空 = 跟随主模型",
     )
+    completion_model: Optional[str] = Field(
+        default=None,
+        description="编辑器行内补全专用模型（同一接口下响应快的模型）；空 = 跟随项目模型",
+    )
     preferences: Optional[str] = Field(default=None, description="其他偏好设置(JSON)")
 
 

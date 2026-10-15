@@ -4,8 +4,9 @@
 - AssistantMessage：对话消息（作者 / 助笔），助笔回复附处理记录、候选、提问
 - AssistantRun：处理一条作者要求的一次运行（可多步调用工具；需要作者决定时暂停等待回答）
 - AssistantFieldCandidate：对某一项内容的修改候选（记下修改前 / 修改后；作者应用才写入，可撤销）
+- AssistantTeamSetting：共创室成员的模型设置（每个项目每位成员一行；没有行 = 跟随项目模型）
 """
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 
 from app.db_base import Base
 from app.models.chapter_candidate import utcnow
@@ -77,3 +78,14 @@ class AssistantFieldCandidate(Base):
                     comment="candidate / applied / undone / rejected")
     created_at = Column(DateTime, default=utcnow)
     decided_at = Column(DateTime, nullable=True)
+
+
+class AssistantTeamSetting(Base):
+    __tablename__ = "assistant_team_settings"
+    __table_args__ = (UniqueConstraint("project_id", "member_id", name="uq_assistant_team_member"),)
+
+    id = Column(String(36), primary_key=True, default=_id)
+    project_id = Column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    member_id = Column(String(40), nullable=False, comment="共创室成员 ID：editor / world / character / outline / chapter / writer / reviewer")
+    model = Column(String(100), nullable=True, comment="该成员用的模型；空 = 跟随项目模型")
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)

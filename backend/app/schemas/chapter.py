@@ -1,7 +1,9 @@
 """章节相关的Pydantic模型"""
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, computed_field
 from typing import Optional, List
 from datetime import datetime
+
+from app.services.chapter_version_service import content_hash as _content_hash
 
 
 class ChapterCreate(BaseModel):
@@ -23,6 +25,10 @@ class ChapterUpdate(BaseModel):
     summary: Optional[str] = None
     # word_count 自动计算，不允许手动修改
     status: Optional[str] = None
+    base_hash: Optional[str] = Field(
+        None, max_length=64,
+        description="编辑器自动保存：所依据的正文指纹（上次载入 / 保存时的 content_hash）；与当前正文不符返回 409",
+    )
 
 
 class ChapterResponse(BaseModel):
@@ -40,6 +46,12 @@ class ChapterResponse(BaseModel):
     updated_at: datetime
     
     model_config = ConfigDict(from_attributes=True)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def content_hash(self) -> str:
+        """正文指纹：编辑器自动保存时作为 base_hash 回传"""
+        return _content_hash(self.content)
 
 
 class ChapterListItem(BaseModel):

@@ -75,6 +75,7 @@ export default function Settings() {
     reasoning_effort: 'medium',
     thinking_budget_tokens: null,
     analysis_model: '',
+    completion_model: '',
     preferences: '',
   })
 
@@ -99,6 +100,7 @@ export default function Settings() {
           reasoning_effort: data.reasoning_effort ?? 'medium',
           thinking_budget_tokens: data.thinking_budget_tokens ?? null,
           analysis_model: data.analysis_model || '',
+          completion_model: data.completion_model || '',
           preferences: data.preferences || '',
         })
       } catch {
@@ -255,6 +257,7 @@ export default function Settings() {
         reasoning_effort: settings.reasoning_effort ?? 'medium',
         thinking_budget_tokens: settings.thinking_budget_tokens ?? null,
         analysis_model: settings.analysis_model || '',
+        completion_model: settings.completion_model || '',
         preferences: settings.preferences || '',
       })
     } else {
@@ -273,6 +276,7 @@ export default function Settings() {
         reasoning_effort: 'medium',
         thinking_budget_tokens: null,
         analysis_model: '',
+        completion_model: '',
         preferences: '',
       })
     }
@@ -500,6 +504,29 @@ export default function Settings() {
                 </datalist>
                 <p className="text-xs text-content-tertiary mt-1">
                   章节分析、实体抽取、剧情单元 / 卷摘要会用这个模型（同一个接口和 Key）。长篇每章都要分析，换成便宜快的模型能省一半左右的费用。
+                </p>
+              </div>
+
+              {/* 补全模型：码字时的 AI 行内补全每次停笔都会调用，要的是快；不填则跟随项目模型 */}
+              <div>
+                <label className={labelClass}>
+                  补全模型
+                  <span className="ml-2 text-content-tertiary font-normal">可选，留空 = 跟随项目当前模型</span>
+                </label>
+                <input
+                  className={selectClass + ' w-full'}
+                  list="completion-model-options"
+                  value={form.completion_model ?? ''}
+                  placeholder="如 deepseek-chat / qwen-turbo / gpt-4o-mini"
+                  onChange={e => updateField('completion_model', e.target.value)}
+                />
+                <datalist id="completion-model-options">
+                  {models.map(m => (
+                    <option key={m.value} value={m.value}>{m.label}</option>
+                  ))}
+                </datalist>
+                <p className="text-xs text-content-tertiary mt-1">
+                  章节写作页打开「AI 补全」后，每次停笔都会用这个模型续写一小段灰色建议（同一个接口和 Key，补全时一律不开思考）。选响应快、价格低的模型体验最好。
                 </p>
               </div>
 

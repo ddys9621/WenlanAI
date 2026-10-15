@@ -2,12 +2,11 @@
 
 设计要点：
 - 列表项 (ReferencePackSummary) 不返回维度 JSON 字段，避免列表加载过重
-- 详情 (ReferencePackDetail) 一次返回全部维度内容；`pipeline_version` 区分老包（2，只读）与 V5 包（5）
+- 详情 (ReferencePackDetail) 一次返回全部维度内容
 - 维度内部结构使用 Dict[str, Any]，便于 prompt 演进时灵活扩展
 - 项目挂载关联使用独立的 schema，包含默认引用配置
 
-V5 维度集合（book_dissect_v5_design.md §5）：synopsis / bridges / style / character_archive / methodology / structure / corpus。
-archetypes / worldbuilding / entities / relations / events 已随实体图谱抽取删除，老包这些字段不再下发。
+维度集合：synopsis（全书骨架 ≈ 总纲）/ bridges（剧情单元库）/ style / character_archive / methodology / structure / corpus。
 """
 
 from __future__ import annotations
@@ -33,12 +32,9 @@ class ReferencePackSummary(BaseModel):
     status: Literal["generating", "ready", "partial", "failed"]
     generated_dimensions: List[str] = Field(
         default_factory=list,
-        description="已成功生成的维度（V5：synopsis/bridges/style/character_archive/methodology/structure）",
+        description="已成功生成的维度（synopsis/bridges/style/character_archive/methodology/structure）",
     )
-    pipeline_version: int = Field(
-        default=2,
-        description="拆书流水线版本：2 = V2-V4 老包（只读，建议重新抽取）；5 = V5 拆书卡 / 情节单元 / 骨架",
-    )
+    pipeline_version: int = Field(default=5, description="拆书流水线版本（参考包内容格式）")
     error_message: Optional[str] = None
     attached_project_count: int = Field(
         default=0,
@@ -59,39 +55,40 @@ class ReferencePackDetail(BaseModel):
     source_book_title: str
     status: Literal["generating", "ready", "partial", "failed"]
     generated_dimensions: List[str] = Field(default_factory=list)
-    pipeline_version: int = Field(default=2, description="2 = 老包（只读）；5 = V5")
+    pipeline_version: int = Field(default=5, description="拆书流水线版本（参考包内容格式）")
     error_message: Optional[str] = None
 
-    # V5 六个维度（老包的同名字段是 V2-V4 形状，前端按 pipeline_version 分流渲染）
+    # 六个维度
     synopsis: Optional[Dict[str, Any]] = Field(
         None,
         description=(
-            "全书骨架（V5）：genre_tag / one_line_premise / main_conflict / golden_finger / stages / "
-            "top_payoffs / growth_system / power_system / long_foreshadowing / reading_promise / opening_strategy"
+            "全书骨架（≈ 原书的总纲）：genre_tag / premise / main_plot / main_conflict / golden_finger（没有为「无」）/ "
+            "selling_points / main_tropes / growth_route / power_system / ultimate_goal / volumes / high_points / "
+            "long_foreshadowing / opening_strategy"
         ),
     )
     bridges: Optional[Dict[str, Any]] = Field(
         None,
         description=(
-            "桥段库聚合（V5）：arc_count / avg_arc_length / arc_length_distribution / payoff_type_distribution / "
-            "payoff_density / typical_arcs / role_pattern；全部情节单元走 /book-dissect/{task_id}/arcs"
+            "剧情单元库：arc_count / avg_arc_length / arc_length_distribution / payoff_type_distribution / payoff_density / "
+            "typical_arcs / role_pattern / unit_rhythm / relief_after_strong；全部剧情单元走 /book-dissect/{task_id}/arcs"
         ),
     )
     style: Optional[Dict[str, Any]] = Field(
         None,
-        description="文风指纹（V5）：name / description / prompt_content / traits / dialogue_style / narration_habits / avoid_list / metrics / examples",
+        description="文风指纹：name / description / prompt_content / traits / dialogue_style / narration_habits / avoid_list / metrics / examples",
     )
     character_archive: Optional[Dict[str, Any]] = Field(
         None,
-        description="人物功能谱（V5）：protagonist / allies / antagonists / function_slots",
+        description="人物功能谱：protagonist（含 advantage 核心优势）/ allies / antagonists / function_slots",
     )
     methodology: Optional[Dict[str, Any]] = Field(
         None,
-        description="写法手册：golden_finger_pattern / opening_hook_pattern / facepunch_rhythm / power_progression / highlight_density",
+        description="写法手册：opening_pattern / volume_rhythm / unit_design / tension_rhythm / growth_progression / advantage_usage",
     )
     structure: Optional[Dict[str, Any]] = Field(
         None,
-        description="结构统计（V5，无 LLM）：节奏 / 钩子 / 爽点密度 / 张力十分位 / 单元长度分布",
+        description="结构统计（无 LLM）：节奏 / 钩子 / 兑现密度 / 张力十分位 / 剧情单元长度与强弱",
     )
 
     attached_project_count: int = 0
@@ -104,7 +101,7 @@ class ReferencePackDetail(BaseModel):
 # ============================================================
 
 
-# 7 个引用维度（V5）：6 个参考包 JSON 维度 + corpus（拆书卡检索）
+# 7 个引用维度：6 个参考包 JSON 维度 + corpus（拆书卡检索）
 # 注意：必须与前端 @/frontend/src/types/reference_pack.ts 的 ReferenceDimension 保持一致，
 # 否则 deep 档挂载会 422（请求校验）/500（响应校验）。
 ReferenceDimension = Literal[

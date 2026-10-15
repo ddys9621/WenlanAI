@@ -26,10 +26,11 @@ class ChapterOutlineBase(BaseModel):
 class ChapterOutlineCreate(ChapterOutlineBase):
     """创建章纲请求模型"""
     project_id: str = Field(..., description="项目ID")
-    plot_line_id: Optional[str] = Field(None, description="关联的剧情线ID")
     key_events: Optional[List[str]] = Field(None, description="关键事件列表，最后一条为章末钩子")
     characters_involved: Optional[List[str]] = Field(None, description="涉及角色名称列表")
     forbidden: Optional[List[str]] = Field(None, description="禁止事项：本章不能提前发生 / 揭晓的事")
+    volume_id: Optional[str] = Field(None, description="所属卷纲")
+    unit_index: Optional[int] = Field(None, description="所属剧情单元序号", ge=1)
 
 
 class ChapterOutlineUpdate(BaseModel):
@@ -57,7 +58,6 @@ class ChapterOutlineResponse(ChapterOutlineBase):
     """章纲响应模型"""
     id: str = Field(..., description="章纲ID")
     project_id: str = Field(..., description="项目ID")
-    plot_line_id: Optional[str] = Field(None, description="关联的剧情线ID")
     key_events: Optional[List[str]] = Field(None, description="关键事件列表，最后一条为章末钩子")
     characters_involved: Optional[List[str]] = Field(None, description="涉及角色名称列表")
     forbidden: Optional[List[str]] = Field(None, description="禁止事项")
@@ -66,16 +66,13 @@ class ChapterOutlineResponse(ChapterOutlineBase):
     )
     review_status: str = Field("confirmed", description="draft = AI 草拟待确认；confirmed = 已确认")
     confirmed_at: Optional[datetime] = Field(None, description="确认时间")
-    upstream_stale: bool = Field(False, description="上游（桥段 / 剧情线 / 故事大纲）已修改，建议核对")
+    upstream_stale: bool = Field(False, description="上游（卷纲 / 总纲）已修改，建议核对")
     upstream_reason: Optional[str] = Field(None, description="上游改了什么")
-    bridge_id: Optional[str] = Field(None, description="所属桥段")
-    bridge_position: Optional[str] = Field(None, description="桥段内位置")
+    volume_id: Optional[str] = Field(None, description="所属卷纲")
+    unit_index: Optional[int] = Field(None, description="所属剧情单元序号")
     created_at: datetime = Field(..., description="创建时间")
     updated_at: datetime = Field(..., description="更新时间")
-    # 关联统计字段 - 统一格式
-    plot_lines: Optional[List[Dict[str, str]]] = Field(default_factory=list, description="关联的剧情线列表（用于统计）")
     plot_cards: Optional[List[Dict[str, str]]] = Field(default_factory=list, description="关联的剧情卡片列表（用于统计）")
-    plot_line_count: int = Field(0, description="关联的剧情线数量")
     plot_card_count: int = Field(0, description="关联的剧情卡片数量")
 
     model_config = ConfigDict(from_attributes=True, extra="allow")  # 允许额外字段
@@ -95,5 +92,4 @@ class ChapterOutlineListResponse(BaseModel):
 class ChapterOutlineBatchCreateRequest(BaseModel):
     """批量创建章纲请求模型"""
     project_id: str = Field(..., description="项目ID")
-    plot_line_id: Optional[str] = Field(None, description="关联的剧情线ID")
     outlines: List[ChapterOutlineCreate] = Field(..., description="章纲列表")

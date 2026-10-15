@@ -98,7 +98,6 @@ class PlotAnalyzer:
 - decision
 - actor_names: 角色名数组
 - target_names: 受影响角色名数组
-- plot_line_hint: 若能判断属于哪条剧情线，写标题，否则留空
 - importance: 0.0-1.0
 - reversible: true / false
 - evidence: 必须尽量引用原文关键短句
@@ -112,7 +111,6 @@ class PlotAnalyzer:
 - content
 - owner_character_name
 - target_character_name
-- plot_line_hint
 - priority: low / medium / high / critical
 - status: open / progressing / resolved / broken
 - deadline_chapter: 新埋设且上方「本章计划叙事任务」给了计划回收章时填该章号，否则留空
@@ -142,7 +140,6 @@ class PlotAnalyzer:
 - time_marker
 - actor_names
 - target_names
-- plot_line_hints
 - public_visibility: public / private / secret
 
 ### 15. Knowledge Changes
@@ -284,7 +281,6 @@ JSON 结构如下：
       "decision": "决",
       "actor_names": ["林尘"],
       "target_names": ["慕雪"],
-      "plot_line_hint": "主线逆袭",
       "importance": 0.9,
       "reversible": false,
       "evidence": "原文关键短句"
@@ -297,7 +293,6 @@ JSON 结构如下：
       "content": "林尘立下三年之约",
       "owner_character_name": "林尘",
       "target_character_name": "慕雪",
-      "plot_line_hint": "主线逆袭",
       "priority": "critical",
       "status": "open",
       "deadline_chapter": null,
@@ -328,7 +323,6 @@ JSON 结构如下：
       "time_marker": "当日",
       "actor_names": ["林尘"],
       "target_names": ["慕雪"],
-      "plot_line_hints": ["主线逆袭"],
       "public_visibility": "public"
     }}
   ],

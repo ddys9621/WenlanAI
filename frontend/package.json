@@ -13,6 +13,9 @@
   },
   "dependencies": {
     "@ant-design/icons": "^5.6.1",
+    "@codemirror/commands": "6.11.1",
+    "@codemirror/state": "6.7.6",
+    "@codemirror/view": "6.43.13",
     "antd": "^5.27.6",
     "axios": "^1.12.2",
     "clsx": "^2.1.1",

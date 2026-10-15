@@ -60,7 +60,6 @@ class PlotCard(Base):
 
     # 关联关系
     project = relationship("Project", back_populates="plot_cards")
-    plot_line_links = relationship("PlotCardPlotLineLink", back_populates="plot_card", cascade="all, delete-orphan")
     chapter_outline_links = relationship("PlotCardChapterOutlineLink", back_populates="plot_card", cascade="all, delete-orphan")
 
     def __repr__(self):

@@ -75,7 +75,7 @@ export const STEP_META: Record<FlowStep, StepMeta> = {
   confirm: {
     eyebrow: '确认',
     title: '信息已收齐，创建前再看一眼',
-    description: '确认后 AI 将依次生成世界观、角色、大纲与剧情线。',
+    description: '确认后 AI 将依次生成世界观、角色、总纲与卷纲。',
     next: '',
     manualLabel: '',
     inputPlaceholder: '',
@@ -116,8 +116,8 @@ interface NodeMeta {
 export const NODE_META: NodeMeta[] = [
   { key: 'worldBuilding', label: '世界观', hint: '先把舞台和规则搭稳', icon: Globe },
   { key: 'characters', label: '角色', hint: '再补主角群和关系', icon: Users },
-  { key: 'outline', label: '大纲', hint: '落成故事前提与卖点', icon: BookOpenText },
-  { key: 'plotLines', label: '剧情线', hint: '主线节点是桥段骨架的来源', icon: GitBranch },
+  { key: 'outline', label: '总纲', hint: '落成故事前提与全书主线', icon: BookOpenText },
+  { key: 'volumes', label: '卷纲', hint: '按总纲分卷，第 1 卷拆成剧情单元', icon: GitBranch },
 ];
 
 /** 创建过程可能长达数分钟，底部轮播一些"接下来能做什么"，让等待有内容可读 */
@@ -125,7 +125,7 @@ export const GENERATION_TIPS = [
   '每个环节完成后都会在上方留下一行摘要，全部完成后可以逐项重跑。',
   '世界观里的时代、地点与规则，会作为后续角色、大纲和正文生成的统一约束。',
   '角色会带着动机与关系一起生成，进入项目后可在「角色」「关系」页继续细调。',
-  '大纲落成后，剧情线会把主线拆成节点，桥段规划再按节点展开成章纲。',
+  '总纲落成后按卷规划：每卷拆成几件完整的事（剧情单元），再逐件展开成章纲。',
   '中途离开当前页面会中断后续环节；已完成的部分会保留在项目里。',
 ];
 

@@ -54,9 +54,8 @@ async def create_project(
         
         # 创建项目时自动设置user_id
         project_data = project.model_dump()
-        longform = normalize_longform_settings(project_data)  # 平台预设 / 桥段节奏 / 滚动规划（选了平台带出 C3 默认）
-        for key in ("platform_preset", "bridge_rhythm", "rolling_planning"):
-            project_data.pop(key, None)
+        longform = normalize_longform_settings(project_data)  # 平台预设（只收合法值）
+        project_data.pop("platform_preset", None)
         project_data.update(longform)
         project_data['user_id'] = user_id
         db_project = Project(**project_data)

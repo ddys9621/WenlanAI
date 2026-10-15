@@ -90,6 +90,10 @@ async def get_user_ai_service(
     analysis_model = (getattr(settings, "analysis_model", None) or "").strip()
     if analysis_model and hasattr(service, "analysis_model"):
         service.analysis_model = analysis_model
+    # 补全模型同样只取全局设置：编辑器行内补全走它，空 = 跟随（项目覆盖后的）主模型
+    completion_model = (getattr(settings, "completion_model", None) or "").strip()
+    if completion_model and hasattr(service, "completion_model"):
+        service.completion_model = completion_model
     return service
 
 

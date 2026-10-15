@@ -10,10 +10,12 @@ from app.api.ai_jobs import job_sse_response
 from app.api.deps import verify_request_project
 from app.api.settings import get_user_ai_service
 from app.database import get_db
-from app.models.assistant import AssistantFieldCandidate, AssistantMessage, AssistantRun, AssistantSession
-from app.schemas.assistant import AssistantAnswerRequest, AssistantSendRequest
+from app.models.assistant import AssistantFieldCandidate, AssistantMessage, AssistantRun, AssistantSession, AssistantTeamSetting
+from app.schemas.assistant import AssistantAnswerRequest, AssistantSendRequest, AssistantTeamModelRequest
 from app.services import assistant_agent_service as agent
 from app.services import assistant_candidate_service as cands
+from app.services import cocreation_team as team
+from app.services.story_progress import progress_snapshot
 from app.services.ai_jobs import AIJobConflictError, ai_jobs, job_session_factory
 from app.services.ai_service import AIService
 from app.services.assistant_checks_service import project_checks as compute_checks
@@ -216,3 +218,38 @@ async def reject_field_candidate(project_id: str, candidate_id: str, request: Re
 async def project_checks(project_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     await verify_request_project(request, project_id, db)
     return await compute_checks(db, project_id)
+
+
+async def _team_payload(db: AsyncSession, project_id: str) -> dict:
+    models = await agent.team_models(db, project_id)
+    return {"members": [team.member_view(m, models.get(m.id)) for m in team.MEMBERS], "starters": list(team.STARTERS)}
+
+
+@router.get("/team", summary="共创室：成员（职责 / 模型）与开场引导")
+async def get_team(project_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    await verify_request_project(request, project_id, db)
+    return await _team_payload(db, project_id)
+
+
+@router.put("/team/{member_id}", summary="共创室：设置某位成员用的模型（空 = 跟随项目模型）")
+async def set_member_model(project_id: str, member_id: str, body: AssistantTeamModelRequest, request: Request,
+                           db: AsyncSession = Depends(get_db)):
+    await verify_request_project(request, project_id, db)
+    if member_id not in {m.id for m in team.MEMBERS}:
+        raise HTTPException(status_code=404, detail="没有这位成员")
+    row = (await db.execute(select(AssistantTeamSetting).where(
+        AssistantTeamSetting.project_id == project_id, AssistantTeamSetting.member_id == member_id,
+    ))).scalars().first()
+    model = (body.model or "").strip() or None
+    if row is None:
+        db.add(AssistantTeamSetting(project_id=project_id, member_id=member_id, model=model))
+    else:
+        row.model = model
+    await db.commit()
+    return await _team_payload(db, project_id)
+
+
+@router.get("/progress", summary="创作进度：总纲 / 卷纲 / 章纲 / 正文各到哪一步与建议的下一步")
+async def story_progress(project_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    await verify_request_project(request, project_id, db)
+    return await progress_snapshot(db, project_id)

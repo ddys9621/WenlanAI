@@ -23,10 +23,12 @@ import type {
   AssistantFieldCandidate,
   AssistantPageContext,
   AssistantPreview,
+  AssistantProgress,
   AssistantRunResult,
   AssistantRunView,
   AssistantSessionInfo,
   AssistantSessionView,
+  AssistantTeam,
 } from '../types/assistant';
 import type {
   AdherenceReport,
@@ -43,7 +45,6 @@ import type {
   WorldMapView,
 } from '../types/writing';
 import type {
-  BridgeRhythm,
   PlatformPreset,
   User,
   AuthConfig,
@@ -70,8 +71,8 @@ import type {
   GenerateCharacterRequest,
   GenerateCharactersResponse,
   GenerateOutlineResponse,
-  WizardPlotLinesRequest,
-  WizardPlotLinesResponse,
+  WizardVolumesRequest,
+  WizardVolumesResponse,
   Settings,
   SettingsUpdate,
   AIModelOption,
@@ -95,20 +96,18 @@ import type {
   PlotCardGenerateRequest,
   PlotCardReorderRequest,
   PlotCardListResponse,
-  PlotLine,
-  PlotLineCreate,
-  PlotLineUpdate,
-  PlotLineGenerateRequest,
-  PlotLineReorderRequest,
-  PlotLineListResponse,
-  PlotLineProgress,
+  Volume,
+  VolumeFields,
+  VolumeListResponse,
+  VolumePlanRequest,
+  VolumeGenerateRequest,
+  VolumeJobResult,
   ChapterOutline,
   ChapterOutlineCreate,
   ChapterOutlineUpdate,
   ChapterOutlineReorderRequest,
   ChapterOutlineListResponse,
   ChapterOutlineBatchCreateRequest,
-  PlotLineWithLinks,
   PlotCardWithLinks,
   WorldRule,
   WorldRuleCreate,
@@ -491,9 +490,6 @@ export const outlineApi = {
   activateOutline: (id: string) =>
     api.post<unknown, Outline>(`/story-outlines/${id}/activate`),
 
-  // 获取大纲关联的剧情线
-  getPlotLines: (outlineId: string) =>
-    api.get<unknown, Array<{ id: string; title: string; description?: string; line_type?: string; order_index?: number }>>(`/story-outlines/${outlineId}/plot-lines`),
 };
 
 export const characterApi = {
@@ -545,6 +541,17 @@ export const chapterApi = {
   
   updateChapter: (id: string, data: ChapterUpdate) =>
     api.put<unknown, Chapter>(`/chapters/${id}`, data),
+
+  /** 编辑器自动保存正文：带上次的正文指纹（null = 不核对，旧稿照常进历史版本）；409 = 正文在别处被改过，silent 交给调用方提示 */
+  saveContent: (id: string, content: string, baseHash: string | null) =>
+    api.put<unknown, Chapter>(`/chapters/${id}`, baseHash === null ? { content } : { content, base_hash: baseHash }, { silent: true }),
+
+  /** 行内补全：SSE（suggestion 事件 = 截至目前的完整建议，result.text = 最终建议）；signal 中止即停，不进后台任务 */
+  inlineCompletionStream: (
+    chapterId: string,
+    data: { prefix: string; suffix: string; length: 'sentence' | 'paragraph' },
+    options?: SSEClientOptions<{ text: string }>,
+  ) => ssePost<{ text: string }>(`/api/chapters/${chapterId}/inline-completion`, data, options),
   
   deleteChapter: (id: string) => api.delete(`/chapters/${id}`),
   
@@ -636,6 +643,15 @@ export const assistantApi = {
     api.post<unknown, AssistantFieldCandidate>(`/projects/${projectId}/assistant/candidates/${candidateId}/reject`, {}, { silent: true }),
   checks: (projectId: string) =>
     api.get<unknown, AssistantChecks>(`/projects/${projectId}/assistant/checks`),
+  /** 共创室：成员（职责 / 模型）与开场引导 */
+  team: (projectId: string) =>
+    api.get<unknown, AssistantTeam>(`/projects/${projectId}/assistant/team`),
+  /** 共创室：设置某位成员的模型（空 = 跟随项目模型） */
+  setMemberModel: (projectId: string, memberId: string, model: string | null) =>
+    api.put<unknown, AssistantTeam>(`/projects/${projectId}/assistant/team/${memberId}`, { model }),
+  /** 创作进度：总纲 / 卷纲 / 章纲 / 正文各到哪一步与建议的下一步 */
+  progress: (projectId: string) =>
+    api.get<unknown, AssistantProgress>(`/projects/${projectId}/assistant/progress`, { silent: true }),
 };
 
 /** 世界地图：作者标注的平面沙盘 + 地点档案 + AI 布局候选 */
@@ -782,8 +798,6 @@ export const wizardStreamApi = {
       strength?: 'light' | 'medium' | 'deep';
       // 长篇设置（仅新建项目时生效）
       platform_preset?: PlatformPreset;
-      bridge_rhythm?: BridgeRhythm;
-      rolling_planning?: boolean;
     },
     options?: SSEClientOptions<WorldBuildingResponse>
   ) => ssePost<WorldBuildingResponse>(
@@ -853,12 +867,12 @@ export const wizardStreamApi = {
     options
   ),
 
-  // 向导步骤 4：生成主线 + 支线（含节点），主线预计章节数 = chapter_count
-  generatePlotLinesStream: (
-    data: WizardPlotLinesRequest,
-    options?: SSEClientOptions<WizardPlotLinesResponse>
-  ) => ssePost<WizardPlotLinesResponse>(
-    '/api/wizard-stream/plot-lines',
+  // 向导步骤 4：按总纲分卷 + 把第 1 卷细化为剧情单元（全书章数 = chapter_count）
+  generateVolumesStream: (
+    data: WizardVolumesRequest,
+    options?: SSEClientOptions<WizardVolumesResponse>
+  ) => ssePost<WizardVolumesResponse>(
+    '/api/wizard-stream/volumes',
     data,
     options
   ),
@@ -1066,53 +1080,40 @@ export const plotCardApi = {
     api.get<unknown, { types: Array<{ type: string; count: number }> }>(`/plot-cards/project/${projectId}/types`),
 };
 
-// 剧情线 API
-export const plotLineApi = {
-  // 获取项目的剧情线列表
-  getPlotLines: (projectId: string, params?: {
-    skip?: number;
-    limit?: number;
-    line_type?: string;
-  }) =>
-    api.get<unknown, PlotLineListResponse>(`/plot-lines/project/${projectId}`, { params }),
+// 卷纲 API：总纲 → 卷纲（剧情单元 + 线索编排）→ 章纲；三个生成都是后台任务 + SSE（重连 / 停止走 aiJobsApi）
+export const volumeApi = {
+  list: (projectId: string) =>
+    api.get<unknown, VolumeListResponse>(`/projects/${projectId}/volumes`),
 
-  // 获取单个剧情线
-  createPlotLine: (data: PlotLineCreate) =>
-    api.post<unknown, PlotLine>('/plot-lines', data),
+  create: (projectId: string, data: VolumeFields) =>
+    api.post<unknown, Volume>(`/projects/${projectId}/volumes`, data),
 
-  // 更新剧情线
-  updatePlotLine: (lineId: string, data: PlotLineUpdate) =>
-    api.put<unknown, PlotLine>(`/plot-lines/${lineId}`, data),
+  /** 保存 ≠ 确认；内容变了会把本卷章纲标成「上游已改」 */
+  update: (volumeId: string, data: VolumeFields) =>
+    api.put<unknown, Volume>(`/volumes/${volumeId}`, data),
 
-  // 删除剧情线
-  deletePlotLine: (lineId: string) =>
-    api.delete<unknown, { message: string }>(`/plot-lines/${lineId}`),
+  confirm: (volumeId: string) =>
+    api.post<unknown, Volume>(`/volumes/${volumeId}/confirm`),
 
-  // 重排序剧情线
-  reorderPlotLines: (data: PlotLineReorderRequest) =>
-    api.post<unknown, { message: string }>('/plot-lines/reorder', data),
+  confirmAll: (projectId: string) =>
+    api.post<unknown, { confirmed: number }>(`/projects/${projectId}/volumes/confirm-all`),
 
-  /** AI 生成剧情线：后台任务 + SSE（重连 / 停止走 aiJobsApi）POST /api/plot-lines/generate-stream */
-  generatePlotLinesStream: (data: PlotLineGenerateRequest, options?: SSEClientOptions<PlotLine[]>) =>
-    ssePost<PlotLine[]>('/api/plot-lines/generate-stream', data, options),
+  /** 本卷已有章纲 → 409 */
+  remove: (volumeId: string) =>
+    api.delete<unknown, { success: boolean }>(`/volumes/${volumeId}`),
 
-  // 获取项目中使用的剧情线类型
-  getLineTypes: (projectId: string) =>
-    api.get<unknown, { types: Array<{ type: string; count: number }> }>(`/plot-lines/project/${projectId}/types`),
+  /** 按总纲分卷（已有章纲的卷保留） */
+  planStream: (projectId: string, data: VolumePlanRequest, options?: SSEClientOptions<VolumeJobResult>) =>
+    ssePost<VolumeJobResult>(`/api/projects/${projectId}/volumes/plan-stream`, data, options),
 
-  // 向剧情线添加剧情卡片
-  addCardsToLine: (lineId: string, cardIds: string[]) =>
-    api.post<unknown, { message: string }>(`/plot-lines/${lineId}/add-cards`, cardIds),
+  /** 把一卷细化为剧情单元 + 线索编排 */
+  detailStream: (volumeId: string, data: VolumeGenerateRequest, options?: SSEClientOptions<VolumeJobResult>) =>
+    ssePost<VolumeJobResult>(`/api/volumes/${volumeId}/detail-stream`, data, options),
 
-  // 从剧情线移除剧情卡片
-  removeCardsFromLine: (lineId: string, cardIds: string[]) =>
-    api.delete<unknown, { message: string }>(`/plot-lines/${lineId}/remove-cards`, { data: cardIds }),
-
-  // 获取剧情线写作进度
-  getPlotLineProgress: (lineId: string) =>
-    api.get<unknown, PlotLineProgress>(`/plot-lines/${lineId}/progress`),
-
-  // 更新时间线数据
+  /** 把一个剧情单元展开为章纲（只补缺的章） */
+  unitOutlinesStream: (
+    volumeId: string, unitIndex: number, data: VolumeGenerateRequest, options?: SSEClientOptions<VolumeJobResult>,
+  ) => ssePost<VolumeJobResult>(`/api/volumes/${volumeId}/units/${unitIndex}/outlines-stream`, data, options),
 };
 
 // 章纲 API
@@ -1121,7 +1122,7 @@ export const chapterOutlineApi = {
   getChapterOutlines: (projectId: string, params?: {
     skip?: number;
     limit?: number;
-    plot_line_id?: string;
+    volume_id?: string;
   }) =>
     api.get<unknown, ChapterOutlineListResponse>(`/chapter-outlines/project/${projectId}`, { params }),
 
@@ -1153,17 +1154,6 @@ export const chapterOutlineApi = {
   confirmAllChapterOutlines: (projectId: string) =>
     api.post<unknown, { confirmed: number }>(`/chapter-outlines/project/${projectId}/confirm-all`),
 
-  // 获取项目章纲统计信息
-  getChapterOutlineStatistics: (projectId: string) =>
-    api.get<unknown, {
-      total_count: number;
-      total_target_words: number;
-      line_statistics: Array<{
-        plot_line_id: string | null;
-        chapter_count: number;
-        total_target_words: number;
-      }>;
-    }>(`/chapter-outlines/project/${projectId}/statistics`),
 };
 
 // ============================================
@@ -1173,30 +1163,8 @@ export const chapterOutlineApi = {
 
 // 章纲关联管理 API
 export const chapterOutlineLinkApi = {
-  // 查询关联
-  getPlotLines: (outlineId: string) =>
-    api.get<unknown, PlotLineWithLinks[]>(`/chapter-outlines/${outlineId}/plot-lines`),
-
   getPlotCards: (outlineId: string) =>
     api.get<unknown, PlotCardWithLinks[]>(`/chapter-outlines/${outlineId}/plot-cards`),
-
-  // 管理关联
-  linkPlotLines: (outlineId: string, data: { plot_line_ids: string[]; role?: string }) =>
-    api.post<unknown, { message: string; created_count: number; skipped_count: number }>(
-      `/chapter-outlines/${outlineId}/link-plot-lines`,
-      {
-        plot_line_ids: data.plot_line_ids,
-        role: data.role || 'main'
-      }
-    ),
-
-  unlinkPlotLines: (outlineId: string, plotLineIds: string[]) =>
-    api.delete<unknown, { message: string; removed_count: number }>(
-      `/chapter-outlines/${outlineId}/unlink-plot-lines`,
-      {
-        data: { ids: plotLineIds }
-      }
-    ),
 
 };
 
@@ -1479,7 +1447,7 @@ export const bookDissectApi = {
   // 后端端点统一返 410 Gone；改用 imitationApi.preview / imitationApi.streamUrl
   // 配合 referencePackApi.attach 在用户自己项目内做「一键仿写」。
 
-  // ----- V5 浏览：拆书卡 / 情节单元 -----
+  // ----- 浏览：拆书卡 / 剧情单元 -----
   /** 全部拆书卡精简行（按章号升序，不含章纲正文） */
   listCards: (taskId: string) =>
     api.get<unknown, BookDissectChapterCardListItem[]>(`/book-dissect/${taskId}/cards`),
@@ -1488,7 +1456,7 @@ export const bookDissectApi = {
   getCard: (taskId: string, chapterNumber: number) =>
     api.get<unknown, BookDissectChapterCard>(`/book-dissect/${taskId}/cards/${chapterNumber}`),
 
-  /** 全部情节单元（按 arc_index 升序） */
+  /** 全部剧情单元（按 arc_index 升序） */
   listArcs: (taskId: string) =>
     api.get<unknown, BookDissectStoryArc[]>(`/book-dissect/${taskId}/arcs`),
 };

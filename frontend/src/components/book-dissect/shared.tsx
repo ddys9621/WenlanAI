@@ -1,5 +1,5 @@
 /**
- * 拆书 V5 视图共用小组件（BookDissectV5View / LegacyPackNotice 共享）
+ * 拆书视图共用小组件
  */
 import { AlertTriangle, Loader2 } from 'lucide-react'
 import { renderValue } from './format'

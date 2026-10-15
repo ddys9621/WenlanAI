@@ -7,7 +7,6 @@ import uuid
 
 from app.database import get_db
 from app.logger import get_logger
-from app.models.plot_line import PlotLine
 from app.models.story_outline import StoryOutline
 from app.schemas.story_outline import (
     StoryOutlineCreate,
@@ -121,7 +120,7 @@ async def update_story_outline(
         editor_id=editor_id
     )
     if premise_changed:
-        await outline_review.mark_project_outlines(db, updated.project_id, "故事大纲（故事前提）已修改")
+        await outline_review.mark_project_outlines(db, updated.project_id, "总纲（故事大纲）已修改")
         await db.commit()
         await db.refresh(updated)
     return updated
@@ -171,30 +170,3 @@ async def activate_story_outline(
     await db.refresh(db_outline)
 
     return db_outline
-
-
-@router.get("/story-outlines/{outline_id}/plot-lines", response_model=List[dict])
-async def get_story_outline_plot_lines(
-    outline_id: str,
-    request: Request,
-    db: AsyncSession = Depends(get_db)
-):
-    """获取故事大纲关联的剧情线"""
-    user_id = getattr(request.state, 'user_id', None)
-    await get_outline_with_access_check(outline_id, user_id, db)
-
-    plot_lines_result = await db.execute(
-        select(PlotLine).where(PlotLine.story_outline_id == outline_id)
-    )
-    plot_lines = plot_lines_result.scalars().all()
-    
-    return [
-        {
-            "id": pl.id,
-            "title": pl.title,
-            "description": pl.description,
-            "line_type": pl.line_type,
-            "order_index": pl.order_index
-        }
-        for pl in plot_lines
-    ]

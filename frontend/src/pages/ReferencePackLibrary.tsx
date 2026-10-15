@@ -32,7 +32,6 @@ import type {
   ReferencePackStatus,
   ReferencePackSummary,
 } from '@/types/reference_pack';
-import { isV5Pack } from '@/types/reference_pack';
 
 const STATUS_CLASS: Record<ReferencePackStatus, string> = {
   generating: 'bg-amber-500/15 text-amber-300 ring-1 ring-amber-500/30',
@@ -50,17 +49,11 @@ const STATUS_LABEL: Record<ReferencePackStatus, string> = {
 
 const DIMENSION_LABEL: Record<string, string> = {
   synopsis: '全书骨架',
-  bridges: '桥段库',
+  bridges: '剧情单元',
   style: '文风指纹',
   character_archive: '人物功能谱',
   methodology: '写法手册',
   structure: '结构统计',
-  // 老包（V2-V4）generated_dimensions 里可能残留的维度，仅列表展示用
-  archetypes: '角色塑造（旧）',
-  worldbuilding: '世界观（旧）',
-  entities: '实体分布（旧）',
-  relations: '关系频谱（旧）',
-  events: '事件节奏（旧）',
 };
 
 function formatDate(iso?: string | null): string {
@@ -209,14 +202,6 @@ export default function ReferencePackLibrary() {
                       {pack.source_book_title || '未命名拆书'}
                     </Link>
                     <StatusBadge status={pack.status} />
-                    {!isV5Pack(pack) && (
-                      <span
-                        className="rounded-pill border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-700"
-                        title="旧版流水线生成，只读；建议重新上传原书按 V5 抽取"
-                      >
-                        V{pack.pipeline_version ?? 2} 旧包
-                      </span>
-                    )}
                   </div>
                   <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-content-tertiary">
                     <span className="inline-flex items-center gap-1">

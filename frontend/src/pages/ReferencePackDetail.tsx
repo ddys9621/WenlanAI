@@ -1,8 +1,7 @@
 /**
  * 参考包详情页
  *
- * - pipeline_version >= 5：复用拆书 V5 五 tab 视图（全书骨架 / 桥段库 / 逐章拆书表 / 文风指纹 / 人物功能谱）
- * - 老包（V2-V4）：顶部横幅提示重新抽取 + 各维度 JSON 只读展示
+ * 复用拆书五 tab 视图（全书骨架 / 剧情单元 / 逐章拆书表 / 文风指纹 / 人物功能谱）
  */
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
@@ -10,9 +9,7 @@ import { AlertTriangle, ArrowLeft, BookOpen, Loader2 } from 'lucide-react';
 
 import { referencePackApi } from '@/services/api';
 import type { ReferencePackDetail, ReferencePackStatus } from '@/types/reference_pack';
-import { isV5Pack } from '@/types/reference_pack';
 import { BookDissectV5View } from '@/components/book-dissect/BookDissectV5View';
-import { LegacyPackNotice } from '@/components/book-dissect/LegacyPackNotice';
 
 const STATUS_CLASS: Record<ReferencePackStatus, string> = {
   generating: 'bg-amber-500/15 text-amber-300',
@@ -80,7 +77,7 @@ export default function ReferencePackDetailPage() {
   return (
     <div className="mx-auto max-w-7xl px-6 py-6">
       <Header pack={pack} />
-      {isV5Pack(pack) ? <BookDissectV5View taskId={pack.task_id} pack={pack} /> : <LegacyPackNotice pack={pack} />}
+      <BookDissectV5View taskId={pack.task_id} pack={pack} />
     </div>
   );
 }
@@ -98,9 +95,6 @@ function Header({ pack }: { pack: ReferencePackDetail }) {
           {pack.source_book_title}
           <span className={`inline-flex items-center rounded-pill px-2 py-0.5 text-xs font-medium ${STATUS_CLASS[pack.status]}`}>
             {STATUS_LABEL[pack.status]}
-          </span>
-          <span className="rounded-pill border border-surface-border px-2 py-0.5 text-xs font-normal text-content-tertiary">
-            {isV5Pack(pack) ? 'V5 流水线' : `V${pack.pipeline_version ?? 2} 旧包`}
           </span>
         </h1>
         <p className="mt-1 text-xs text-content-tertiary">

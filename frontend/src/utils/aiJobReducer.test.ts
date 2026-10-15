@@ -85,7 +85,7 @@ describe('applyEvent', () => {
 
 describe('fromSnapshot', () => {
   const snapshot: AIJobSnapshot = {
-    id: 'j2', kind: 'bridge_fill', title: 'AI 填充桥段内容', project_id: 'p1', scope: 'bridge_fill:p1', meta: {},
+    id: 'j2', kind: 'volume_plan', title: 'AI 细化卷纲', project_id: 'p1', scope: 'volume_plan:p1', meta: {},
     status: 'running', started_at: 1700000000, finished_at: null, elapsed: 12.5, seq: 40, error: null, result: null,
     last_progress: { type: 'progress', message: '节点 2', progress: 50, status: 'processing', seq: 38 },
     live: {

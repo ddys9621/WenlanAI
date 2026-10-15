@@ -1,15 +1,16 @@
 /**
- * 章节写作（原「章节管理」与「剧情分析」两页合并）。
+ * 章节写作（原「章节管理」与「剧情分析」两页合并；版式参考岚笺写作台）。
  *
- * 左侧章节列表：新建 / 编辑 / 生成候选稿 / 去 AI 味重写 / 场景生成 / 分析 / 删除，并标出待审候选稿、章纲已改、章纲待确认；
- * 右侧阅读区：正文 | 候选稿 | 历史版本 三个界面；正文旁是记忆标注 / 叙事状态 / 智能助笔侧栏；正文任务运行时就地显示流式面板。
+ * 满高工作台：左侧章节目录（搜索 / 新建 / 从章纲同步 / 批量生成；选中行可 生成候选稿 / 去 AI 味重写 / 场景生成 / 分析 / 删除，
+ * 并标出待审候选稿、章纲已改、章纲待确认）；右侧稿纸：正文 | 候选稿 | 历史版本 三个界面——正文直接码字（自动保存、AI 行内补全、
+ * 专注模式），旁边可开记忆标注 / 叙事状态面板；正文任务运行时就地显示流式面板。
  * AI 输出一律先成候选稿，作者采用才写入正文（参考岚笺）。任务编排在 useChapterWriteJobs，页面只管选中章节与阅读态。
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
-  BookOpen, ChevronLeft, ChevronRight, Copy, Download, FileCheck2, Film, History, Layers, Loader2, PanelRightClose,
-  PanelRightOpen, Pencil, Plus, RefreshCw, Search, Sparkles, Trash2, Zap,
+  BookOpen, Download, FileCheck2, Film, History, Layers, Loader2, PanelRightClose, PanelRightOpen, Plus, RefreshCw, Search,
+  Trash2, Zap,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
@@ -25,7 +26,6 @@ import { AIJobBanner } from '@/components/ai-job/AIJobBanner';
 import AnnotatedText from '@/components/AnnotatedText';
 import MemorySidebar from '@/components/MemorySidebar';
 import { SceneGenerator } from '@/components/SceneGenerator';
-import { PageHeader } from '@/components/ui/PageHeader';
 import { useAssistantDataChange, useAssistantDetail } from '@/hooks/useAssistantPage';
 import { useAssistantStore, type AssistantDataChange } from '@/store/assistantStore';
 import { BatchGenerateModal } from '@/components/chapters/BatchGenerateModal';
@@ -33,15 +33,10 @@ import { CandidatePanel } from '@/components/chapters/CandidatePanel';
 import { ChapterEditModal } from '@/components/chapters/ChapterEditModal';
 import { ChapterGenerateModal } from '@/components/chapters/ChapterGenerateModal';
 import { ChapterStreamPanel } from '@/components/chapters/ChapterStreamPanel';
+import { ChapterWritingPane, type ChapterWritingPaneHandle } from '@/components/chapters/ChapterWritingPane';
 import { DeaiRewriteModal, type RewriteMode } from '@/components/chapters/DeaiRewriteModal';
 import { NarrativeStatePanel } from '@/components/chapters/NarrativeStatePanel';
 import { VersionHistoryPanel } from '@/components/chapters/VersionHistoryPanel';
-
-const STATUS_MAP: Record<string, { label: string; cls: string }> = {
-  draft: { label: '草稿', cls: 'lj-badge--muted' },
-  writing: { label: '生成中', cls: 'lj-badge--candidate' },
-  completed: { label: '已完成', cls: 'lj-badge--ok' },
-};
 
 type SidebarTab = 'memory' | 'narrative';
 type ReaderTab = 'content' | 'candidates' | 'versions';
@@ -59,8 +54,7 @@ export default function ChapterAnalysis() {
   const [narrative, setNarrative] = useState<NormalizedAnalysisData | null>(null);
   const [narrativeLoading, setNarrativeLoading] = useState(false);
   const [contentLoading, setContentLoading] = useState(false);
-  const [showAnnotations, setShowAnnotations] = useState(true);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('memory');
   const [activeAnnotationId, setActiveAnnotationId] = useState<string>();
   const [scrollToContent, setScrollToContent] = useState<string>();
@@ -69,7 +63,9 @@ export default function ChapterAnalysis() {
   const [focusCandidateId, setFocusCandidateId] = useState<string | null>(null);
   const [candidatesVersion, setCandidatesVersion] = useState(0);
   const [selection, setSelection] = useState<TextSelection | null>(null);
+  const [search, setSearch] = useState('');
   const manuscriptRef = useRef<HTMLDivElement>(null);
+  const paneRef = useRef<ChapterWritingPaneHandle>(null);
   const [searchParams, setSearchParams] = useSearchParams();
 
   const loadSelected = useCallback(async (id: string) => {
@@ -177,7 +173,7 @@ export default function ChapterAnalysis() {
   }, [streamChapterId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------- 弹窗 ----------
-  const [editState, setEditState] = useState<{ editing: Chapter | null } | null>(null);
+  const [creating, setCreating] = useState(false);
   const [genTarget, setGenTarget] = useState<{ chapter: Chapter; check: ChapterCanGenerateResponse } | null>(null);
   const [rewriteTarget, setRewriteTarget] = useState<Chapter | null>(null);
   const [showBatch, setShowBatch] = useState(false);
@@ -238,18 +234,19 @@ export default function ChapterAnalysis() {
     void jobs.startStream({ chapter, kind: 'chapter_generate', requestBody: body, mode: 'single' }).catch(() => { /* 已 toast / 已停止 */ });
   };
 
-  const confirmRewrite = (promptIds: string[], mode: RewriteMode) => {
+  const confirmRewrite = async (promptIds: string[], mode: RewriteMode) => {
     if (!rewriteTarget) return;
     const chapter = rewriteTarget;
     setRewriteTarget(null);
+    // 重写的是已保存的正文：先把编辑器里没保存的修改存上
+    await paneRef.current?.flush();
     void jobs.startStream({ chapter, kind: 'chapter_regenerate', requestBody: { prompt_ids: promptIds, mode }, mode: 'single' }).catch(() => { /* 已 toast / 已停止 */ });
   };
 
-  /** 正文里选中文字 → 记下与正文逐字一致的位置，交给智能助笔改写 / 润色 / 追问 */
+  /** 标注视图里选中文字 → 记下与正文逐字一致的位置，交给智能助笔改写 / 润色 / 追问 */
   const captureSelection = () => {
     if (!detail?.content) return;
-    // 只在正文本身的节点里量位置（不含上方「尚未分析」之类的提示文字），量出来的起点才和正文下标一致
-    const raw = readDomSelection(manuscriptRef.current?.querySelector<HTMLElement>('[data-manuscript]') ?? null);
+    const raw = readDomSelection(manuscriptRef.current);
     if (!raw) return;
     const resolved = resolveSelection(detail.content, raw.text, raw.startHint);
     if (resolved) setSelection(resolved);
@@ -262,14 +259,18 @@ export default function ChapterAnalysis() {
     setReaderTab('content');
   };
 
-  const copyText = async (text: string, what: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      toast.success(`${what}已复制到剪贴板`);
-    } catch {
-      toast.error('复制失败，请稍后重试');
-    }
-  };
+  // 编辑器自动保存 / 改标题：只把字数、状态、标题同步给章节列表（列表不带正文）
+  const onContentSaved = useCallback((saved: Chapter) => {
+    setDetail((d) => (d && d.id === saved.id
+      ? { ...d, content: saved.content, content_hash: saved.content_hash, word_count: saved.word_count, status: saved.status, updated_at: saved.updated_at }
+      : d));
+    useStore.getState().updateChapter(saved.id, { word_count: saved.word_count, status: saved.status });
+  }, []);
+
+  const onTitleSaved = useCallback((saved: Chapter) => {
+    setDetail((d) => (d && d.id === saved.id ? { ...d, title: saved.title } : d));
+    useStore.getState().updateChapter(saved.id, { title: saved.title });
+  }, []);
 
   const handleAnnotationClick = (annotation: MemoryAnnotation, source: 'content' | 'sidebar') => {
     setActiveAnnotationId(annotation.id);
@@ -285,58 +286,79 @@ export default function ChapterAnalysis() {
   };
 
   // ---------- 派生 ----------
-  const idx = sorted.findIndex((c) => c.id === selectedId);
-  const prev = idx > 0 ? sorted[idx - 1] : null;
-  const next = idx >= 0 && idx < sorted.length - 1 ? sorted[idx + 1] : null;
   const totalWords = chapters.reduce((s, c) => s + c.word_count, 0);
-  const writtenCount = chapters.filter((c) => c.word_count > 0).length;
   const pendingCandidates = chapters.reduce((s, c) => s + (c.pending_candidates ?? 0), 0);
   const hasAnnotations = Boolean(annotations && annotations.annotations.length > 0);
   const streamPanelVisible = Boolean(jobs.streamState && !jobs.panelHidden && jobs.streamState.chapterId === selectedId);
   const { batchStatus, batchRunning, streamBusy } = jobs;
   const selectedSummary = sorted.find((c) => c.id === selectedId);
+  const keyword = search.trim();
+  const visibleChapters = keyword
+    ? sorted.filter((c) => c.title.includes(keyword) || String(c.chapter_number) === keyword.replace(/^第|章$/g, ''))
+    : sorted;
+  const detailReady = Boolean(detail && detail.id === selectedId);
+
+  const readerTabs = (
+    <div className="flex items-center gap-1.5">
+      <div className="flex items-center gap-0.5 rounded-sm border border-surface-border bg-surface p-0.5">
+        {([
+          ['content', '正文', BookOpen],
+          ['candidates', `候选稿${(selectedSummary?.pending_candidates ?? 0) > 0 ? ` ${selectedSummary?.pending_candidates}` : ''}`, FileCheck2],
+          ['versions', '历史版本', History],
+        ] as const).map(([key, label, Icon]) => (
+          <button
+            key={key}
+            onClick={() => setReaderTab(key)}
+            className={cn(
+              'flex items-center gap-1 rounded-sm px-2 py-1 text-xs font-medium',
+              readerTab === key ? 'bg-brand text-white' : 'text-content-secondary hover:text-content',
+            )}
+          >
+            <Icon className="h-3.5 w-3.5" />
+            {label}
+          </button>
+        ))}
+      </div>
+      {readerTab === 'content' && (
+        <button
+          onClick={() => setSidebarOpen((v) => !v)}
+          className={cn('lj-tool w-8 justify-center px-0', sidebarOpen && 'lj-tool--active')}
+          title={sidebarOpen ? '收起记忆标注 / 叙事状态' : '记忆标注 / 叙事状态'}
+          aria-label="分析面板"
+        >
+          {sidebarOpen ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
+        </button>
+      )}
+    </div>
+  );
+
+  const annotatedView = hasAnnotations && annotations && detail ? (
+    <div onMouseUp={captureSelection} onKeyUp={captureSelection}>
+      <p className="mb-3 font-sans text-xs text-content-tertiary">
+        只读标注视图 · 共 {annotations.summary.total_annotations} 个标注：
+        {annotations.summary.hooks > 0 && ` 🎣${annotations.summary.hooks}个钩子`}
+        {annotations.summary.foreshadows > 0 && ` 🌟${annotations.summary.foreshadows}个伏笔`}
+        {annotations.summary.plot_points > 0 && ` 💎${annotations.summary.plot_points}个情节点`}
+        {annotations.summary.character_events > 0 && ` 👤${annotations.summary.character_events}个角色事件`}
+      </p>
+      <div ref={manuscriptRef} data-manuscript>
+        <AnnotatedText
+          content={detail.content || ''}
+          annotations={annotations.annotations}
+          onAnnotationClick={(a) => handleAnnotationClick(a, 'content')}
+          activeAnnotationId={activeAnnotationId}
+          scrollToAnnotation={scrollToContent}
+          style={{ lineHeight: 2, fontSize: 16 }}
+        />
+      </div>
+    </div>
+  ) : undefined;
 
   return (
-    <div className="animate-fade-in space-y-6">
-      <PageHeader
-        eyebrow="写作"
-        title="章节写作"
-        description={
-          <>
-            {chapters.length > 0 ? `共 ${chapters.length} 章 · ${totalWords.toLocaleString()} 字。` : ''}
-            AI 写出的每一稿都先成为候选稿，审阅后采用才写入正文；被替换的旧稿自动存进历史版本，随时可以恢复。
-          </>
-        }
-        actions={
-          <>
-            <button onClick={() => void handleSyncFromOutlines()} disabled={syncing} className="hh-btn-secondary">
-              {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-              从章纲同步
-            </button>
-            <button onClick={() => setShowBatch(true)} disabled={batchRunning || streamBusy} className="hh-btn-secondary">
-              <Layers className="h-4 w-4" />
-              批量生成
-            </button>
-            <button onClick={() => setEditState({ editing: null })} className="hh-btn-primary">
-              <Plus className="h-4 w-4" />
-              新建章节
-            </button>
-          </>
-        }
-      />
-
-      {chapters.length > 0 && (
-        <section className="hh-panel grid grid-cols-2 divide-surface-border md:grid-cols-4 md:divide-x">
-          <StatItem label="章节总数" value={chapters.length} />
-          <StatItem label="已有正文" value={writtenCount} />
-          <StatItem label="待审候选稿" value={pendingCandidates} />
-          <StatItem label="累计字数" value={totalWords.toLocaleString()} />
-        </section>
-      )}
-
+    <div className="flex animate-fade-in flex-col gap-3 lg:h-[calc(100dvh-6.75rem)]">
       {/* 批量生成进度 */}
       {batchStatus && (
-        <section className="hh-panel space-y-3 p-5">
+        <section className="hh-panel shrink-0 space-y-2.5 px-4 py-3">
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0 space-y-1">
               <div className="flex items-center gap-2 text-sm">
@@ -386,179 +408,202 @@ export default function ChapterAnalysis() {
           </span>
           <h2 className="mt-5 text-xl font-semibold tracking-tight text-content">还没有章节</h2>
           <p className="mt-2 max-w-md text-sm leading-6 text-content-secondary">
-            点击右上角「从章纲同步」把章纲一键转成章节骨架，或「新建章节」手动添加。
+            「从章纲同步」把章纲一键转成章节骨架，或「新建章节」直接开写。
           </p>
+          <div className="mt-6 flex gap-2">
+            <button onClick={() => void handleSyncFromOutlines()} disabled={syncing} className="hh-btn-secondary">
+              {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+              从章纲同步
+            </button>
+            <button onClick={() => setCreating(true)} className="hh-btn-primary">
+              <Plus className="h-4 w-4" />
+              新建章节
+            </button>
+          </div>
         </section>
       ) : (
-        <div className="grid gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
-          {/* 左栏：章节列表 */}
-          <section className="hh-panel divide-y divide-surface-border-light overflow-hidden lg:max-h-[calc(100dvh-220px)] lg:overflow-y-auto">
-            {sorted.map((c) => {
-              const status = STATUS_MAP[c.status] || STATUS_MAP.draft;
-              const isSelected = c.id === selectedId;
-              const generating = jobs.isGenerating(c.id);
-              const currentBatchChapter = batchRunning && batchStatus?.currentChapterId === c.id;
-              const analyzing = jobs.analyzingChapterIds.has(c.id);
-              const canWrite = !generating && !batchRunning && !streamBusy;
-              return (
-                <div
-                  key={c.id}
-                  onClick={() => selectChapter(c.id)}
-                  className={cn(
-                    'cursor-pointer px-4 py-3 transition-colors',
-                    isSelected ? 'lj-selected' : 'hover:bg-surface-hover',
-                    currentBatchChapter && !isSelected && 'bg-brand-50',
-                  )}
-                >
-                  <div className="flex items-center gap-3">
-                    <div
-                      className={cn(
-                        'flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-sm font-serif text-sm font-semibold tabular-nums',
-                        c.word_count > 0 ? 'bg-brand-100 text-brand-600' : 'bg-surface-muted text-content-secondary',
-                      )}
-                    >
-                      {c.chapter_number}
+        <div className="grid min-h-0 flex-1 overflow-hidden rounded border border-surface-border bg-white lg:grid-cols-[272px_minmax(0,1fr)]">
+          {/* 左栏：章节目录 */}
+          <aside className="flex min-h-0 flex-col bg-surface-paper max-lg:max-h-[45vh] max-lg:border-b lg:border-r lg:border-surface-border">
+            <div className="flex shrink-0 items-center gap-1.5 border-b border-surface-border px-2.5 py-2.5">
+              <div className="relative min-w-0 flex-1">
+                <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-content-tertiary" />
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="搜索章节"
+                  aria-label="搜索章节"
+                  className="h-8 w-full pl-7 pr-2 text-xs"
+                />
+              </div>
+              <ExplorerButton title="新建章节" onClick={() => setCreating(true)}>
+                <Plus className="h-4 w-4" />
+              </ExplorerButton>
+              <ExplorerButton title="从章纲同步：把章纲一键转成章节骨架" onClick={() => void handleSyncFromOutlines()} disabled={syncing}>
+                {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+              </ExplorerButton>
+              <ExplorerButton title="批量生成候选稿（服务端串行，关掉浏览器也不停）" onClick={() => setShowBatch(true)} disabled={batchRunning || streamBusy}>
+                <Layers className="h-4 w-4" />
+              </ExplorerButton>
+            </div>
+            <p className="shrink-0 px-3 pb-1.5 pt-2 text-[11px] text-content-tertiary tabular-nums">
+              共 {chapters.length} 章 · {totalWords.toLocaleString()} 字{pendingCandidates > 0 ? ` · 待审候选稿 ${pendingCandidates}` : ''}
+            </p>
+            <div className="min-h-0 flex-1 overflow-y-auto pb-2">
+              {visibleChapters.map((c) => {
+                const isSelected = c.id === selectedId;
+                const generating = jobs.isGenerating(c.id);
+                const currentBatchChapter = batchRunning && batchStatus?.currentChapterId === c.id;
+                const analyzing = jobs.analyzingChapterIds.has(c.id);
+                const canWrite = !generating && !batchRunning && !streamBusy;
+                const flagged = (c.pending_candidates ?? 0) > 0 || c.outline_changed || c.outline_review_status === 'draft' || c.outline_upstream_stale;
+                return (
+                  <div
+                    key={c.id}
+                    onClick={() => selectChapter(c.id)}
+                    className={cn(
+                      'group cursor-pointer px-3 py-2 transition-colors',
+                      isSelected ? 'bg-gold-50 shadow-[inset_3px_0_#e99a35]' : 'hover:bg-surface-hover',
+                      currentBatchChapter && !isSelected && 'bg-brand-50',
+                    )}
+                  >
+                    <div className="flex items-baseline gap-2">
+                      <span className="shrink-0 text-[11px] text-content-tertiary tabular-nums">第{c.chapter_number}章</span>
+                      <span className={cn('min-w-0 flex-1 truncate text-[13px] text-content', isSelected && 'font-medium')}>{c.title}</span>
+                      <span className="shrink-0 text-[11px] text-content-tertiary tabular-nums">
+                        {generating ? <Loader2 className="inline h-3 w-3 animate-spin text-brand" /> : c.word_count > 0 ? `${c.word_count.toLocaleString()}字` : '空'}
+                      </span>
                     </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className={cn('truncate text-sm text-content', isSelected ? 'font-semibold' : 'font-medium')}>{c.title}</span>
-                        <span className={cn('lj-badge', status.cls)}>{status.label}</span>
+                    {(flagged || currentBatchChapter) && (
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {currentBatchChapter && <span className="lj-badge lj-badge--candidate">串行生成中</span>}
+                        {(c.pending_candidates ?? 0) > 0 && <span className="lj-badge lj-badge--candidate">候选稿 {c.pending_candidates}</span>}
+                        {c.outline_changed && <span className="lj-badge lj-badge--stale" title="正文写完后章纲又改过">章纲已改</span>}
+                        {c.outline_upstream_stale && <span className="lj-badge lj-badge--stale" title="卷纲 / 总纲改过">上游已改</span>}
+                        {c.outline_review_status === 'draft' && <span className="lj-badge lj-badge--draft" title="AI 草拟的章纲，尚未确认">章纲待确认</span>}
                       </div>
-                      <p className="mt-0.5 text-xs text-content-tertiary tabular-nums">
-                        {c.word_count > 0 ? `${c.word_count.toLocaleString()} 字` : '暂无内容'}
-                        {currentBatchChapter && <span className="ml-2 text-brand">串行生成中</span>}
-                      </p>
-                      {((c.pending_candidates ?? 0) > 0 || c.outline_changed || c.outline_review_status === 'draft' || c.outline_upstream_stale) && (
-                        <div className="mt-1 flex flex-wrap gap-1">
-                          {(c.pending_candidates ?? 0) > 0 && (
-                            <span className="lj-badge lj-badge--candidate">候选稿 {c.pending_candidates}</span>
-                          )}
-                          {c.outline_changed && <span className="lj-badge lj-badge--stale" title="正文写完后章纲又改过">章纲已改</span>}
-                          {c.outline_upstream_stale && <span className="lj-badge lj-badge--stale" title="桥段 / 剧情线 / 故事大纲改过">上游已改</span>}
-                          {c.outline_review_status === 'draft' && <span className="lj-badge lj-badge--draft" title="AI 草拟的章纲，尚未确认">章纲待确认</span>}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                  <div className="mt-1.5 flex items-center gap-0.5 pl-11" onClick={(e) => e.stopPropagation()}>
-                    <button onClick={() => setEditState({ editing: c })} className="hh-icon-btn-plain h-7 w-7 hover:text-brand" title="编辑" aria-label="编辑">
-                      <Pencil className="h-3.5 w-3.5" />
-                    </button>
-                    <button
-                      onClick={() => void openGenerate(c)}
-                      disabled={!canWrite}
-                      className="hh-icon-btn-plain h-7 w-7 hover:text-brand"
-                      title={c.word_count > 0 ? 'AI 重新写一稿（存为候选稿，不会覆盖现有正文）' : 'AI 生成候选稿'}
-                      aria-label="AI 生成候选稿"
-                    >
-                      {generating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
-                    </button>
-                    {c.word_count > 0 && (
+                    )}
+                    <div className={cn('mt-1 items-center gap-0.5', isSelected ? 'flex' : 'hidden group-hover:flex')} onClick={(e) => e.stopPropagation()}>
                       <button
-                        onClick={() => setRewriteTarget(c)}
+                        onClick={() => void openGenerate(c)}
                         disabled={!canWrite}
                         className="hh-icon-btn-plain h-7 w-7 hover:text-brand"
-                        title="去 AI 味重写（结果存为候选稿）"
-                        aria-label="去 AI 味重写"
+                        title={c.word_count > 0 ? 'AI 重新写一稿（存为候选稿，不会覆盖现有正文）' : 'AI 生成候选稿'}
+                        aria-label="AI 生成候选稿"
                       >
-                        <RefreshCw className="h-3.5 w-3.5" />
+                        {generating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
                       </button>
-                    )}
-                    {c.chapter_outline_id && (
-                      <button
-                        onClick={() => setSceneTarget({ outlineId: c.chapter_outline_id!, title: c.title })}
-                        className="hh-icon-btn-plain h-7 w-7 hover:text-brand"
-                        title="场景生成"
-                        aria-label="场景生成"
-                      >
-                        <Film className="h-3.5 w-3.5" />
-                      </button>
-                    )}
-                    {c.word_count > 0 && (
-                      <button
-                        onClick={() => void jobs.handleAnalyze(c)}
-                        disabled={analyzing}
-                        className="hh-icon-btn-plain h-7 w-7 hover:text-brand"
-                        title="分析（提取记忆 / 叙事状态 / 一致性）"
-                        aria-label="分析"
-                      >
-                        {analyzing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
-                      </button>
-                    )}
-                    <button onClick={() => void handleDelete(c)} className="hh-icon-btn-plain h-7 w-7 hover:text-cinnabar" title="删除" aria-label="删除">
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </section>
-
-          {/* 右栏：流式面板 / 阅读区 */}
-          {streamPanelVisible && jobs.streamState ? (
-            <ChapterStreamPanel
-              streamState={jobs.streamState}
-              streamJob={jobs.streamJob}
-              streamDone={jobs.streamDone}
-              batchRunning={batchRunning}
-              showProcess={jobs.showProcess}
-              onToggleProcess={() => jobs.setShowProcess((v) => !v)}
-              onHide={jobs.hideStreamPanel}
-              onCancel={jobs.cancelStream}
-              onClose={jobs.closeStreamPanel}
-              relatedCards={jobs.relatedCards}
-              loadingCards={jobs.loadingCards}
-              onReviewCandidate={() => {
-                const id = jobs.streamState?.chapterId;
-                jobs.closeStreamPanel();
-                if (id) {
-                  if (id !== selectedId) selectChapter(id);
-                  setReaderTab('candidates');
-                }
-              }}
-            />
-          ) : (
-            <section className="hh-panel flex min-h-[520px] flex-col overflow-hidden">
-              {!selectedId || !detail ? (
-                <div className="flex flex-1 items-center justify-center text-sm text-content-tertiary">
-                  {contentLoading ? <Loader2 className="h-5 w-5 animate-spin text-brand" /> : '从左侧选择一个章节查看'}
-                </div>
-              ) : (
-                <>
-                  {/* 工具栏 */}
-                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-surface-border px-5 py-2.5">
-                    <div className="flex min-w-0 items-center gap-2">
-                      <button onClick={() => prev && selectChapter(prev.id)} disabled={!prev} className="hh-icon-btn-plain h-8 w-8" title={prev ? `上一章：${prev.title}` : '已是第一章'} aria-label="上一章">
-                        <ChevronLeft className="h-4 w-4" />
-                      </button>
-                      <span className="truncate font-serif text-[15px] font-semibold text-content">
-                        第 {detail.chapter_number} 章<span className="ml-2">{detail.title}</span>
-                      </span>
-                      <button onClick={() => next && selectChapter(next.id)} disabled={!next} className="hh-icon-btn-plain h-8 w-8" title={next ? `下一章：${next.title}` : '已是最后一章'} aria-label="下一章">
-                        <ChevronRight className="h-4 w-4" />
+                      {c.word_count > 0 && (
+                        <button onClick={() => setRewriteTarget(c)} disabled={!canWrite} className="hh-icon-btn-plain h-7 w-7 hover:text-brand" title="去 AI 味重写（结果存为候选稿）" aria-label="去 AI 味重写">
+                          <RefreshCw className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                      {c.chapter_outline_id && (
+                        <button onClick={() => setSceneTarget({ outlineId: c.chapter_outline_id!, title: c.title })} className="hh-icon-btn-plain h-7 w-7 hover:text-brand" title="场景生成" aria-label="场景生成">
+                          <Film className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                      {c.word_count > 0 && (
+                        <button onClick={() => void jobs.handleAnalyze(c)} disabled={analyzing} className="hh-icon-btn-plain h-7 w-7 hover:text-brand" title="分析（提取记忆 / 叙事状态 / 一致性）" aria-label="分析">
+                          {analyzing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
+                        </button>
+                      )}
+                      <button onClick={() => void handleDelete(c)} className="hh-icon-btn-plain ml-auto h-7 w-7 hover:text-cinnabar" title="删除" aria-label="删除">
+                        <Trash2 className="h-3.5 w-3.5" />
                       </button>
                     </div>
-                    <div className="flex flex-wrap items-center gap-1 rounded border border-surface-border bg-surface p-0.5">
-                      {([
-                        ['content', '正文', BookOpen],
-                        ['candidates', `候选稿${(selectedSummary?.pending_candidates ?? 0) > 0 ? ` ${selectedSummary?.pending_candidates}` : ''}`, FileCheck2],
-                        ['versions', '历史版本', History],
-                      ] as const).map(([key, label, Icon]) => (
-                        <button
-                          key={key}
-                          onClick={() => setReaderTab(key)}
-                          className={cn(
-                            'flex items-center gap-1 rounded-sm px-2.5 py-1 text-xs font-medium',
-                            readerTab === key ? 'bg-brand text-white' : 'text-content-secondary hover:text-content',
-                          )}
-                        >
-                          <Icon className="h-3.5 w-3.5" />
+                  </div>
+                );
+              })}
+              {visibleChapters.length === 0 && <p className="px-3 py-6 text-center text-xs text-content-tertiary">没有匹配的章节</p>}
+            </div>
+          </aside>
+
+          {/* 右栏：流式面板 / 稿纸 */}
+          <section className="flex min-h-0 min-w-0 flex-col max-lg:h-[80vh]">
+            {streamPanelVisible && jobs.streamState ? (
+              <div className="min-h-0 flex-1 overflow-y-auto p-3">
+                <ChapterStreamPanel
+                  streamState={jobs.streamState}
+                  streamJob={jobs.streamJob}
+                  streamDone={jobs.streamDone}
+                  batchRunning={batchRunning}
+                  showProcess={jobs.showProcess}
+                  onToggleProcess={() => jobs.setShowProcess((v) => !v)}
+                  onHide={jobs.hideStreamPanel}
+                  onCancel={jobs.cancelStream}
+                  onClose={jobs.closeStreamPanel}
+                  relatedCards={jobs.relatedCards}
+                  loadingCards={jobs.loadingCards}
+                  onReviewCandidate={() => {
+                    const id = jobs.streamState?.chapterId;
+                    jobs.closeStreamPanel();
+                    if (id) {
+                      if (id !== selectedId) selectChapter(id);
+                      setReaderTab('candidates');
+                    }
+                  }}
+                />
+              </div>
+            ) : !selectedId || !detailReady || !detail ? (
+              <div className="flex flex-1 items-center justify-center text-sm text-content-tertiary">
+                {contentLoading ? <Loader2 className="h-5 w-5 animate-spin text-brand" /> : '从左侧选择一个章节'}
+              </div>
+            ) : readerTab === 'content' && projectId ? (
+              <div className="flex min-h-0 flex-1">
+                <ChapterWritingPane
+                  ref={paneRef}
+                  projectId={projectId}
+                  chapter={detail}
+                  bookWords={totalWords}
+                  headerRight={readerTabs}
+                  readView={annotatedView}
+                  onSaved={onContentSaved}
+                  onTitleSaved={onTitleSaved}
+                  onSelection={setSelection}
+                  onOpenHistory={() => setReaderTab('versions')}
+                  onAskAssistant={() => useAssistantStore.getState().compose('')}
+                />
+                {/* 侧栏：记忆标注 / 叙事状态（智能助笔在项目右侧的全局抽屉里） */}
+                {sidebarOpen && (
+                  <aside className="flex w-[320px] shrink-0 flex-col border-l border-surface-border bg-white max-xl:hidden">
+                    <div className="flex shrink-0 gap-1 border-b border-surface-border px-3 py-2.5">
+                      {([['memory', '记忆标注'], ['narrative', '叙事状态']] as const).map(([key, label]) => (
+                        <button key={key} onClick={() => setSidebarTab(key)} className={cn('hh-chip px-3 py-1 text-xs', sidebarTab === key && 'hh-chip--active')}>
                           {label}
                         </button>
                       ))}
                     </div>
-                  </div>
-
+                    <div className="min-h-0 flex-1 overflow-y-auto p-3">
+                      {sidebarTab === 'memory' ? (
+                        hasAnnotations && annotations ? (
+                          <MemorySidebar
+                            annotations={annotations.annotations}
+                            activeAnnotationId={activeAnnotationId}
+                            onAnnotationClick={(a) => handleAnnotationClick(a, 'sidebar')}
+                            scrollToAnnotation={scrollToSidebar}
+                          />
+                        ) : (
+                          <p className="py-8 text-center text-xs leading-6 text-content-tertiary">
+                            暂无标注数据。点左侧 🔍 分析本章后，可在「标注」视图里高亮钩子 / 伏笔 / 情节点。
+                          </p>
+                        )
+                      ) : (
+                        <NarrativeStatePanel data={narrative} loading={narrativeLoading} />
+                      )}
+                    </div>
+                  </aside>
+                )}
+              </div>
+            ) : (
+              <>
+                <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-surface-border bg-white px-3 py-1.5">
+                  <span className="truncate font-serif text-[15px] font-semibold text-content">
+                    第 {detail.chapter_number} 章<span className="ml-2">{detail.title}</span>
+                  </span>
+                  {readerTabs}
+                </div>
+                <div className="min-h-0 flex-1 overflow-y-auto">
                   {readerTab === 'candidates' ? (
                     <CandidatePanel
                       key={`${detail.id}-${candidatesVersion}`}
@@ -567,149 +612,26 @@ export default function ChapterAnalysis() {
                       onAdopted={afterContentReplaced}
                       onChanged={() => void refreshChapters()}
                     />
-                  ) : readerTab === 'versions' ? (
-                    <VersionHistoryPanel chapter={detail} onRestored={afterContentReplaced} />
                   ) : (
-                  <>
-                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-surface-border-light px-5 py-2">
-                    <span className="text-xs text-content-tertiary">
-                      {selection ? (
-                        <span className="inline-flex items-center gap-2">
-                          已选中 {selection.text.length} 字
-                          <button
-                            onClick={() => useAssistantStore.getState().compose('')}
-                            className="inline-flex items-center gap-1 font-medium text-brand hover:underline"
-                          >
-                            <Sparkles className="h-3 w-3" />
-                            交给智能助笔
-                          </button>
-                        </span>
-                      ) : '选中正文里的一段文字，可交给智能助笔（右上角）改写、润色或追问出处'}
-                    </span>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <button onClick={() => void copyText(`第${detail.chapter_number}章: ${detail.title}`, '章节标题')} className="hh-chip flex items-center gap-1 px-2 py-1 text-[11px]">
-                        <Copy className="h-3 w-3" />
-                        复制标题
-                      </button>
-                      <button onClick={() => void copyText(detail.content || '', '章节内容')} disabled={!detail.content} className="hh-chip flex items-center gap-1 px-2 py-1 text-[11px] disabled:opacity-50">
-                        <Copy className="h-3 w-3" />
-                        复制内容
-                      </button>
-                      {hasAnnotations && (
-                        <label className="flex cursor-pointer items-center gap-1.5 text-xs text-content-secondary">
-                          <input type="checkbox" checked={showAnnotations} onChange={(e) => setShowAnnotations(e.target.checked)} />
-                          显示标注
-                        </label>
-                      )}
-                      <button onClick={() => setSidebarOpen((v) => !v)} className="hh-icon-btn-plain h-8 w-8" title={sidebarOpen ? '隐藏分析面板' : '显示分析面板'} aria-label="分析面板">
-                        {sidebarOpen ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
-                      </button>
-                    </div>
-                  </div>
-                  {hasAnnotations && annotations && (
-                    <p className="border-b border-surface-border-light px-5 py-2 text-xs text-content-tertiary">
-                      共 {annotations.summary.total_annotations} 个标注：
-                      {annotations.summary.hooks > 0 && ` 🎣${annotations.summary.hooks}个钩子`}
-                      {annotations.summary.foreshadows > 0 && ` 🌟${annotations.summary.foreshadows}个伏笔`}
-                      {annotations.summary.plot_points > 0 && ` 💎${annotations.summary.plot_points}个情节点`}
-                      {annotations.summary.character_events > 0 && ` 👤${annotations.summary.character_events}个角色事件`}
-                    </p>
+                    <VersionHistoryPanel chapter={detail} onRestored={afterContentReplaced} />
                   )}
-
-                  <div className="flex flex-1 flex-col gap-4 p-5 xl:flex-row">
-                    {/* 正文 */}
-                    <div
-                      ref={manuscriptRef}
-                      onMouseUp={captureSelection}
-                      onKeyUp={captureSelection}
-                      className="min-w-0 flex-1 xl:max-h-[calc(100dvh-340px)] xl:overflow-y-auto"
-                    >
-                      {contentLoading ? (
-                        <div className="flex items-center gap-2 py-6 text-xs text-content-secondary">
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          加载中…
-                        </div>
-                      ) : !detail.content ? (
-                        <div className="py-10 text-center text-sm text-content-tertiary">本章还没有正文：点左侧 ⚡ 让 AI 写一份候选稿，或 ✎ 手动编辑。</div>
-                      ) : (
-                        <>
-                          {!hasAnnotations && (
-                            <p className="mb-4 rounded border border-dashed border-surface-border bg-surface-paper px-3 py-2 text-xs text-content-tertiary">
-                              该章尚未分析，没有记忆标注。点左侧 🔍 分析后可在正文里高亮钩子 / 伏笔 / 情节点。
-                            </p>
-                          )}
-                          {showAnnotations && hasAnnotations && annotations ? (
-                            <div data-manuscript>
-                              <AnnotatedText
-                                content={detail.content}
-                                annotations={annotations.annotations}
-                                onAnnotationClick={(a) => handleAnnotationClick(a, 'content')}
-                                activeAnnotationId={activeAnnotationId}
-                                scrollToAnnotation={scrollToContent}
-                                style={{ lineHeight: 2, fontSize: 16 }}
-                              />
-                            </div>
-                          ) : (
-                            <div data-manuscript className="lj-manuscript whitespace-pre-wrap break-words">{detail.content}</div>
-                          )}
-                        </>
-                      )}
-                    </div>
-
-                    {/* 侧栏：记忆标注 / 叙事状态（智能助笔在项目右侧的全局抽屉里） */}
-                    {sidebarOpen && (
-                      <aside className="border-t border-surface-border pt-4 xl:w-[340px] xl:shrink-0 xl:border-l xl:border-t-0 xl:pl-4 xl:pt-0">
-                        <div className="mb-3 flex gap-1">
-                          {([['memory', '记忆标注'], ['narrative', '叙事状态']] as const).map(([key, label]) => (
-                            <button
-                              key={key}
-                              onClick={() => setSidebarTab(key)}
-                              className={cn('hh-chip px-3 py-1 text-xs', sidebarTab === key && 'hh-chip--active')}
-                            >
-                              {label}
-                            </button>
-                          ))}
-                        </div>
-                        <div className="xl:max-h-[calc(100dvh-400px)] xl:overflow-y-auto">
-                          {sidebarTab === 'memory' ? (
-                            hasAnnotations && annotations ? (
-                              <MemorySidebar
-                                annotations={annotations.annotations}
-                                activeAnnotationId={activeAnnotationId}
-                                onAnnotationClick={(a) => handleAnnotationClick(a, 'sidebar')}
-                                scrollToAnnotation={scrollToSidebar}
-                              />
-                            ) : (
-                              <p className="py-8 text-center text-xs text-content-tertiary">暂无标注数据</p>
-                            )
-                          ) : (
-                            <NarrativeStatePanel data={narrative} loading={narrativeLoading} />
-                          )}
-                        </div>
-                      </aside>
-                    )}
-                  </div>
-                  </>
-                  )}
-                </>
-              )}
-            </section>
-          )}
+                </div>
+              </>
+            )}
+          </section>
         </div>
       )}
 
       {/* 弹窗 */}
       {projectId && (
         <ChapterEditModal
-          open={editState !== null}
+          open={creating}
           projectId={projectId}
-          editing={editState?.editing ?? null}
           defaultChapterNumber={sorted.length > 0 ? sorted[sorted.length - 1].chapter_number + 1 : 1}
-          onClose={() => setEditState(null)}
-          onSaved={(id) => {
+          onClose={() => setCreating(false)}
+          onCreated={(id) => {
             void refreshChapters();
-            if (id === selectedId) void loadSelected(id);
-            else if (!editState?.editing) selectChapter(id);
+            selectChapter(id);
           }}
         />
       )}
@@ -732,7 +654,7 @@ export default function ChapterAnalysis() {
           chapter={rewriteTarget}
           busy={streamBusy || batchRunning}
           onClose={() => setRewriteTarget(null)}
-          onConfirm={confirmRewrite}
+          onConfirm={(promptIds, mode) => void confirmRewrite(promptIds, mode)}
         />
       )}
       <BatchGenerateModal
@@ -757,11 +679,16 @@ export default function ChapterAnalysis() {
   );
 }
 
-function StatItem({ label, value }: { label: string; value: number | string }) {
+function ExplorerButton({ title, onClick, disabled, children }: { title: string; onClick: () => void; disabled?: boolean; children: ReactNode }) {
   return (
-    <div className="px-5 py-4 md:px-6">
-      <p className="text-xs text-content-tertiary">{label}</p>
-      <p className="mt-1 text-2xl font-semibold tracking-tight text-content tabular-nums">{value}</p>
-    </div>
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      aria-label={title}
+      className="flex h-8 w-8 shrink-0 items-center justify-center rounded border border-surface-border bg-white text-content-secondary hover:border-brand/50 hover:text-brand disabled:cursor-not-allowed disabled:opacity-50"
+    >
+      {children}
+    </button>
   );
 }

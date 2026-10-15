@@ -2,8 +2,8 @@
  * AI 任务事件归约（纯函数，无 React / 网络依赖）
  *
  * 把 SSE 事件流折叠成 AIJobState：progress / llm 取最新，stage 按 name、tool_call 按 call_id 合并，
- * reference 追加，content 累积，result / done / error 落终态。桥段填充等场景级事件（partial / bridges /
- * meta）不进状态，由页面通过 aiJobsStore.subscribe 自行处理；这里只更新 lastSeq。
+ * reference 追加，content 累积，result / done / error 落终态。场景级事件（partial / meta / 助笔的
+ * plan、member_message 等）不进状态，由页面通过 aiJobsStore.subscribe 自行处理；这里只更新 lastSeq。
  */
 import type {
   AIJobLLMEvent,
@@ -119,7 +119,7 @@ export function applyEvent(state: AIJobState, m: SSEMessage, now: number = Date.
       return next;
     }
     case 'thinking': {
-      // 桥段填充等场景级思考计数（无模型名）：归一到 llm 行
+      // 场景级思考计数（无模型名）：归一到 llm 行
       const contentChars = num(m.content_chars);
       next.llm = {
         model: state.llm?.model ?? '',

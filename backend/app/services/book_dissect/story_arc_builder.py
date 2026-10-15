@@ -1,4 +1,4 @@
-"""拆书 V5 S2：滚动窗口喂拆书卡（不喂正文），识别自然闭合的情节单元。
+"""拆书 S2：滚动窗口喂拆书卡（不喂正文），识别自然闭合的剧情单元（一件完整的事）。
 
 - 窗口从第一张未消费的卡开始取 window_new 张（由 batch_planner.plan_arc_window 按模型上下文 / Max Tokens 规划，
   大模型一轮几十张；未闭合的尾部自然留在下一窗口开头）；单元 ≤ max_arc_len 章
@@ -16,11 +16,11 @@ import logging
 from typing import Any, Callable, Optional, Sequence
 
 from app.services.book_dissect.prompts_v5 import ARC_PROMPT, SYSTEM_ARC
-from app.services.book_dissect.v5_types import ChapterCard, StoryArc, normalize_chapter_roles
+from app.services.book_dissect.v5_types import NO_PAYOFF, ChapterCard, StoryArc, normalize_chapter_roles
 from app.utils.json_cleaner import safe_parse_json
 
 logger = logging.getLogger(__name__)
-_LOG = "[拆书V5-情节单元]"
+_LOG = "[拆书-剧情单元]"
 
 OnWindow = Callable[[int, int, int], None]
 
@@ -75,7 +75,7 @@ class StoryArcBuilder:
         try:
             resp = await self.ai_service.generate_text_stream_collect(
                 prompt=prompt, system_prompt=SYSTEM_ARC, temperature=self.DEFAULT_TEMPERATURE,
-                context="拆书V5-情节单元",
+                context="拆书-剧情单元",
             )
         except Exception as exc:
             logger.warning("%s 窗口 %d-%d LLM 失败: %s", _LOG, window[0].chapter_number, window[-1].chapter_number, exc)
@@ -131,13 +131,13 @@ class StoryArcBuilder:
         return StoryArc(
             start_chapter=chapters[0], end_chapter=chapters[-1],
             title=f"第{chapters[0]}-{chapters[-1]}章过渡情节",
-            function="阶段推进（规则兜底：模型未识别出自然边界）",
+            function="推进（规则兜底：模型未识别出自然边界）",
             boundary_reason="窗口达到上限或范围结束，按拆书卡兜底收束",
-            structure="；".join(f"第{c.chapter_number}章 {c.outline[:120]}" for c in window),
-            protagonist_chain=" -> ".join(c.protagonist_delta for c in window if c.protagonist_delta != "无"),
+            story="；".join(f"第{c.chapter_number}章 {c.outline[:120]}" for c in window),
+            turn=" -> ".join(c.protagonist_delta for c in window if c.protagonist_delta != "无"),
             emotion_curve=" -> ".join(c.emotion_tone for c in window if c.emotion_tone),
-            payoff="；".join(payoffs) if payoffs else "无强爽点，主要承担推进 / 铺垫功能",
-            payoff_type="无强爽点",
+            payoff="；".join(payoffs) if payoffs else "没有明显高点，主要承担推进 / 铺垫",
+            payoff_type=NO_PAYOFF,
             chapter_roles=normalize_chapter_roles({}, chapters, peak),
             tension_peak_chapter=peak,
             origin="fallback",

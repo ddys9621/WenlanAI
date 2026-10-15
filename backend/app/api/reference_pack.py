@@ -434,7 +434,7 @@ def _infer_default_dimensions(strength: str) -> List[str]:
 
     - light: 仅文风（保持极简）
     - medium: + 全书骨架 + 写法手册 + 拆书卡检索
-    - deep: 七维全开（+ 桥段库 / 人物功能谱 / 结构统计）
+    - deep: 七维全开（+ 剧情单元库 / 人物功能谱 / 结构统计）
     """
     if strength == "light":
         return ["style"]

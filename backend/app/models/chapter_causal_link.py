@@ -22,7 +22,6 @@ class ChapterCausalLink(Base):
 
     actor_ids = Column(JSON, nullable=True)
     target_ids = Column(JSON, nullable=True)
-    plot_line_id = Column(String(36), ForeignKey("plot_lines.id", ondelete="SET NULL"), nullable=True, index=True)
 
     importance_score = Column(Float, default=0.5)
     is_reversible = Column(Boolean, default=False)

@@ -178,14 +178,19 @@ def check_database_connection():
             return False, "环境变量 DATABASE_URL 未配置"
 
         ensure_sqlite_database_dir(database_url)
+        from app.utils.legacy_db import legacy_schema_reason
 
         async def test():
             engine = create_async_engine(database_url, echo=False)
-            async with engine.begin() as conn:
-                await conn.execute(text("SELECT 1"))
-            await engine.dispose()
-        asyncio.run(test())
-        return True, None
+            try:
+                async with engine.begin() as conn:
+                    await conn.execute(text("SELECT 1"))
+                    return await conn.run_sync(legacy_schema_reason)
+            finally:
+                await engine.dispose()
+        legacy = asyncio.run(test())
+        # 1.x 的旧库：启动画面直接说明，不启动后端（也就不会在旧库上建表）
+        return (False, legacy) if legacy else (True, None)
     except Exception as e:
         return False, f"数据库连接失败：{e}"
 

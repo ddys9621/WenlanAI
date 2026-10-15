@@ -11,8 +11,7 @@ from typing import Any, Optional
 
 OUTLINE_CONTRACT_FIELDS: tuple[str, ...] = (
     "title", "scene", "pov", "plot_points", "summary", "key_events", "characters_involved",
-    "narrative_tasks", "target_word_count", "bridge_position", "position_constraints",
-    "entry_state", "exit_state", "forbidden",
+    "narrative_tasks", "target_word_count", "entry_state", "exit_state", "forbidden",
 )
 
 

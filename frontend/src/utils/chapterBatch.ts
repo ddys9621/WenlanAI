@@ -9,7 +9,7 @@ export function selectBatchChapters(chapters: Chapter[], from: number, to: numbe
   return { toGenerate, skipped: inRange.length - toGenerate.length }
 }
 
-/** 服务端批量要写的章数：现有待写章节 + 超出现有章节、需要服务端自动规划（滚动展开桥段）的章节 */
+/** 服务端批量要写的章数：现有待写章节 + 超出现有章节、需要服务端按卷纲自动规划章纲的章节 */
 export function countBatchTargets(chapters: Chapter[], from: number, to: number): number {
   if (to < from) return 0
   const { toGenerate } = selectBatchChapters(chapters, from, to)

@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-_KEYS_STR = ("premise", "golden_finger", "power_system", "ultimate_goal", "opening_hook")
+_KEYS_STR = ("premise", "main_plot", "golden_finger", "power_system", "ultimate_goal", "opening_hook")
 _KEYS_LIST = ("selling_points", "main_tropes")
 
 

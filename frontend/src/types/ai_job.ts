@@ -168,11 +168,10 @@ export const AI_JOB_SUMMARY_KEYS: readonly (keyof AIJobSummary)[] = [
 ];
 
 const AI_JOB_KIND_LABELS: Record<string, string> = {
-  bridge_fill: '桥段填充',
-  bridge_expand: '桥段展开',
+  volume_plan: '卷纲规划',
+  chapter_batch: '批量写作',
   character_generate: '角色生成',
   organization_generate: '组织生成',
-  plot_lines_generate: '剧情线生成',
   plot_cards_generate: '剧情卡生成',
   chapter_generate: '正文生成',
   chapter_regenerate: '去 AI 味重写',
@@ -182,8 +181,8 @@ const AI_JOB_KIND_LABELS: Record<string, string> = {
   book_dissect: '拆书抽取',
   wizard_world_building: '向导·世界构建',
   wizard_characters: '向导·角色',
-  wizard_outline: '向导·故事大纲',
-  wizard_plot_lines: '向导·剧情线',
+  wizard_outline: '向导·总纲',
+  wizard_volumes: '向导·卷纲',
   inspiration_options: '灵感候选',
   inspiration_quick: '灵感补全',
   assistant_run: '智能助笔',

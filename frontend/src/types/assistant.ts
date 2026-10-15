@@ -60,6 +60,58 @@ export interface AssistantChapterCandidateRef {
   preview: string
 }
 
+/** 共创室成员（主编 / 世界观设定师 / 人物设计师 / 总纲策划师 / 章节策划师 / 正文作者 / 审校编辑） */
+export interface AssistantMember {
+  id: string
+  name: string
+  initials: string
+  color: string
+  responsibility: string
+  /** 该成员用的模型；null = 跟随项目模型 */
+  model: string | null
+}
+
+export interface AssistantStarter {
+  id: string
+  label: string
+  hint: string
+  message: string
+}
+
+export interface AssistantTeam {
+  members: AssistantMember[]
+  starters: AssistantStarter[]
+}
+
+/** 规划工具产出的草案卡片：作者在卡片上确认才算定稿 */
+export type AssistantPlan =
+  | {
+    kind: 'volumes'
+    title: string
+    volumes: { id: string; volume_number: number; title: string; chapter_start: number; chapter_end: number; summary: string; unit_count: number }[]
+  }
+  | {
+    kind: 'units'
+    title: string
+    volume: {
+      id: string; volume_number: number; title: string; chapter_start: number; chapter_end: number; summary: string; unit_count: number
+      units: { index: number; title: string; chapter_start: number; chapter_end: number; story: string }[]
+      threads: string[]
+    }
+  }
+  | {
+    kind: 'outlines'
+    title: string
+    volume_id: string
+    unit_index: number
+    chapters: { id: string; chapter_number: number; title: string; plot_points: string }[]
+  }
+
+export interface AssistantProgress {
+  text: string
+  next_step: { action: string; label: string; [key: string]: unknown }
+}
+
 export interface AssistantMessageView {
   id: string
   role: 'user' | 'assistant'
@@ -72,6 +124,11 @@ export interface AssistantMessageView {
   question?: AssistantQuestionCard | null
   answer?: AssistantAnswer[] | null
   page?: AssistantPageContext | null
+  plans?: AssistantPlan[]
+  /** 发言的成员（作者消息为 null） */
+  member?: AssistantMember | null
+  /** 主编交给成员处理后，成员以自己名义的回复 */
+  delegated?: boolean
 }
 
 export type AssistantCandidateStatus = 'candidate' | 'applied' | 'undone' | 'rejected'

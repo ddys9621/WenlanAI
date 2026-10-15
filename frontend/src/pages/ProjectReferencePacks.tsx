@@ -40,7 +40,7 @@ import type {
 
 const DIMENSION_LABEL: Record<ReferenceDimension, string> = {
   synopsis: '全书骨架',
-  bridges: '桥段库',
+  bridges: '剧情单元',
   style: '文风指纹',
   character_archive: '人物功能谱',
   methodology: '写法手册',

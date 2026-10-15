@@ -37,7 +37,7 @@ BATCH_CONTEXT_OVERHEAD_TOKENS = 3_000
 # 单批章节数硬上限：再大 LLM 输出对齐（章号 / 顺序）出错率明显上升
 MAX_CHAPTERS_PER_BATCH_HARD_CAP = 60
 
-# ---- 情节单元识别（S2）的滚动窗口：喂的是压缩拆书卡，不是正文 ----
+# ---- 剧情单元识别（S2）的滚动窗口：喂的是压缩拆书卡，不是正文 ----
 # 每张压缩卡（章纲 ≤400 字 + 标签 / 钩子 / 爽点 / 主角变化，英文 key）约 350 tokens
 EST_INPUT_TOKENS_PER_CARD = 350
 # 每个单元的 JSON（十几个叙述字段）约 450 tokens；单元平均 4 章 → 折算每章约 110 tokens 输出
@@ -237,7 +237,7 @@ def split_batch(indices: list[int]) -> list[list[int]]:
 
 @dataclass
 class ArcWindowPlan:
-    """情节单元识别的滚动窗口规划：每轮新进多少张拆书卡。"""
+    """剧情单元识别的滚动窗口规划：每轮新进多少张拆书卡。"""
 
     window_new: int                    # 每轮新进卡数（已夹在 ARC_WINDOW_MIN..ARC_WINDOW_HARD_CAP）
     max_by_input: int                  # 输入预算允许的卡数
@@ -253,7 +253,7 @@ class ArcWindowPlan:
 
 
 def plan_arc_window(card_count: int, *, model: Optional[str], max_tokens: Optional[int]) -> ArcWindowPlan:
-    """按模型上下文 / Max Tokens 决定情节单元识别每轮喂多少张拆书卡。
+    """按模型上下文 / Max Tokens 决定剧情单元识别每轮喂多少张拆书卡。
 
     输入侧：上下文 × SAFE_INPUT_RATIO 扣掉提示词开销，按每卡 EST_INPUT_TOKENS_PER_CARD 折算；
     输出侧：Max Tokens × 安全系数 能容纳几个单元 JSON，再乘平均单元长度换算成卡数。

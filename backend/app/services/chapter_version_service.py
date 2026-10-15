@@ -2,12 +2,14 @@
 
 手动修改、采用候选稿、恢复旧版、智能助笔回填都走 replace_chapter_content，不再有"直接覆盖、不留版本"的写法。
 版本按正文指纹去重（与上一版相同不再存），每章最多保留 MAX_VERSIONS_PER_CHAPTER 个。
+编辑器自动保存传 coalesce=True：同一写作时段（AUTOSAVE_COALESCE_MINUTES 内、上一版也是同一原因）不再逐次快照。
 content_hash 也是分析结果 / 候选稿绑定正文的指纹：正文一变，绑定在旧指纹上的派生数据就算过期。
 """
 from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import delete, select
@@ -20,6 +22,7 @@ from app.utils.text_utils import count_words
 
 MAX_VERSIONS_PER_CHAPTER = 50
 PREVIEW_CHARS = 120
+AUTOSAVE_COALESCE_MINUTES = 10
 
 
 def normalize_content(text: Optional[str]) -> str:
@@ -85,6 +88,15 @@ async def snapshot_chapter(
     return version
 
 
+async def _in_same_session(db: AsyncSession, chapter_id: str, reason: str) -> bool:
+    """上一版是同一原因、且在合并窗口内存的（SQLite CURRENT_TIMESTAMP 是 UTC）。"""
+    latest = await latest_version(db, chapter_id)
+    if latest is None or latest.reason != reason or latest.created_at is None:
+        return False
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=AUTOSAVE_COALESCE_MINUTES)
+    return latest.created_at >= cutoff
+
+
 async def replace_chapter_content(
     db: AsyncSession,
     chapter: Chapter,
@@ -93,12 +105,14 @@ async def replace_chapter_content(
     reason: str,
     note: Optional[str] = None,
     project: Optional[Project] = None,
+    coalesce: bool = False,
 ) -> ReplaceResult:
-    """替换正文：内容有实质变化时先快照旧稿；同步本章与项目字数。不提交事务。"""
+    """替换正文：内容有实质变化时先快照旧稿（coalesce 时同一写作时段只快照一次）；同步本章与项目字数。不提交事务。"""
     new_text = new_content or ""
     old_hash, new_hash = content_hash(chapter.content), content_hash(new_text)
     changed = old_hash != new_hash
-    version = await snapshot_chapter(db, chapter, reason=reason, note=note) if changed else None
+    skip = changed and coalesce and await _in_same_session(db, chapter.id, reason)
+    version = await snapshot_chapter(db, chapter, reason=reason, note=note) if changed and not skip else None
     old_wc = chapter.word_count or 0
     new_wc = count_words(new_text)
     chapter.content = new_text

@@ -69,9 +69,7 @@ BUSINESS_SLOT_TOKENS: dict[ModelTier, dict[str, int]] = {
         "system_role": 100, "system_base_style": 700,
         "project_skeleton": 600, "chapter_outline": 400,
         "project_characters": 400, "world_rules_table": 300,
-        "world_map": 120,  # bridge_planning 的 S 档离 60% 窗口只剩 150
-        "bridge_position": 500,
-        "plot_lines_with_beats": 1200,  # V4.1 方案 C：主线+节点+配额，S 档紧
+        "world_map": 120,
         "history_full": 400, "history_normal": 200, "history_brief": 160,
         "memory_topk": 400,
         "output_spec": 150,
@@ -80,8 +78,6 @@ BUSINESS_SLOT_TOKENS: dict[ModelTier, dict[str, int]] = {
         "system_role": 100, "system_base_style": 700,
         "project_skeleton": 1200, "chapter_outline": 500,
         "project_characters": 600, "world_rules_table": 400, "world_map": 400,
-        "bridge_position": 600,
-        "plot_lines_with_beats": 1800,  # V4.1 方案 C：M 档允许多节点展开
         "history_full": 400, "history_normal": 400, "history_brief": 240,
         "memory_topk": 1000,
         "output_spec": 150,
@@ -90,8 +86,6 @@ BUSINESS_SLOT_TOKENS: dict[ModelTier, dict[str, int]] = {
         "system_role": 100, "system_base_style": 700,
         "project_skeleton": 1500, "chapter_outline": 500,
         "project_characters": 800, "world_rules_table": 600, "world_map": 600,
-        "bridge_position": 600,
-        "plot_lines_with_beats": 2500,  # V4.1 方案 C：L 档可装完整其他主个节点描述
         "history_full": 400, "history_normal": 400, "history_brief": 560,
         "memory_topk": 1500,
         "output_spec": 150,
@@ -100,8 +94,6 @@ BUSINESS_SLOT_TOKENS: dict[ModelTier, dict[str, int]] = {
         "system_role": 100, "system_base_style": 700,
         "project_skeleton": 2000, "chapter_outline": 500,
         "project_characters": 1200, "world_rules_table": 800, "world_map": 800,
-        "bridge_position": 600,
-        "plot_lines_with_beats": 3500,  # V4.1 方案 C：XL 档全量装入节点描述 + 附加上下文
         "history_full": 800, "history_normal": 1000, "history_brief": 800,
         "memory_topk": 2500,
         "output_spec": 150,
@@ -119,23 +111,21 @@ MODEL_WINDOW: dict[ModelTier, int] = {
 
 
 # 输出预留（每章节生成约 4500 token 输出）
-# bridge_planning 用 (scene, tier) 二维 key 是因为 S 档模型应该生成更少的桥段
 OUTPUT_RESERVE: dict[str, int] = {
     "chapter_content":    4500,
     "scene_generation":   2000,
     "chapter_regenerate": 4500,
     "chapter_outline":    3000,  # 批量生成 N 个章纲
     "story_outline":      2000,
-    "bridge_planning":    8000,  # 75 个桥段 JSON（默认/L/XL）
+    "volume_planning":    6000,  # 全书分卷 / 一卷的剧情单元 JSON
     "character":          2000,
     "world_building":     1500,
 }
 
 # 场景 + 档位组合的输出预留覆盖（精细控制，覆盖 OUTPUT_RESERVE）
 OUTPUT_RESERVE_BY_TIER: dict[tuple[str, ModelTier], int] = {
-    # S 档窗口小，bridge_planning 只生成 ~25 个桥段
-    ("bridge_planning", "S"): 5000,
-    ("bridge_planning", "M"): 6000,
+    ("volume_planning", "S"): 4000,
+    ("volume_planning", "M"): 5000,
 }
 
 
@@ -152,7 +142,7 @@ DISSECT_LABELS: dict[str, str] = {
     "structure":         "【🏗️ 原书结构统计】",
     "synopsis":          "【📖 原书全书骨架】",
     "corpus":            "【💡 原书相关拆书卡】",
-    "bridges":           "【🌉 原书情节单元（桥段库）】",
+    "bridges":           "【🌉 原书剧情单元（学一件事的长短与节奏，不照搬情节）】",
     "character_archive": "【👥 原书人物功能谱】",
     # style 走 system 段，标签由 builder 在 system 段内自行打印
 }
@@ -169,8 +159,8 @@ SCENE_BUSINESS_TEMPLATES: dict[str, list[str]] = {
     "chapter_content": [
         # system 段：基础规则 → 拆书 style
         "system_role", "system_base_style",
-        # user 段：业务必填 → 桥段约束 → 历史接续 → 输出要求
-        "project_skeleton", "chapter_outline", "bridge_position",
+        # user 段：业务必填 → 历史接续 → 输出要求
+        "project_skeleton", "chapter_outline",
         "history_full", "history_normal", "history_brief", "memory_topk",
         "output_spec",
     ],
@@ -182,12 +172,11 @@ SCENE_BUSINESS_TEMPLATES: dict[str, list[str]] = {
         "system_role", "system_base_style",
         "project_skeleton", "output_spec",
     ],
-    "bridge_planning": [
+    "volume_planning": [
         # system 段：基础规则
         "system_role", "system_base_style",
-        # user 段：项目骨架 → 本书角色 → 世界规则表 → 世界地图 → V4.1 方案 C 剩情线节点配额 → 输出要求
-        "project_skeleton", "project_characters", "world_rules_table", "world_map",
-        "plot_lines_with_beats", "output_spec",
+        # user 段：项目骨架 → 本书角色 → 世界规则表 → 世界地图 → 输出要求（总纲 / 卷纲由卷纲服务拼在后面）
+        "project_skeleton", "project_characters", "world_rules_table", "world_map", "output_spec",
     ],
     "scene_generation": [
         "system_role", "system_base_style",
@@ -230,13 +219,6 @@ def _make_business_slot(slot_name: str, tier: ModelTier) -> Slot:
     if slot_name == "chapter_outline":
         return Slot(slot_name, max_tokens, "user", "【本章信息】",
                     required=True, cacheable=False, cache_tier="chapter")
-    if slot_name == "bridge_position":
-        return Slot(slot_name, max_tokens, "user", "【🎯 桥段位置约束】",
-                    cacheable=False, cache_tier="chapter")
-    if slot_name == "plot_lines_with_beats":
-        # V4.1 方案 C：项目级缓存（同一项目 bridge_planning 调用间剩情线不变）
-        return Slot(slot_name, max_tokens, "user",
-                    cacheable=True, cache_tier="project")
     if slot_name in ("project_characters", "world_rules_table", "world_map"):
         # 项目自有资料：同一项目内不变 → 项目级缓存；空表 → 跳过
         return Slot(slot_name, max_tokens, "user",
@@ -276,9 +258,7 @@ def _make_dissect_slot(dim: str, strength: Strength) -> Slot:
                     label=DISSECT_LABELS.get(dim, ""),
                     cacheable=False, cache_tier="chapter")
     if dim in ("bridges", "character_archive"):
-        # 桥段范本和角色档案按章节动态选（基于 bridge_position）
-        # bridges 在章节场景按位置选不缓存；其他场景缓存
-        # 简化：均设为 chapter 不缓存
+        # 剧情单元范本和人物功能谱：均设为 chapter 不缓存
         return Slot(f"dissect_{dim}", max_tokens, "user",
                     label=DISSECT_LABELS.get(dim, ""),
                     cacheable=False, cache_tier="chapter")
@@ -307,7 +287,7 @@ def _compose_blueprint(scene: str, tier: ModelTier) -> list[Slot]:
 
     顺序规则：
     1. system 段：system_role → system_base_style → dissect_style（如启用）
-    2. user 段：project_skeleton → [synopsis 靠前] → chapter_outline → bridge_position
+    2. user 段：project_skeleton → [synopsis 靠前] → chapter_outline
                 → 其他拆书维度 → history → memory → [corpus 末尾] → output_spec
     """
     business_slots = [
@@ -349,13 +329,11 @@ def _compose_blueprint(scene: str, tier: ModelTier) -> list[Slot]:
         else:
             user_combined.insert(0, synopsis_slot)
 
-    # 其他拆书维度插在 bridge_position 之后（如没 bridge_position，则在 chapter_outline 之后）
+    # 其他拆书维度插在 chapter_outline 之后
     other_dissect = [s for s in user_dissect
                      if s.name not in ("dissect_synopsis", "dissect_corpus")]
     if other_dissect:
-        anchor = find_idx(user_combined, "bridge_position")
-        if anchor is None:
-            anchor = find_idx(user_combined, "chapter_outline")
+        anchor = find_idx(user_combined, "chapter_outline")
         if anchor is None:
             anchor = find_idx(user_combined, "project_skeleton")
         if anchor is None:

@@ -8,7 +8,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from asyncio import Lock
-from typing import Optional
+from typing import Any, Optional
 
 from app.config import settings as app_settings
 from app.database import get_db
@@ -51,10 +51,10 @@ from app.services.chapter_context_service import (
     build_character_context,
     build_outline_window,
     build_query_text,
-    hook_policy_for,
-    is_final_payoff,
     parse_json_list,
 )
+from app.services.volume_context import fetch_volume_context, render_structure
+from app.services.volume_context import hook_policy as volume_hook_policy
 from app.services.chapter_prompt_builder import ChapterPromptInput, build_chapter_prompt, build_continuation_prompt
 from app.services.adherence_review_service import has_reviewable_contract, review_candidate
 from app.services.chapter_candidate_service import create_candidate
@@ -616,13 +616,17 @@ async def update_chapter(
     update_data = chapter_update.model_dump(exclude_unset=True)
     content_given = "content" in update_data
     new_content = update_data.pop("content", None)
+    base_hash = update_data.pop("base_hash", None)
+    # 编辑器自动保存带 base_hash：正文在别处被改过（采用候选稿 / 恢复旧版 / 另一个窗口）就拒绝，不覆盖
+    if content_given and base_hash is not None and base_hash != content_hash(chapter.content):
+        raise HTTPException(status_code=409, detail="正文在别处被改过（如采用了候选稿或在其他窗口编辑），请先载入最新内容")
     for field, value in update_data.items():
         setattr(chapter, field, value)
 
     # 正文变化：旧稿先进历史版本，再写新稿并同步字数（含清空为 "" 的场景）。
-    # 局部手改不清分析，分析结果靠正文指纹判过期，生成前预检会提醒重新分析
+    # 自动保存（带 base_hash）同一写作时段只留一个版本；局部手改不清分析，分析结果靠正文指纹判过期，生成前预检会提醒重新分析
     if content_given:
-        await replace_chapter_content(db, chapter, new_content, reason="manual_edit")
+        await replace_chapter_content(db, chapter, new_content, reason="manual_edit", coalesce=base_hash is not None)
 
     await db.commit()
     await db.refresh(chapter)
@@ -1636,30 +1640,14 @@ async def run_chapter_generation(job, *, chapter_id: str, user_id: str, ai_servi
             logger.warning(f"[R5-章节正文] 拆书参考注入失败（已跳过）: {_e}")
             st_ref.skip("注入失败，已跳过")
 
-        # 桥段位置约束 → 本章任务里的「结构要求」（不再塞进参考资料）
-        structure_requirements = ""
-        st_bridge = None
-        _bridge_ctx = None
-        try:
-            from app.services.reference_pack import build_v4_bridge_constraint_only, fetch_bridge_context
-            if getattr(chapter_outline, "bridge_id", None):
-                st_bridge = begin_stage("bridge_constraint", "桥段位置约束")
-                _bridge_ctx = await fetch_bridge_context(db_session, chapter_outline)
-                if _bridge_ctx:
-                    structure_requirements = await build_v4_bridge_constraint_only(
-                        db_session, project.id,
-                        scene="chapter_content",
-                        model_name=getattr(ai_service, "default_model", None) or "deepseek-v3",
-                        bridge_position=chapter_outline.bridge_position,
-                        bridge_context=_bridge_ctx,
-                        chapter_outline_id=chapter_outline.id,
-                        target_word_count=target_word_count,
-                    )
-                st_bridge.done(position=chapter_outline.bridge_position, injected=bool(structure_requirements))
-        except Exception as _be:  # pragma: no cover
-            logger.warning(f"[V4.1 K2] 桥段约束注入失败（已跳过）: {_be}")
-            if st_bridge is not None:
-                st_bridge.skip("注入失败，已跳过")
+        # 本章在卷纲中的位置（卷 → 剧情单元 → 第几章）→ 本章任务里的「结构要求」（软指导，不规定比例）
+        st_volume = begin_stage("volume_position", "卷纲位置")
+        _volume_ctx = await fetch_volume_context(db_session, chapter_outline)
+        structure_requirements = render_structure(_volume_ctx)
+        if _volume_ctx is None:
+            st_volume.skip("本章没有挂卷纲")
+        else:
+            st_volume.done(volume=_volume_ctx.volume_number, unit_position=f"{_volume_ctx.index}/{_volume_ctx.size}")
 
         st_prompt = begin_stage("prompt", "上下文预算 / 组装提示词")
         prompt = build_chapter_prompt(ChapterPromptInput(
@@ -1678,8 +1666,7 @@ async def run_chapter_generation(job, *, chapter_id: str, user_id: str, ai_servi
             linked_cards=linked_cards_context,
             narrative_tasks=render_narrative_tasks(planned_tasks_raw, chapter_number),
             structure_requirements=structure_requirements,
-            hook_policy=hook_policy_for(chapter_outline.bridge_position, project.c3_hook_style,
-                                        final_payoff=is_final_payoff(_bridge_ctx)),
+            hook_policy=volume_hook_policy(_volume_ctx),
             story_so_far=smart_context.get('story_skeleton', ''),
             recent_summaries=smart_context.get('recent_summary', ''),
             relevant_history=smart_context.get('relevant_history', ''),
@@ -1829,7 +1816,16 @@ async def batch_generate_chapters(
     await verify_project_access(project_id, user_id, db)
     if batch_request.to_chapter < batch_request.from_chapter:
         raise HTTPException(status_code=400, detail="结束章号不能小于起始章号")
-    options = BatchOptions(**batch_request.model_dump())
+    try:
+        job = await start_batch_job(project_id=project_id, user_id=user_id, ai_service=user_ai_service,
+                                    options=BatchOptions(**batch_request.model_dump()))
+    except AIJobConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return job_sse_response(job)
+
+
+async def start_batch_job(*, project_id: str, user_id: str, ai_service: Any, options: BatchOptions, manager: Any = None):
+    """启动服务端批量写作任务（批量接口与共创室「写正文」工具共用）；同项目已有正文任务 → AIJobConflictError。"""
 
     async def runner(job):
         extra: dict = {}
@@ -1849,27 +1845,23 @@ async def batch_generate_chapters(
                 "analyze_kwargs": {"engine": isolated},
             }
         try:
-            return await run_batch(job, project_id=project_id, user_id=user_id, ai_service=user_ai_service,
+            return await run_batch(job, project_id=project_id, user_id=user_id, ai_service=ai_service,
                                    options=options, session_factory=job_session_factory(user_id), **extra)
         finally:
             if isolated is not None:
                 await isolated.dispose()
 
-    try:
-        job = await ai_jobs.start(
-            kind=BATCH_KIND,
-            title=f"批量生成第 {batch_request.from_chapter}-{batch_request.to_chapter} 章",
-            user_id=user_id,
-            project_id=project_id,
-            scope=f"chapter_write:{project_id}",
-            runner=runner,
-            cancel_message=BATCH_CANCELLED_MESSAGE,
-            meta={"from_chapter": batch_request.from_chapter, "to_chapter": batch_request.to_chapter,
-                  "pipeline": options.pipeline},  # 运行时拿不到独立连接会改成 False
-        )
-    except AIJobConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
-    return job_sse_response(job)
+    return await (manager or ai_jobs).start(
+        kind=BATCH_KIND,
+        title=f"批量生成第 {options.from_chapter}-{options.to_chapter} 章",
+        user_id=user_id,
+        project_id=project_id,
+        scope=f"chapter_write:{project_id}",
+        runner=runner,
+        cancel_message=BATCH_CANCELLED_MESSAGE,
+        meta={"from_chapter": options.from_chapter, "to_chapter": options.to_chapter,
+              "pipeline": options.pipeline},  # 运行时拿不到独立连接会改成 False
+    )
 
 
 @router.post("/{chapter_id}/generate-stream", summary="AI创作章节内容（流式）")

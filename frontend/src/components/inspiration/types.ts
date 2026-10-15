@@ -41,7 +41,7 @@ export interface GenerationSteps {
   worldBuilding: GenStepStatus;
   characters: GenStepStatus;
   outline: GenStepStatus;
-  plotLines: GenStepStatus;
+  volumes: GenStepStatus;
 }
 
 type StallLevel = 'none' | 'slow' | 'stalled';
@@ -130,7 +130,7 @@ export const createInitialState = (): WizardState => ({
   projectTitle: '',
   progress: 0,
   progressMessage: '',
-  generationSteps: { worldBuilding: 'pending', characters: 'pending', outline: 'pending', plotLines: 'pending' },
+  generationSteps: { worldBuilding: 'pending', characters: 'pending', outline: 'pending', volumes: 'pending' },
   generationMeta: { startedAt: null, lastUpdateAt: null, elapsedSec: 0, chunks: 0, stallLevel: 'none' },
   refinementContexts: {},
   retryContext: null,

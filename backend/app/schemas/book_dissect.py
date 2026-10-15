@@ -2,7 +2,7 @@
 
 V1 采样式结果 schema（DissectResult / DissectProjectSchema 等）已随 V1 逻辑一同移除；
 V2-V4 的浏览 schema（章节事实 / 字典 / 实体 / 关系 / 事件 / 概览）随实体图谱抽取核心一并移除。
-前端只渲染 V5 视图（拆书卡 / 情节单元 / 参考包），老任务只读展示参考包。
+前端渲染拆书卡 / 剧情单元 / 参考包。
 """
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ class BookDissectTaskResponse(BaseModel):
     chapters_meta: Optional[List[ChapterMetaSchema]] = None
 
     # 引擎版本字段：老任务 2（V2-V4 知识图谱抽取，只读）；新任务统一为 5
-    version: int = Field(default=2, description="拆书引擎版本：2 = V2-V4 老引擎；5 = V5 拆书卡 / 情节单元 / 骨架")
+    version: int = Field(default=5, description="拆书流水线版本")
     extraction_phase: Optional[str] = Field(
         default=None,
         description="细粒度阶段：V5 为 splitting/cards/arcs/skeleton/style/pack/done；V2 老任务为 scanning/dictionary/extracting/aggregating/synthesizing",
@@ -96,18 +96,6 @@ class BookDissectUploadResponse(BaseModel):
 
 
 # ============================================================
-# 应用到向导请求 —— V3 R6 已废弃
-# ============================================================
-# ApplyToWizardRequest / ApplyToWizardResponse 已随 R6 移除。
-# 端点 POST /api/book-dissect/{task_id}/apply-to-wizard 现统一返 410 Gone，
-# 详见 @/backend/app/api/book_dissect.py 的 DEPRECATION_DETAIL。
-#
-# V1 采样式抽取 schema（DissectResult / DissectProjectSchema / DissectWorldSchema /
-# DissectCharacterSchema / DissectOutlineSchema / DissectStyleSchema）已同步随 V1 逻辑移除。
-# 老版 result_json 在 BookDissectTaskResponse 不再返回。
-
-
-# ============================================================
 # 启动抽取 / 分批预估
 # ============================================================
 
@@ -142,9 +130,9 @@ class ExtractionPlanResponse(BaseModel):
     context_window: int = Field(default=0, description="模型上下文窗口（0 = 未知，已按保守值规划）")
     max_tokens: int = Field(default=0, description="用户 Max Tokens 设置")
     dictionary_calls: int = Field(..., description="字典分类 LLM 调用次数；V5 流水线不做字典分类，恒为 0（保留字段兼容前端）")
-    post_calls: int = Field(..., description="拆书卡之后的 LLM 调用估算：情节单元 + 阶段划分 + 骨架 / 人物谱 / 手册 + 文风定性与例句")
-    arc_calls: int = Field(default=0, description="其中情节单元识别的轮数 = ceil(目标章数 / arc_window)")
-    arc_window: int = Field(default=0, description="情节单元识别每轮喂的拆书卡数（按模型上下文 / Max Tokens 规划，8-60）")
+    post_calls: int = Field(..., description="拆书卡之后的 LLM 调用估算：剧情单元 + 分卷 + 骨架 / 人物谱 / 手册 + 文风定性与例句")
+    arc_calls: int = Field(default=0, description="其中剧情单元识别的轮数 = ceil(目标章数 / arc_window)")
+    arc_window: int = Field(default=0, description="剧情单元识别每轮喂的拆书卡数（按模型上下文 / Max Tokens 规划，8-60）")
     estimated_llm_calls: int = Field(
         ..., description="预计 LLM 调用总数下限 = batch_count + post_calls（不含批失败拆半重试与 JSON 二次修复）",
     )
@@ -152,7 +140,7 @@ class ExtractionPlanResponse(BaseModel):
 
 
 # ============================================================
-# V5：拆书卡 / 情节单元
+# 拆书卡 / 剧情单元
 # ============================================================
 
 
@@ -193,7 +181,7 @@ class ChapterCardDetail(BaseModel):
 
 
 class StoryArcSchema(BaseModel):
-    """情节单元（v5_types.StoryArc 字段）。"""
+    """剧情单元（v5_types.StoryArc 字段）：一件完整的事。"""
     model_config = ConfigDict(extra="ignore")
     arc_index: int
     start_chapter: int
@@ -201,12 +189,13 @@ class StoryArcSchema(BaseModel):
     title: str = ""
     function: str = ""
     boundary_reason: str = ""
+    story: str = ""
     structure: str = ""
-    protagonist_chain: str = ""
+    approach: str = ""
+    turn: str = ""
     emotion_curve: str = ""
     payoff: str = ""
-    payoff_type: str = "无强爽点"
-    golden_finger_usage: str = "无"
+    payoff_type: str = "缓和过渡"
     character_changes: str = ""
     gains_costs: str = ""
     foreshadowing: str = ""

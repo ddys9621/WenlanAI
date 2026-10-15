@@ -31,3 +31,8 @@ class AuthorAnswer(BaseModel):
 
 class AssistantAnswerRequest(BaseModel):
     answers: List[AuthorAnswer] = Field(..., min_length=1, max_length=3)
+
+
+class AssistantTeamModelRequest(BaseModel):
+    """共创室成员的模型；空串 / null = 跟随项目模型。"""
+    model: Optional[str] = Field(None, max_length=100)

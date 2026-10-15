@@ -1,7 +1,9 @@
 """全局智能助笔 · 全书工具（参考岚笺：工具随打开的作品开放，当前页面不是权限边界；只开放受控工具）。
 
 没有任意文件 / 数据库 / 删除 / 保存工具：修改只能 propose_edit 生成候选（作者应用才写入），
-正文只能交给 manuscript（产出章节候选稿），提问用 ask_author 暂停等待作者回答。
+正文只能交给 manuscript（产出章节候选稿）或 write_chapters（后台批量写已确认的章纲），提问用 ask_author 暂停等待作者回答。
+共创室：每位成员只能用自己职责内的工具（cocreation_team.Member.tools）；规划工具（分卷 / 细化 / 单元章纲）只产出草稿，
+并推送「草案卡片」让作者确认。
 """
 from __future__ import annotations
 
@@ -19,17 +21,25 @@ from app.models.chapter_candidate import ChapterCandidate
 from app.models.chapter_outline import ChapterOutline
 from app.models.character import Character
 from app.models.project import Project
+from app.models.project_reference_pack import ProjectReferencePack
+from app.models.reference_pack import ReferencePack
 from app.models.story_outline import StoryOutline
 from app.models.world_map import WorldMapLocation
+from app.models.volume import Volume
 from app.services import assistant_candidate_service as cands
 from app.services import assistant_fields as fields
+from app.services import cocreation_team as team
+from app.services import volume_service as volumes
 from app.services.assistant_checks_service import project_checks
 from app.services.assistant_persistence import PersistError, write_verified
+from app.services.planning_context import clip
+from app.services.reference_pack.dimension_compressor import compress_dimension
+from app.services.story_progress import progress_snapshot
 from app.services.writing_assistant_service import SELECTION_SKILLS, SKILL_LABELS, execute_skill
 
 PAGES = {
     "world-setting": "世界设定", "world-rules": "世界规则", "world-map": "世界地图", "characters": "角色与组织",
-    "relationships": "关系管理", "outline": "故事大纲", "plot-bridges": "桥段规划", "chapter-analysis": "章节写作",
+    "relationships": "关系管理", "outline": "谋篇（总纲 / 卷纲 / 章纲）", "chapter-analysis": "章节写作",
     "writing-styles": "写作风格", "memories": "记忆系统",
 }
 
@@ -49,6 +59,21 @@ TOOLS: dict[str, tuple[str, str, str]] = {
     "ask_author": ("向作者提问", "需要作者做决定、选方案或补充信息时提问并等待回答（最多 3 个问题；单选 / 多选至少 2 个选项）",
                    '{"questions": [{"id": "q1", "prompt": "问题", "mode": "single|multiple|text", '
                    '"options": [{"id": "a", "label": "选项", "recommended": true}]}]}'),
+    "story_progress": ("查看创作进度", "总纲 / 卷纲 / 章纲 / 正文各到哪一步，以及建议的下一步", "{}"),
+    "read_reference": ("查看拆书参考", "读本书挂载的拆书参考：原书的全书骨架 / 剧情单元 / 写法手册 / 结构统计 / 人物功能谱 / 文风"
+                                     "（只学结构、节奏和写法，不照搬人物、设定与情节）",
+                       '{"dimension": "synopsis|bridges|methodology|structure|character_archive|style", '
+                       '"detail": "可选 light|medium|deep，默认 medium"}'),
+    "plan_volumes": ("按总纲分卷", "按总纲把全书（已写章纲之后的部分）分卷，产出卷纲草稿（已有章纲的卷保留）",
+                     '{"chapter_count": 可选全书章数, "volume_count": 可选卷数, "instruction": "可选，作者对分卷的要求"}'),
+    "detail_volume": ("细化卷纲", "把某一卷拆成剧情单元并编排线索，产出草稿（本卷已有章纲时不能重拆）",
+                      '{"volume_number": 1, "instruction": "可选要求"}'),
+    "plan_chapters": ("生成单元章纲", "把某卷的某个剧情单元展开为章纲（只补缺的章），产出待确认的章纲",
+                      '{"volume_number": 1, "unit_index": 1, "instruction": "可选要求"}'),
+    "write_chapters": ("写正文", "在后台批量写一段章节的正文（只写作者已确认的章纲，遇到未确认的会停下）",
+                       '{"from_chapter": 1, "to_chapter": 3}'),
+    "delegate": ("交给成员", "把一件具体的事交给某位成员处理，拿到他的结果后再决定下一步（只有主编能用）",
+                 '{"member": "world|character|outline|chapter|writer|reviewer", "task": "要他做的事，写清楚范围和要求"}'),
 }
 SEARCH_LIMIT = 8
 EXCERPT = 60
@@ -67,6 +92,10 @@ class ToolContext:
     read_targets: set = field(default_factory=set)
     candidates: list = field(default_factory=list)
     chapter_candidates: list = field(default_factory=list)
+    user_id: Optional[str] = None
+    member_id: str = team.DEFAULT_MEMBER
+    model: Optional[str] = None
+    plans: list = field(default_factory=list)
 
 
 @dataclass
@@ -284,10 +313,150 @@ async def _ask_author(_ctx: ToolContext, args: dict) -> ToolOutcome:
     return ToolOutcome(True, f"向作者提问 {len(question['questions'])} 个问题", "等待作者回答。", question=question)
 
 
+# ---------------- 共创：进度与规划 ----------------
+
+DRAFT_NOTE = "这些是草稿：作者在对话里的草案卡片或谋篇页确认后才算定稿，现在不要说已经定好了。"
+
+
+def _int_arg(args: dict, key: str, required: bool = True) -> Optional[int]:
+    value = args.get(key)
+    if value in (None, ""):
+        if required:
+            raise ToolError(f"缺少参数 {key}")
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        raise ToolError(f"参数 {key} 应是整数")
+    if number < 1:
+        raise ToolError(f"参数 {key} 应大于 0")
+    return number
+
+
+def _emit_plan(ctx: ToolContext, plan: dict) -> None:
+    ctx.plans.append(plan)
+    ctx.emit({"type": "plan", "plan": plan})
+
+
+def _volume_card(v: dict) -> dict:
+    return {"id": v["id"], "volume_number": v["volume_number"], "title": v["title"], "chapter_start": v["chapter_start"],
+            "chapter_end": v["chapter_end"], "summary": clip(v["summary"], 160), "unit_count": len(v["units"])}
+
+
+async def _volume_by_number(ctx: ToolContext, number: int) -> Volume:
+    volume = (await ctx.db.execute(
+        select(Volume).where(Volume.project_id == ctx.project_id, Volume.volume_number == number)
+    )).scalars().first()
+    if volume is None:
+        raise ToolError(f"本书还没有第 {number} 卷：先用 story_progress 看看现有的卷")
+    return volume
+
+
+async def _story_progress(ctx: ToolContext, _args: dict) -> ToolOutcome:
+    snapshot = await progress_snapshot(ctx.db, ctx.project_id)
+    return ToolOutcome(True, f"下一步：{snapshot['next_step']['label']}", snapshot["text"])
+
+
+REFERENCE_DIMENSIONS = {
+    "synopsis": "全书骨架", "bridges": "剧情单元", "methodology": "写法手册",
+    "structure": "结构统计", "character_archive": "人物功能谱", "style": "文风",
+}
+
+
+async def _read_reference(ctx: ToolContext, args: dict) -> ToolOutcome:
+    dim = str(args.get("dimension") or "synopsis").strip()
+    if dim not in REFERENCE_DIMENSIONS:
+        raise ToolError("dimension 只能是 " + " / ".join(REFERENCE_DIMENSIONS))
+    label = REFERENCE_DIMENSIONS[dim]
+    level = str(args.get("detail") or "medium").strip()
+    level = level if level in ReferencePack.STRENGTH_LEVELS else "medium"
+    packs = (await ctx.db.execute(
+        select(ReferencePack)
+        .join(ProjectReferencePack, ProjectReferencePack.pack_id == ReferencePack.id)
+        .where(ProjectReferencePack.project_id == ctx.project_id, ReferencePack.status.in_(("ready", "partial")))
+    )).scalars().all()
+    if not packs:
+        return ToolOutcome(True, "本书没有挂载拆书参考",
+                           "本书没有挂载可用的拆书参考包；作者可以在「参考库」把拆好的书挂到这个项目上。")
+    parts = []
+    for pack in packs:
+        text = pack.get_precompressed(dim, level) or compress_dimension(getattr(pack, f"{dim}_json", None), dim, level)
+        if text:
+            parts.append(f"《{pack.source_book_title}》\n{text}")
+    if not parts:
+        return ToolOutcome(True, f"参考包里没有「{label}」", f"挂载的参考包都没有生成「{label}」这一项。")
+    body = "（以下是原书的拆解：只学它的结构、节奏和写法，不要照搬人物、设定和情节）\n\n" + "\n\n".join(parts)
+    return ToolOutcome(True, f"读了 {len(parts)} 本参考书的「{label}」", clip(body, DATA_LIMIT))
+
+
+async def _plan_volumes(ctx: ToolContext, args: dict) -> ToolOutcome:
+    created = await volumes.generate_skeleton(
+        ctx.db, ctx.project_id, ctx.ai_service, total_chapters=_int_arg(args, "chapter_count", False),
+        volume_count=_int_arg(args, "volume_count", False), instruction=_text(args, "instruction", 2000, False),
+        model=ctx.model,
+    )
+    cards = [_volume_card(volumes.volume_to_dict(v)) for v in created]
+    _emit_plan(ctx, {"kind": "volumes", "title": f"分卷草案：{len(cards)} 卷", "volumes": cards})
+    lines = [f"- 第{c['volume_number']}卷《{c['title']}》第 {c['chapter_start']}-{c['chapter_end']} 章：{c['summary']}" for c in cards]
+    return ToolOutcome(True, f"分了 {len(cards)} 卷（草稿）", "\n".join([*lines, DRAFT_NOTE]))
+
+
+async def _detail_volume(ctx: ToolContext, args: dict) -> ToolOutcome:
+    volume = await _volume_by_number(ctx, _int_arg(args, "volume_number"))
+    volume = await volumes.detail_volume(ctx.db, volume.id, ctx.ai_service,
+                                         instruction=_text(args, "instruction", 2000, False), model=ctx.model)
+    view = volumes.volume_to_dict(volume)
+    units = [{"index": u["index"], "title": u["title"], "chapter_start": u["chapter_start"],
+              "chapter_end": u["chapter_end"], "story": clip(u.get("story"), 140)} for u in view["units"]]
+    _emit_plan(ctx, {"kind": "units", "title": f"第{view['volume_number']}卷《{view['title']}》剧情单元草案",
+                     "volume": {**_volume_card(view), "units": units, "threads": view["threads"]}})
+    lines = [f"- 单元 {u['index']}《{u['title']}》第 {u['chapter_start']}-{u['chapter_end']} 章：{u['story']}" for u in units]
+    return ToolOutcome(True, f"第{view['volume_number']}卷拆成 {len(units)} 个剧情单元（草稿）", "\n".join([*lines, DRAFT_NOTE]))
+
+
+async def _plan_chapters(ctx: ToolContext, args: dict) -> ToolOutcome:
+    volume = await _volume_by_number(ctx, _int_arg(args, "volume_number"))
+    unit_index = _int_arg(args, "unit_index")
+    created = await volumes.generate_unit_outlines(ctx.db, volume.id, unit_index, ctx.ai_service,
+                                                   instruction=_text(args, "instruction", 2000, False), model=ctx.model)
+    chapters = [{"id": o.id, "chapter_number": o.chapter_number, "title": o.title, "plot_points": clip(o.plot_points, 120)}
+                for o in created]
+    _emit_plan(ctx, {"kind": "outlines", "title": f"第{volume.volume_number}卷单元 {unit_index} 章纲草案（{len(chapters)} 章）",
+                     "volume_id": volume.id, "unit_index": unit_index, "chapters": chapters})
+    lines = [f"- 第{c['chapter_number']}章《{c['title']}》：{c['plot_points']}" for c in chapters]
+    return ToolOutcome(True, f"生成了 {len(chapters)} 章章纲（待确认）", "\n".join([*lines, DRAFT_NOTE]))
+
+
+async def _write_chapters(ctx: ToolContext, args: dict) -> ToolOutcome:
+    from app.api.chapters import start_batch_job
+    from app.services.ai_jobs import AIJobConflictError
+    from app.services.chapter_batch_service import BatchOptions
+
+    start, end = _int_arg(args, "from_chapter"), _int_arg(args, "to_chapter")
+    if end < start:
+        raise ToolError("to_chapter 不能小于 from_chapter")
+    if end - start + 1 > 50:
+        raise ToolError("一次最多写 50 章，分几次来")
+    if not ctx.user_id:
+        raise ToolError("没有登录信息，不能启动后台写作")
+    try:
+        job = await start_batch_job(project_id=ctx.project_id, user_id=ctx.user_id, ai_service=ctx.ai_service,
+                                    options=BatchOptions(from_chapter=start, to_chapter=end, require_confirmed_outline=True))
+    except AIJobConflictError as exc:
+        raise ToolError(f"本书已有正文任务在运行：{exc}")
+    ctx.emit({"type": "job", "job": {"id": job.id, "title": job.title, "kind": job.kind}})
+    return ToolOutcome(True, f"开始在后台写第 {start}-{end} 章",
+                       "后台批量写作已开始：只写已确认的章纲，写完的章节会自动采用并分析；进度在右下角任务托盘。"
+                       "现在正文还没写完，不要说已经写好了。")
+
+
 HANDLERS = {
     "search_project": _search_project, "list_fields": _list_fields, "read_field": _read_field,
     "propose_edit": _propose_edit, "manuscript": _manuscript, "open_page": _open_page,
-    "project_status": _project_status, "ask_author": _ask_author,
+    "project_status": _project_status, "ask_author": _ask_author, "story_progress": _story_progress,
+    "read_reference": _read_reference,
+    "plan_volumes": _plan_volumes, "detail_volume": _detail_volume, "plan_chapters": _plan_chapters,
+    "write_chapters": _write_chapters,
 }
 
 
@@ -295,15 +464,22 @@ async def execute_tool(ctx: ToolContext, name: str, args: Any) -> ToolOutcome:
     handler = HANDLERS.get(name)
     if handler is None:
         return ToolOutcome(False, f"没有这个工具：{name}", f"没有这个工具：{name}。只能用：{'、'.join(HANDLERS)}。")
+    speaker = team.member(ctx.member_id)
+    if name not in speaker.tools:
+        return ToolOutcome(False, f"{speaker.name}不能用「{tool_label(name)}」",
+                           f"这件事不在{speaker.name}的职责内（你能用：{'、'.join(speaker.tools)}）；请直接回复，建议作者找主编或对应成员。")
     if not isinstance(args, dict):
         return ToolOutcome(False, f"{tool_label(name)}：参数格式不对", "args 应是 JSON 对象。")
     try:
         outcome = await handler(ctx, args)
-    except (ToolError, fields.FieldError, ValueError) as exc:
+    except (ToolError, fields.FieldError, ValueError, volumes.VolumeConflictError) as exc:
         return ToolOutcome(False, f"{tool_label(name)}：{exc}", f"这一步没有成功：{exc}")
     outcome.data = outcome.data[:DATA_LIMIT]
     return outcome
 
 
-def tool_catalog_text() -> str:
-    return "\n".join(f"- {name}：{desc}\n  参数：{schema}" for name, (_label, desc, schema) in TOOLS.items())
+def tool_catalog_text(allowed: Optional[tuple[str, ...]] = None) -> str:
+    return "\n".join(
+        f"- {name}：{desc}\n  参数：{schema}"
+        for name, (_label, desc, schema) in TOOLS.items() if allowed is None or name in allowed
+    )

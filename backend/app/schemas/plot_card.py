@@ -40,9 +40,7 @@ class PlotCardResponse(PlotCardBase):
     created_at: datetime = Field(..., description="创建时间")
     updated_at: datetime = Field(..., description="更新时间")
     # 关联统计字段 - 统一格式
-    plot_lines: Optional[List[Dict[str, str]]] = Field(default_factory=list, description="关联的剧情线列表（用于统计）")
     chapter_outlines: Optional[List[Dict[str, str]]] = Field(default_factory=list, description="关联的章纲列表（用于统计）")
-    plot_line_count: int = Field(0, description="关联的剧情线数量")
     chapter_outline_count: int = Field(0, description="关联的章纲数量")
     # 场景生成相关字段
     generation_status: Optional[str] = Field("pending", description="场景生成状态: pending/generating/completed/rejected")

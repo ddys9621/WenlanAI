@@ -50,45 +50,47 @@ CARD_PROMPT = TASK_MARK_CARD + """
 
 
 # ============================================================
-# S2 情节单元
+# S2 剧情单元（对应卷纲里的「一件事」）
 # ============================================================
 
-TASK_MARK_ARC = "【任务：情节单元】"
+TASK_MARK_ARC = "【任务：剧情单元】"
 
-SYSTEM_ARC = """你是网文结构分析师。下面是一段连续章节的「拆书卡」（不是正文）。请从窗口第一章开始，识别已经自然闭合的「情节单元」。
-情节单元 = 一个相对完整的最小情节弧：有触发、有推进/加压、有转折或兑现、有阶段性结果。通常 2-8 章，不要按固定章数机械切。
+SYSTEM_ARC = """你是网文结构分析师。下面是一段连续章节的「拆书卡」（不是正文）。请从窗口第一章开始，识别已经自然闭合的「剧情单元」。
+剧情单元 = 一件完整的事：有起因，经过里有阻碍、选择和代价，有阶段性的结果，结束时局面发生了变化。长短按事件大小定（通常 2-8 章），不要按固定章数机械切。
 规则：
 1. 单元必须从窗口第一章开始；多个单元首尾相接，不跳章、不重叠
-2. 窗口尾部仍在铺垫/对抗中、还没有阶段性结果的，不要硬凑成单元，写进 carryover_reason
+2. 窗口尾部这件事还没有结果的，不要硬凑成单元，写进 carryover_reason
 3. 「是否最终窗口」为「是」时，尽量给尾部一个合理收束，只有明显未完成的才保留
-4. 只依据拆书卡，不引入卡里没有的内容；保留具体信息：人名、势力、地点、法宝、冲突原因、结果、钩子
-5. 只输出一个 JSON 对象，不要解释、不要 Markdown；字符串里的引号用「」，禁止换行符"""
+4. 只依据拆书卡，不引入卡里没有的内容；保留具体信息：人名、势力、地点、物品、冲突原因、结果、钩子
+5. 主角靠什么推进就如实写（选择、智谋、关系、能力、代价……）；这件事里没用到特殊能力就不要硬写
+6. 只输出一个 JSON 对象，不要解释、不要 Markdown；字符串里的引号用「」，禁止换行符"""
 
 ARC_PROMPT = TASK_MARK_ARC + """
 【窗口范围】第 {start}-{end} 章　【单元最大章数】{max_len}　【是否最终窗口】{is_final}
 
 【兑现方式词表（payoff_type 只选一个）】
-打脸 / 扮猪吃虎 / 收获机缘 / 反差揭底 / 护人 / 绝境反杀 / 以弱胜强 / 反转揭示 / 情感兑现 / 规则破局 / 无强爽点
+成长突破 / 智斗破局 / 反转揭示 / 真相揭秘 / 情感推进 / 关系转变 / 配角高光 / 打脸逆袭 / 以弱胜强 / 收获机缘 / 失去与代价 / 缓和过渡
 
-【章内位置词表（chapter_roles 的值）】intro(代入/信息差) / build(拉扯/加压) / payoff(兑现) / aftermath(善后/开启下一目标) / transition(过渡)
+【章内位置词表（chapter_roles 的值）】open(开启：起因 / 新麻烦) / advance(推进：阻碍、选择、代价) / turn(转折或兑现) / close(收束：结果与余波) / transition(过渡 / 缓和)
 
 【输出 JSON 模板（字段名一字不差）】
 {{"completed_arcs":[{{
  "start_chapter": {start},
  "end_chapter": 0,
  "title": "≤20 字短标题",
- "function": "该单元在全书中的功能：开局立足/危机铺垫/第一次爽点/打脸装逼/升级突破/资源争夺/支线开启/伏笔埋设/信息揭露/阶段收获/转场换地图…按实际填",
+ "function": "这件事在全书中的作用：开局立足 / 引出主线 / 铺设危机 / 第一次正面冲突 / 成长突破 / 关系推进 / 揭开秘密 / 转换舞台 / 阶段收获 / 缓和过渡…按实际填",
  "boundary_reason": "为什么在此闭合",
- "structure": "触发(第X章) -> 推进/加压(第X-Y章) -> 转折/兑现(第Z章) -> 收束或新困境(第W章)",
- "protagonist_chain": "目标 -> 判断 -> 行动 -> 阻碍 -> 调整 -> 结果",
- "emotion_curve": "压抑点(章) / 拉扯点(章) / 爆发点(章) / 余韵(章)",
- "payoff": "核心爽点或张力点是什么、怎么兑现；无强爽点时写它承担的功能",
+ "story": "这件事的经过（自然段，80-200 字）：起因 → 经过（阻碍、选择、代价）→ 结果",
+ "structure": "落到章：起因(第X章) -> 推进(第X-Y章) -> 转折/兑现(第Z章) -> 收束(第W章)",
+ "approach": "主角靠什么推进 / 解决：选择、智谋、关系、能力、代价…；用了特殊能力就写清怎么用、受什么限制",
+ "turn": "单元结束时局面怎样变化：处境 / 关系 / 实力 / 掌握的信息",
+ "emotion_curve": "压抑点(章) / 拉扯点(章) / 高点(章) / 余韵(章)",
+ "payoff": "这件事的高点是什么、怎么兑现；缓和过渡的单元写它承担的作用",
  "payoff_type": "词表之一",
- "golden_finger_usage": "金手指/核心优势在本单元怎么用；无则「无」",
  "character_changes": "重要角色的行动、立场、关系变化",
- "gains_costs": "收获（实力/资源/人脉/信息）与代价",
- "foreshadowing": "新埋伏笔 / 回收伏笔 / 信息差 / 抛给下一单元的困境",
- "chapter_roles": {{"{start}":"intro"}},
+ "gains_costs": "收获（实力 / 资源 / 人脉 / 信息）与代价",
+ "foreshadowing": "新埋伏笔 / 回收伏笔 / 信息差 / 抛给下一件事的困境",
+ "chapter_roles": {{"{start}":"open"}},
  "tension_peak_chapter": {start}
 }}],
 "carryover_reason": "尾部未闭合的原因；没有写「无」"}}
@@ -98,37 +100,39 @@ ARC_PROMPT = TASK_MARK_ARC + """
 
 
 # ============================================================
-# S3 阶段划分 / 全书骨架 / 人物功能谱 / 写法手册
+# S3 分卷 / 全书骨架 / 人物功能谱 / 写法手册
+# 产物与作者自己的 总纲 → 卷纲（剧情单元 + 线索）→ 章纲 一一对应，方便对照着写
 # ============================================================
 
-TASK_MARK_STAGE = "【任务：阶段划分】"
+TASK_MARK_VOLUME = "【任务：分卷】"
 TASK_MARK_SKELETON = "【任务：全书骨架】"
 TASK_MARK_CHARACTERS = "【任务：人物功能谱】"
 TASK_MARK_METHODOLOGY = "【任务：写法手册】"
 
-SYSTEM_SKELETON = """你是资深网文编辑兼写作教练。你只依据给出的结构化材料（情节单元 / 阶段 / 拆书卡 / 统计）做归纳，不编造材料里没有的情节。
+SYSTEM_SKELETON = """你是资深网文编辑兼写作教练。你只依据给出的结构化材料（剧情单元 / 分卷 / 拆书卡 / 统计）做归纳，不编造材料里没有的情节。
 只输出一个 JSON 对象，不要解释、不要 Markdown；字符串里的引号用「」，禁止换行符。"""
 
-STAGE_PROMPT = TASK_MARK_STAGE + """
-下面是一本书按顺序编号的情节单元列表（本块第 {first}-{last} 个，全书共 {total} 个；{is_final_note}）。
-请把它们划分成「阶段」（相当于卷 / 大副本）：每个阶段有一个贯穿的核心矛盾与主角目标，通常 5-15 个单元。
-{open_stage_block}
+VOLUME_PROMPT = TASK_MARK_VOLUME + """
+下面是一本书按顺序编号的剧情单元列表（本块第 {first}-{last} 个，全书共 {total} 个；{is_final_note}）。
+请把它们划分成「卷」：每卷是一个新的局面（新的舞台、对手层级或目标），有贯穿全卷的目标与冲突，卷末有高潮和把读者带进下一卷的钩子。通常 5-15 个单元一卷。
+{open_volume_block}
 规则：
-1. 阶段必须从本块第一个单元开始，首尾相接覆盖到最后一个单元，arc_start / arc_end 用单元编号
-2. 本块不是最终块时，最后一个阶段若尚未收束标 status=open；最终块所有阶段 status=closed
-3. signature_arc 写成名战 / 巅峰战对应的单元编号与一句话
+1. 卷必须从本块第一个单元开始，首尾相接覆盖到最后一个单元，arc_start / arc_end 用单元编号
+2. 本块不是最终块时，最后一卷若尚未收束标 status=open；最终块所有卷 status=closed
+3. climax 写本卷高潮对应的单元编号与一句话
+4. threads 写本卷推进的感情线 / 支线 / 伏笔，每条「名称：从哪推进到哪」；没有给 []
 
 【输出 JSON 模板】
-{{"stages":[{{"title":"阶段名","arc_start":{first},"arc_end":0,"core_conflict":"","protagonist_goal":"","key_upgrades":"实力/地位/资源的关键提升","signature_arc":"#编号 一句话","ending_hook":"阶段末悬念","status":"closed|open"}}]}}
+{{"volumes":[{{"title":"卷名","arc_start":{first},"arc_end":0,"summary":"本卷故事（自然段）","goal":"主角本卷的目标与核心冲突","climax":"#编号 一句话","ending_hook":"卷末钩子","threads":["感情线：从相识到并肩"],"growth":"主角本卷的成长与收获","status":"closed|open"}}]}}
 
-【情节单元】
+【剧情单元】
 {arc_lines}"""
 
 SKELETON_PROMPT = TASK_MARK_SKELETON + """
-根据下列阶段划分、客观统计与开头三章拆书卡，梳理这本书的全书骨架。可以出现原书专有名词（这是给作者看的结构分析，不是仿写产物）。
+根据下列分卷、客观统计与开头三章拆书卡，梳理这本书的全书骨架（相当于作者写书时的「总纲」）。可以出现原书专有名词（这是给作者看的结构分析，不是仿写产物）。
 
-【阶段划分】
-{stages_json}
+【分卷】
+{volumes_json}
 
 【客观统计】
 {stats_brief}
@@ -137,22 +141,26 @@ SKELETON_PROMPT = TASK_MARK_SKELETON + """
 {opening_cards}
 
 【输出 JSON 模板】
-{{"genre_tag":"题材标签","one_line_premise":"一句话讲清这是什么故事","main_conflict":"贯穿全书的大矛盾 + 主角为何无法回避",
- "golden_finger":{{"what":"金手指是什么","how_it_works":"怎么运作","evolution":["前期…","中期…","后期…"]}},
- "stages":[],
- "top_payoffs":[{{"stage":"所在阶段","arcs":"#编号","buildup":"压抑铺垫","trigger":"爆发/转折机制","reward":"收获与成长"}}],
- "growth_system":"主角从弱到强的路径：境界/资源/地位里程碑",
- "power_system":"力量体系/规则梳理（无则「无」）",
+{{"genre_tag":"题材标签","premise":"故事梗概（3-5 句）",
+ "main_plot":"全书主线（自然段，300-600 字）：主角在什么处境下做了什么选择、别人怎样回应、结果如何、又引出什么，一直讲到结局或目前进度",
+ "main_conflict":"贯穿全书的大矛盾 + 主角为何无法回避",
+ "golden_finger":{{"what":"主角的特殊能力 / 核心优势","how_it_works":"怎么运作","limits":"限制与代价","evolution":["前期…","中期…","后期…"]}},
+ "selling_points":["卖点 / 读者预期，一句一条"],
+ "main_tropes":["主要套路 / 看点类型"],
+ "growth_route":"主角的成长路线：实力 / 地位 / 心境的里程碑",
+ "power_system":"力量体系 / 规则梳理（无则「无」）",
+ "ultimate_goal":"主角的终极目标",
+ "volumes":[],
+ "high_points":[{{"volume":"所在卷","arcs":"#编号","setup":"铺垫","trigger":"转折或爆发的机制","result":"结果与变化"}}],
  "long_foreshadowing":[{{"setup":"埋在哪","payoff":"揭在哪","role":"作用"}}],
- "reading_promise":"卖点 / 读者预期：爽点类型、密度、情绪回报",
  "opening_strategy":"黄金三章怎么做的：第 1-3 章各干了什么、钩子在哪"}}
-top_payoffs ≤5 条、long_foreshadowing ≤8 条；stages 可原样返回或合并相邻阶段。"""
+主角没有特殊能力时 golden_finger 直接写「无」，不要硬编；high_points ≤5 条、long_foreshadowing ≤8 条、selling_points ≤5 条；volumes 可原样返回或合并相邻卷。"""
 
 CHARACTERS_PROMPT = TASK_MARK_CHARACTERS + """
-根据阶段划分、各情节单元的「角色与关系变化」以及角色出场频次，归纳这本书的人物功能谱：不是罗列人物，而是每个人物在结构里承担什么功能、作者怎么用他。
+根据分卷、各剧情单元的「角色与关系变化」以及角色出场频次，归纳这本书的人物功能谱：不是罗列人物，而是每个人物在结构里承担什么功能、作者怎么用他。
 
-【阶段划分】
-{stages_json}
+【分卷】
+{volumes_json}
 
 【角色出场频次（名字｜出场章数｜首末章）】
 {character_freq}
@@ -161,14 +169,14 @@ CHARACTERS_PROMPT = TASK_MARK_CHARACTERS + """
 {arc_changes}
 
 【输出 JSON 模板】
-{{"protagonist":{{"name":"","persona":"人设三句话","golden_finger":"","flaws_and_pressure":"缺陷与持续压力来源","growth_track":[{{"stage":"阶段名","state":"该阶段末的实力/身份/心态"}}]}},
- "allies":[{{"name":"","function_role":"导师/兄弟/红颜/工具人/见证者…","arc_span":"第X-Y章","technique":"作者怎么用这个人推剧情或衬主角"}}],
- "antagonists":[{{"name":"","tier":"小反派/阶段反派/终极反派","conflict_nature":"","escalation":"如何递进","outcome":""}}],
- "function_slots":[{{"slot":"见证者/压力来源/误导者/秩序维护者/隐藏布局者…","how_used":""}}]}}
+{{"protagonist":{{"name":"","persona":"人设三句话","advantage":"核心优势或特殊能力；没有写「无」","flaws_and_pressure":"缺陷与持续压力来源","growth_track":[{{"volume":"卷名","state":"该卷末的实力 / 身份 / 心态"}}]}},
+ "allies":[{{"name":"","function_role":"导师 / 兄弟 / 红颜 / 工具人 / 见证者…","arc_span":"第X-Y章","technique":"作者怎么用这个人推剧情或衬主角"}}],
+ "antagonists":[{{"name":"","tier":"小反派 / 卷反派 / 终极反派","conflict_nature":"","escalation":"如何递进","outcome":""}}],
+ "function_slots":[{{"slot":"见证者 / 压力来源 / 误导者 / 秩序维护者 / 隐藏布局者…","how_used":""}}]}}
 allies ≤8、antagonists ≤6、function_slots ≤6。"""
 
 METHODOLOGY_PROMPT = TASK_MARK_METHODOLOGY + """
-根据下列全书骨架、客观统计与开头三章拆书卡，反推这本书的写法手册。每一条都要有 evidence（引用章号或单元编号），writing_tips 是给作者的可执行建议（80-180 字）。
+根据下列全书骨架、客观统计与开头三章拆书卡，反推这本书的写法手册。每一条都要有 evidence（引用章号或单元编号），writing_tips 是给作者写自己的书时可执行的建议（80-180 字）。
 
 【全书骨架】
 {skeleton_json}
@@ -180,11 +188,12 @@ METHODOLOGY_PROMPT = TASK_MARK_METHODOLOGY + """
 {opening_cards}
 
 【输出 JSON 模板】
-{{"golden_finger_pattern":{{"pattern":"金手指的使用模式","evidence":"","writing_tips":""}},
- "opening_hook_pattern":{{"pattern":"开篇怎么钩住读者","evidence":"","writing_tips":""}},
- "facepunch_rhythm":{{"pattern":"压抑→兑现的节奏（几章一压、几章一放）","evidence":"","writing_tips":""}},
- "power_progression":{{"pattern":"升级颗粒度与触发方式","evidence":"","writing_tips":""}},
- "highlight_density":{{"pattern":"爽点密度与章末钩子习惯","evidence":"","writing_tips":""}}}}"""
+{{"opening_pattern":{{"pattern":"开篇怎么钩住读者","evidence":"","writing_tips":""}},
+ "volume_rhythm":{{"pattern":"分卷节奏：每卷换什么局面、卷末高潮与钩子怎么做","evidence":"","writing_tips":""}},
+ "unit_design":{{"pattern":"剧情单元怎么设计：一件事多长、起因-经过-结果怎么铺、怎么接到下一件事","evidence":"","writing_tips":""}},
+ "tension_rhythm":{{"pattern":"张弛节奏：几章一压几章一放、紧张与缓和怎么交替、兑现方式怎么换着来","evidence":"","writing_tips":""}},
+ "growth_progression":{{"pattern":"成长颗粒度：主角多久变强 / 变化一次、靠什么触发","evidence":"","writing_tips":""}},
+ "advantage_usage":{{"pattern":"特殊能力 / 核心优势怎么用：出现频率、刻意不用的时候、限制与代价；没有特殊能力就写这本书靠什么推进","evidence":"","writing_tips":""}}}}"""
 
 
 # ============================================================

@@ -59,7 +59,7 @@ export function GlobalAssistantHost({ projectId }: { projectId: string }) {
       >
         <header className="flex h-12 flex-none items-center gap-2 border-b border-surface-border bg-surface-paper px-3">
           <span className="flex items-center gap-1.5 font-serif text-sm font-semibold text-content">
-            <Sparkles className="h-4 w-4 text-brand" />智能助笔
+            <Sparkles className="h-4 w-4 text-brand" />智能助笔 · 共创室
           </span>
           <nav className="ml-2 flex rounded border border-surface-border bg-white p-0.5" aria-label="智能助笔区域">
             {MODES.map((m) => (

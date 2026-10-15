@@ -118,6 +118,8 @@ export interface Settings {
   thinking_budget_tokens?: number | null;
   /** 分析 / 实体抽取 / 剧情摘要专用模型（同一接口下的便宜快模型）；空 = 跟随主模型 */
   analysis_model?: string | null;
+  /** 编辑器行内补全专用模型（同一接口下响应快的模型）；空 = 跟随项目模型 */
+  completion_model?: string | null;
   preferences?: string;
   created_at: string;
   updated_at: string;
@@ -138,6 +140,7 @@ export interface SettingsUpdate {
   reasoning_effort?: ReasoningEffort;
   thinking_budget_tokens?: number | null;
   analysis_model?: string | null;
+  completion_model?: string | null;
   preferences?: string;
 }
 
@@ -176,12 +179,8 @@ export interface ProjectAIPreference {
   global_defaults: EffectiveAIConfig;
 }
 
-/** 桥段 C3 兑现章末尾：none 不留钩子（默认，付费文）/ soft 收束 + 半钩（免费平台章末钩子） */
-export type C3HookStyle = 'none' | 'soft';
 /** 平台预设：决定单章字数默认值、章末钩子默认值与正文写法提示 */
 export type PlatformPreset = 'qidian' | 'fanqie' | 'jinjiang' | 'qimao';
-/** 桥段节奏：varied 变长（3-12 章 + 卷内节奏曲线）/ fixed4 固定每桥段 4 章 */
-export type BridgeRhythm = 'varied' | 'fixed4';
 
 // 项目类型定义
 export interface Project {
@@ -203,10 +202,7 @@ export interface Project {
   chapter_count?: number;
   narrative_perspective?: string;
   character_count?: number;
-  c3_hook_style?: C3HookStyle | null;
   platform_preset?: PlatformPreset | null;
-  bridge_rhythm?: BridgeRhythm | null;
-  rolling_planning?: boolean | null;
   created_at: string;
   updated_at: string;
 }
@@ -228,8 +224,6 @@ export interface ProjectCreate {
   world_atmosphere?: string;
   world_rules?: string;
   platform_preset?: PlatformPreset;
-  bridge_rhythm?: BridgeRhythm;
-  rolling_planning?: boolean;
 }
 
 export interface ProjectUpdate {
@@ -247,11 +241,8 @@ export interface ProjectUpdate {
   chapter_count?: number;
   narrative_perspective?: string;
   character_count?: number;
-  c3_hook_style?: C3HookStyle;
   /** null = 通用（不套平台写法） */
   platform_preset?: PlatformPreset | null;
-  bridge_rhythm?: BridgeRhythm;
-  rolling_planning?: boolean;
   // current_words 由章节内容自动计算，不在此接口中
 }
 
@@ -358,10 +349,12 @@ export interface Chapter {
   status: 'draft' | 'writing' | 'completed';
   created_at: string;
   updated_at: string;
+  /** 正文指纹（详情 / 更新接口返回）：编辑器自动保存时作为 base_hash 回传，防止覆盖别处的修改 */
+  content_hash?: string;
   /** 列表接口附带的写作链路状态 */
   outline_changed?: boolean;           // 正文写完（采用）后章纲又改过
   outline_review_status?: 'draft' | 'confirmed' | null;  // 关联章纲：draft = AI 草拟待确认
-  outline_upstream_stale?: boolean;    // 关联章纲的上游（桥段 / 剧情线 / 故事大纲）已改
+  outline_upstream_stale?: boolean;    // 关联章纲的上游（卷纲 / 总纲）已改
   pending_candidates?: number;         // 待采用的候选稿数
 }
 
@@ -382,6 +375,8 @@ export interface ChapterUpdate {
   summary?: string;
   // word_count 自动计算，不允许手动修改
   status?: 'draft' | 'writing' | 'completed';
+  /** 编辑器自动保存：所依据的正文指纹；与服务端当前正文不符返回 409 */
+  base_hash?: string;
 }
 
 // 章节生成请求类型
@@ -494,25 +489,19 @@ export interface GenerateOutlineResponse {
   total_chapters?: number;
 }
 
-/** 向导步骤 4：剧情线生成请求（POST /api/wizard-stream/plot-lines） */
-export interface WizardPlotLinesRequest {
+/** 向导步骤 4：卷纲生成请求（POST /api/wizard-stream/volumes）：按总纲分卷 + 细化第 1 卷 */
+export interface WizardVolumesRequest {
   project_id: string;
   chapter_count: number;
-  sub_line_count?: number;
-  requirements?: string;
-  enable_mcp?: boolean;
-  selected_plugins?: string[];
-  pack_ids?: string[];
-  dimensions?: string[];
-  strength?: 'light' | 'medium' | 'deep';
+  model?: string;
 }
 
-/** 向导步骤 4：剧情线生成结果 */
-export interface WizardPlotLinesResponse {
+/** 向导步骤 4：卷纲生成结果 */
+export interface WizardVolumesResponse {
   message: string;
-  main_line: { id: string; title: string; estimated_chapters: number; beat_count: number };
-  sub_lines: Array<{ id: string; title: string }>;
-  plan_preview: { total_bridges: number; total_chapters: number };
+  chapter_count: number;
+  volumes: Volume[];
+  detailed_volume_id: string | null;
 }
 
 // 写作风格类型定义
@@ -892,10 +881,8 @@ export interface PlotCard {
   created_at: string;
   updated_at: string;
   // 关联字段（从API返回时可能包含）
-  plot_lines?: PlotLine[];
   chapter_outlines?: ChapterOutline[];
   // 统计字段
-  plot_line_count?: number;
   chapter_outline_count?: number;
 }
 
@@ -943,120 +930,91 @@ export interface PlotCardListResponse {
   items: PlotCard[];
 }
 
-// 剧情线类型定义
-export interface PlotLine {
+// 卷纲：总纲 → 卷纲（剧情单元 + 线索编排）→ 章纲
+/** 剧情单元：一件完整的事，长短按事件大小定 */
+export interface VolumeUnit {
+  index: number;
+  title: string;
+  chapter_start: number;
+  chapter_end: number;
+  /** 这件事的经过：起因 → 经过（阻碍、选择、代价）→ 结果 */
+  story: string;
+  /** 单元结束时局面怎样变化 */
+  turn: string;
+}
+
+export interface Volume {
   id: string;
   project_id: string;
-  outline_id?: string;
+  volume_number: number;
   title: string;
-  description?: string;
-  line_type: string;
-  order_index?: number;
-  plot_cards?: string[];
-  timeline_data?: TimelineData;
-  estimated_chapters?: number;  // 预计章节数
-  created_at: string;
-  updated_at: string;
-  // 关联字段（从API返回时可能包含）
-  chapter_outlines?: ChapterOutline[];
-  // 统计字段
-  chapter_outline_count?: number;
-  plot_card_count?: number;
+  chapter_start: number;
+  chapter_end: number;
+  summary: string;
+  goal: string;
+  climax: string;
+  ending_hook: string;
+  units: VolumeUnit[];
+  /** 线索编排：感情线 / 支线 / 伏笔本卷推进到哪 */
+  threads: string[];
+  /** 上一卷卷末复盘回写的修正意见 */
+  review_note: string;
+  review_status: 'draft' | 'confirmed';
+  confirmed_at?: string | null;
+  upstream_stale: boolean;
+  upstream_reason: string;
+  outline_count: number;
+  created_at?: string | null;
+  updated_at?: string | null;
 }
 
-export interface PlotLineCreate {
-  project_id: string;
-  outline_id?: string;
-  title: string;
-  description?: string;
-  line_type: string;
-  order_index?: number;
-  plot_cards?: string[];
-  timeline_data?: TimelineData;
-  estimated_chapters?: number;  // 预计章节数
+export interface VolumeListResponse {
+  items: Volume[];
+  chapter_count?: number | null;
 }
 
-export interface PlotLineUpdate {
+export type VolumeUnitInput = Pick<VolumeUnit, 'title' | 'chapter_start' | 'chapter_end' | 'story' | 'turn'>;
+
+export interface VolumeFields {
   title?: string;
-  description?: string;
-  line_type?: string;
-  order_index?: number;
-  plot_cards?: string[];
-  timeline_data?: TimelineData;
-  estimated_chapters?: number;  // 预计章节数
+  summary?: string;
+  goal?: string;
+  climax?: string;
+  ending_hook?: string;
+  review_note?: string;
+  chapter_start?: number;
+  chapter_end?: number;
+  units?: VolumeUnitInput[];
+  threads?: string[];
 }
 
-export interface PlotLineGenerateRequest {
-  project_id: string;
-  story_outline_id?: string;
-  prompt?: string;
-  line_type: string;
-  based_on_cards?: string[];
-  based_on_lines?: string[];
-  extend_existing: boolean;
-  count: number;
-  enable_mcp?: boolean;
-  selected_plugins?: string[];
+export interface VolumePlanRequest {
+  total_chapters?: number;
+  volume_count?: number;
+  instruction?: string;
+  model?: string;
 }
 
-export interface PlotLineReorderRequest {
-  orders: Array<{
-    id: string;
-    order_index: number;
-  }>;
+export interface VolumeGenerateRequest {
+  instruction?: string;
+  model?: string;
 }
 
-export interface PlotLineListResponse {
-  total: number;
-  items: PlotLine[];
+/** 卷纲规划任务的结果（skeleton → volumes；detail → volume；outlines → 章号与章纲 ID） */
+export interface VolumeJobResult {
+  action: 'skeleton' | 'detail' | 'outlines';
+  volumes?: Volume[];
+  volume?: Volume;
+  volume_id?: string;
+  unit_index?: number;
+  chapter_numbers?: number[];
+  outline_ids?: string[];
 }
 
-// 剧情线进度相关类型定义
-export interface PlotLineBeatProgress {
-  index: number;
-  key?: string;
-  title: string;
-  description?: string;
-  weight: number;
-  coverage: number;
-  status: 'completed' | 'in_progress' | 'not_started';
-}
-
-export interface PlotLineProgress {
-  plot_line_id: string;
-  plot_line_title: string;
-  has_beats: boolean;
-  total_progress: number | null;
-  beats: PlotLineBeatProgress[];
-  linked_chapters_count: number;
-  message?: string;
-}
-
-// 时间线相关类型定义
-export interface TimelineBeat {
-  index: number;
-  key: string;
-  title: string;
-  description?: string;
-  weight: number;
-}
-
-export interface TimelineData {
-  beats: TimelineBeat[];
-}
-
-// 节点覆盖度相关类型定义
-export interface BeatCoverage {
-  beat_index: number;
-  coverage: number;  // 本章对该节点的贡献度(0-1,表示0%-100%)
-}
-
-// 章纲类型定义
 // 章纲类型定义 - 专业网文版
 export interface ChapterOutline {
   id: string;
   project_id: string;
-  plot_line_id?: string;
   chapter_number: number;
   title: string;
   // 场景信息（新增）
@@ -1076,8 +1034,9 @@ export interface ChapterOutline {
   confirmed_at?: string | null;
   upstream_stale?: boolean;
   upstream_reason?: string | null;
-  bridge_id?: string | null;
-  bridge_position?: string | null;
+  /** 所属卷纲与剧情单元（NULL = 手建 / 旧数据） */
+  volume_id?: string | null;
+  unit_index?: number | null;
   // 旧字段（保留兼容）
   summary?: string;              // 已废弃，保留兼容旧数据
   // 系统字段
@@ -1086,16 +1045,15 @@ export interface ChapterOutline {
   created_at: string;
   updated_at: string;
   // 关联字段（从API返回时可能包含）
-  plot_lines?: PlotLine[];
   plot_cards?: PlotCard[];
   // 统计字段
-  plot_line_count?: number;
   plot_card_count?: number;
 }
 
 export interface ChapterOutlineCreate {
   project_id: string;
-  plot_line_id?: string;
+  volume_id?: string;
+  unit_index?: number;
   chapter_number: number;
   title: string;
   // 场景信息（新增）
@@ -1150,7 +1108,6 @@ export interface ChapterOutlineListResponse {
 
 export interface ChapterOutlineBatchCreateRequest {
   project_id: string;
-  plot_line_id?: string;
   outlines: ChapterOutlineCreate[];
 }
 
@@ -1158,33 +1115,11 @@ export interface ChapterOutlineBatchCreateRequest {
 // 关联关系类型定义
 // ============================================
 
-// 章纲-剧情线关联
-
-// 剧情卡片-剧情线关联
-
-// 剧情卡片-章纲关联
-
-// 扩展响应类型（包含关联信息）
-export interface PlotLineWithLinks {
-  id: string;
-  title: string;
-  description?: string;
-  line_type: string;
-  chapter_count: number;
-  card_count: number;
-  link_id?: string;  // 章纲-剧情线关联ID（用于更新覆盖度）
-  timeline_data?: TimelineData;  // 时间线数据
-  timeline_coverage?: {  // 节点覆盖度数据
-    beats_covered: BeatCoverage[];
-  };
-}
-
 export interface PlotCardWithLinks {
   id: string;
   title: string;
   content?: string;
   card_type: string;
-  plot_line_count: number;
   chapter_count: number;
 }
 
@@ -1264,7 +1199,7 @@ export interface BookDissectChapterMeta {
 // V1 采样式 schema（DissectResult / DissectProjectSchema 等）已随 V1 逻辑一并移除。
 
 export type BookDissectStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
-/** V5 流水线阶段：切章 → 拆书卡 → 情节单元 → 骨架 → 文风 → 参考包 */
+/** 拆书流水线阶段：切章 → 拆书卡 → 剧情单元 → 分卷 / 骨架 → 文风 → 参考包 */
 export type BookDissectStage =
   | 'split_done'
   | 'queued'
@@ -1290,7 +1225,6 @@ export interface BookDissectTask {
   chapter_count: number;
   total_words: number;
   chapters_meta?: BookDissectChapterMeta[] | null;
-  // V2 字段
   version?: number;
   extraction_phase?: string | null;
   chapters_total?: number;
@@ -1332,11 +1266,11 @@ export interface BookDissectExtractionPlan {
   context_window: number;
   max_tokens: number;
   dictionary_calls: number;
-  /** 拆书卡之后的调用估算：情节单元 + 阶段划分 + 骨架 / 人物谱 / 手册 + 文风定性与例句 */
+  /** 拆书卡之后的调用估算：剧情单元 + 分卷 + 骨架 / 人物谱 / 手册 + 文风定性与例句 */
   post_calls: number;
-  /** 其中情节单元识别的轮数 = ceil(目标章数 / arc_window) */
+  /** 其中剧情单元识别的轮数 = ceil(目标章数 / arc_window) */
   arc_calls: number;
-  /** 情节单元识别每轮喂的拆书卡数（按模型上下文 / Max Tokens 规划，8-60） */
+  /** 剧情单元识别每轮喂的拆书卡数（按模型上下文 / Max Tokens 规划，8-60） */
   arc_window: number;
   estimated_llm_calls: number;
   warnings: string[];
@@ -1352,12 +1286,8 @@ export interface BookDissectUploadResponse {
   preview: BookDissectChapterMeta[];
 }
 
-// V3 R6 废弃：BookDissectApplyField / BookDissectApplyRequest / BookDissectApplyResponse 已移除。
-// 后端 POST /api/book-dissect/{task_id}/apply-to-wizard 现返 410 Gone；
-// 请改用参考包挂载 + 一键仿写路径，详见 @/frontend/src/components/ImitationDialog.tsx。
-
 // ============================================================
-// 拆书 V5 浏览类型（拆书卡 / 情节单元）
+// 拆书浏览类型（拆书卡 / 剧情单元）
 // 后端 schema：@/backend/app/schemas/book_dissect.py
 // ============================================================
 
@@ -1396,7 +1326,7 @@ export interface BookDissectChapterCard {
   extraction_error: string | null;
 }
 
-/** 情节单元（GET /book-dissect/{id}/arcs），与参考包 bridges.typical_arcs 同形 */
+/** 剧情单元（GET /book-dissect/{id}/arcs），与参考包 bridges.typical_arcs 同形：一件完整的事 */
 export interface BookDissectStoryArc {
   arc_index: number;
   start_chapter: number;
@@ -1404,12 +1334,16 @@ export interface BookDissectStoryArc {
   title: string;
   function: string;
   boundary_reason: string;
+  /** 经过：起因 → 经过（阻碍、选择、代价）→ 结果 */
+  story: string;
   structure: string;
-  protagonist_chain: string;
+  /** 主角靠什么推进 / 解决 */
+  approach: string;
+  /** 单元结束时局面怎样变化 */
+  turn: string;
   emotion_curve: string;
   payoff: string;
   payoff_type: string;
-  golden_finger_usage: string;
   character_changes: string;
   gains_costs: string;
   foreshadowing: string;

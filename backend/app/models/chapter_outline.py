@@ -33,7 +33,7 @@ class ChapterOutline(Base):
     exit_state = Column(Text, nullable=True, comment="退出状态：最后一个关键事件完成后停在哪")
     forbidden = Column(Text, nullable=True, comment="禁止事项 JSON 列表：本章不能提前发生 / 揭晓的事")
 
-    # 确认与上游过期：保存 ≠ 确认；AI 草拟为 draft，作者确认后 confirmed；上游（桥段 / 剧情线 / 故事大纲）改了标过期
+    # 确认与上游过期：保存 ≠ 确认；AI 草拟为 draft，作者确认后 confirmed；上游（卷纲 / 总纲）改了标过期
     review_status = Column(String(20), nullable=True, comment="draft = AI 草拟待确认；confirmed / 空 = 已确认")
     confirmed_at = Column(DateTime, nullable=True)
     upstream_stale = Column(Boolean, default=False, comment="上游已修改，建议核对")
@@ -48,38 +48,19 @@ class ChapterOutline(Base):
     created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间")
 
-    # ---- V4.1 K2 桥段四章结构字段（详见 v4_design.md §3.2.2）----
-    # bridge_id NULL → 走线性章纲模式（旧数据兼容）
-    # bridge_id 非空 → 走桥段四章模式，bridge_position 决定 prompt 注入哪段位置约束
-    bridge_id = Column(
+    # ---- 卷纲归属：总纲 → 卷纲（剧情单元）→ 章纲 ----
+    volume_id = Column(
         String(36),
-        ForeignKey("plot_bridges.id", ondelete="SET NULL"),
+        ForeignKey("volumes.id", ondelete="SET NULL"),
         nullable=True,
-        comment="所属桥段（K2 桥段四章模式），NULL = 线性章纲模式",
+        index=True,
+        comment="所属卷纲；NULL = 未挂卷（作者手建）",
     )
-    bridge_position = Column(
-        String(20),
-        nullable=True,
-        comment="桥段内位置: intro/build/payoff/aftermath (对应 C1/C2/C3/C4)",
-    )
-    position_constraints = Column(
-        Text,
-        nullable=True,
-        comment=(
-            "位置约束 JSON 覆盖：{upper_word_count, lower_word_count, hook_required, "
-            "hook_type, no_hook_at_end, ...} — 不填则用默认位置规则"
-        ),
-    )
+    unit_index = Column(Integer, nullable=True, comment="所属剧情单元序号（Volume.units[].index）")
 
     # 关联关系
     project = relationship("Project", back_populates="chapter_outlines")
-    plot_line_links = relationship("ChapterOutlinePlotLineLink", back_populates="chapter_outline", cascade="all, delete-orphan")
     plot_card_links = relationship("PlotCardChapterOutlineLink", back_populates="chapter_outline", cascade="all, delete-orphan")
-    bridge = relationship(
-        "PlotBridge",
-        back_populates="chapter_outlines",
-        foreign_keys=[bridge_id],
-    )
-    
+
     def __repr__(self):
         return f"<ChapterOutline(id={self.id}, chapter_number={self.chapter_number}, title={self.title})>"

@@ -1,4 +1,4 @@
-"""拆书 V5：情节单元表。每个任务的全部单元逐条落库，供参考包「桥段库」tab 分页浏览；
+"""拆书：剧情单元表。每个任务的全部单元逐条落库，供参考包「剧情单元」tab 浏览；
 注入用的聚合（典型单元 / 分布）另存 reference_packs.bridges_json。"""
 import uuid
 
@@ -17,7 +17,7 @@ class BookDissectStoryArc(Base):
     start_chapter = Column(Integer, nullable=False)
     end_chapter = Column(Integer, nullable=False)
     title = Column(String(120), nullable=False, default="")
-    payoff_type = Column(String(20), nullable=False, default="无强爽点")
+    payoff_type = Column(String(20), nullable=False, default="缓和过渡")
     origin = Column(String(20), nullable=False, default="llm", comment="llm / fallback")
     arc_json = Column(Text, nullable=False, comment="StoryArc.to_dict() JSON")
     created_at = Column(DateTime, server_default=func.now())

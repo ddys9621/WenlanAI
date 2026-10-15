@@ -1,9 +1,8 @@
-"""拆书 V5 编排器：切章 → 拆书卡 → 情节单元 → 全书骨架 → 文风指纹 → 参考包。
+"""拆书编排器：切章 → 拆书卡（≈章纲）→ 剧情单元 → 分卷 / 全书骨架（≈卷纲 / 总纲）→ 文风指纹 → 参考包。
 
 进度切片：splitting 0-3 / cards 3-70 / arcs 70-84 / skeleton 84-93 / style 93-97 / pack 97-100。
 每批 / 每步 commit 一次，前端轮询能看细粒度进度；同时经 generation_trace 上报 progress / stage。
 失败以异常抛出（ExtractionAborted / 原异常），ai_jobs 据此标 error；用户取消 → cancelled。
-设计：agent-docs/features/book_dissect_v5_design.md §3
 """
 from __future__ import annotations
 
@@ -28,8 +27,8 @@ from app.services.book_dissect.batch_planner import (
 )
 from app.services.book_dissect.chapter_card_extractor import ChapterCardExtractionError, ChapterCardExtractor
 from app.services.book_dissect.chapter_splitter import Chapter
-from app.services.book_dissect.dissect_stats import build_bridges_payload, build_structure_stats
-from app.services.book_dissect.skeleton_builder import SkeletonBuilder, fallback_stages
+from app.services.book_dissect.dissect_stats import build_structure_stats, build_units_payload
+from app.services.book_dissect.skeleton_builder import SkeletonBuilder, fallback_volumes
 from app.services.book_dissect.story_arc_builder import StoryArcBuilder
 from app.services.book_dissect.style_fingerprint import StyleFingerprintBuilder
 from app.services.book_dissect.style_stats import compute_style_metrics, pick_even_indices
@@ -156,7 +155,7 @@ async def run_extraction_v5_background(task_id: str, user_id: str, ai_service: A
         task.stage = task.extraction_phase = "skeleton"
         await db.commit()
         stats = build_structure_stats(cards, arcs)
-        bridges_payload = build_bridges_payload(arcs, cards)
+        units_payload = build_units_payload(arcs, cards)
         skeleton, characters, methodology = await _run_skeleton(task, cards, arcs, stats, ai_service)
 
         task.stage = task.extraction_phase = "style"
@@ -164,7 +163,7 @@ async def run_extraction_v5_background(task_id: str, user_id: str, ai_service: A
         style = await _run_style(task, target, cards, ai_service)
 
         payload: dict[str, Optional[dict]] = {
-            "bridges": bridges_payload if arcs else None, "synopsis": skeleton, "style": style,
+            "bridges": units_payload if arcs else None, "synopsis": skeleton, "style": style,
             "character_archive": characters, "methodology": methodology, "structure": stats,
         }
         generated = [k for k, v in payload.items() if isinstance(v, dict)]
@@ -180,7 +179,7 @@ async def run_extraction_v5_background(task_id: str, user_id: str, ai_service: A
             "version": PIPELINE_VERSION, "pack_id": pack_id, "generated_dimensions": generated,
             "stats": {"chapters_total": task.chapters_total, "chapters_extracted": task.chapters_extracted,
                       "chapters_failed": task.chapters_failed, "arc_count": len(arcs),
-                      "stage_count": len((skeleton or {}).get("stages") or [])},
+                      "volume_count": len((skeleton or {}).get("volumes") or [])},
         }, ensure_ascii=False)
         task.status, task.progress, task.stage, task.extraction_phase, task.completed_at = "completed", 100, "done", "done", datetime.now()
         await db.commit()
@@ -313,7 +312,7 @@ async def _run_card_extraction(
 
 
 # ---------------------------------------------------------------------------
-# S2 情节单元
+# S2 剧情单元
 # ---------------------------------------------------------------------------
 
 async def _run_arc_building(db: AsyncSession, task: BookDissectTask, cards: list[ChapterCard], ai_service: AIService) -> list[StoryArc]:
@@ -322,14 +321,14 @@ async def _run_arc_building(db: AsyncSession, task: BookDissectTask, cards: list
     arc_plan = plan_arc_window(
         len(cards), model=getattr(ai_service, "default_model", None), max_tokens=getattr(ai_service, "default_max_tokens", None),
     )
-    stage = begin_stage("arcs", f"情节单元识别（每轮 {arc_plan.window_new} 章，约 {arc_plan.window_count(len(cards))} 轮）")
-    trace_progress(f"识别情节单元：每轮喂 {arc_plan.window_new} 张拆书卡，约 {arc_plan.window_count(len(cards))} 轮", task.progress)
+    stage = begin_stage("arcs", f"剧情单元识别（每轮 {arc_plan.window_new} 章，约 {arc_plan.window_count(len(cards))} 轮）")
+    trace_progress(f"识别剧情单元：每轮喂 {arc_plan.window_new} 张拆书卡，约 {arc_plan.window_count(len(cards))} 轮", task.progress)
     last_chapter = cards[-1].chapter_number
 
     def _on_window(n_arcs: int, s: int, e: int) -> None:
         ratio = min(1.0, e / max(1, last_chapter))
         _set_progress(task, int(_P_CARDS_END + ratio * (_P_ARCS_END - _P_CARDS_END)),
-                      f"识别情节单元：已到第 {e} 章，累计 {n_arcs} 个单元")
+                      f"识别剧情单元：已到第 {e} 章，累计 {n_arcs} 个单元")
 
     arcs = await StoryArcBuilder(ai_service, window_new=arc_plan.window_new).build(cards, on_window=_on_window)
     for a in arcs:
@@ -338,7 +337,7 @@ async def _run_arc_building(db: AsyncSession, task: BookDissectTask, cards: list
             title=a.title[:120], payoff_type=a.payoff_type, origin=a.origin,
             arc_json=json.dumps(a.to_dict(), ensure_ascii=False),
         ))
-    _set_progress(task, _P_ARCS_END, f"情节单元识别完成：{len(arcs)} 个（{len(cards)} 章）")
+    _set_progress(task, _P_ARCS_END, f"剧情单元识别完成：{len(arcs)} 个（{len(cards)} 章）")
     await db.commit()
     stage.done(单元=len(arcs), 兜底=sum(1 for a in arcs if a.origin == "fallback"))
     return arcs
@@ -353,18 +352,18 @@ async def _run_skeleton(
 ) -> tuple[dict[str, Any], Optional[dict[str, Any]], Optional[dict[str, Any]]]:
     stage = begin_stage("skeleton", "全书骨架")
     builder = SkeletonBuilder(ai_service=ai_service)
-    trace_progress("全书骨架：按情节单元划分阶段…", task.progress)
-    stages = await builder.build_stages(arcs) or fallback_stages(arcs)
-    _set_progress(task, _P_ARCS_END + 3, f"阶段划分完成：{len(stages)} 个阶段，归纳全书骨架 / 人物功能谱…")
+    trace_progress("全书骨架：按剧情单元分卷…", task.progress)
+    volumes = await builder.build_volumes(arcs) or fallback_volumes(arcs)
+    _set_progress(task, _P_ARCS_END + 3, f"分卷完成：{len(volumes)} 卷，归纳全书骨架 / 人物功能谱…")
     skeleton, characters = await asyncio.gather(
-        builder.build_skeleton(stages, cards, stats), builder.build_character_functions(stages, arcs, cards),
+        builder.build_skeleton(volumes, cards, stats), builder.build_character_functions(volumes, arcs, cards),
     )
     if skeleton is None:
-        skeleton = {"stages": stages, "pipeline_version": PIPELINE_VERSION, "genre_tag": "", "one_line_premise": "", "main_conflict": ""}
-        stage.note(骨架="LLM 失败，仅保留阶段划分")
+        skeleton = {"volumes": volumes, "pipeline_version": PIPELINE_VERSION, "genre_tag": "", "premise": "", "main_conflict": ""}
+        stage.note(骨架="LLM 失败，仅保留分卷")
     methodology = await builder.build_methodology(skeleton, stats, cards)
     _set_progress(task, _P_SKELETON_END, "全书骨架完成，开始文风指纹…")
-    stage.done(阶段=len(stages), 人物谱=characters is not None, 手册=methodology is not None)
+    stage.done(卷=len(volumes), 人物谱=characters is not None, 手册=methodology is not None)
     return skeleton, characters, methodology
 
 
@@ -412,7 +411,6 @@ async def _write_reference_pack_v5(db: AsyncSession, task: BookDissectTask, payl
         source_book_title=task.file_name or "未命名拆书",
         methodology_json=_dump("methodology"), style_json=_dump("style"), structure_json=_dump("structure"),
         synopsis_json=_dump("synopsis"), bridges_json=_dump("bridges"), character_archive_json=_dump("character_archive"),
-        archetypes_json=None, worldbuilding_json=None, entities_json=None, relations_json=None, events_json=None,
         pipeline_version=PIPELINE_VERSION, status=status, error_message=error,
         generated_dimensions=json.dumps(generated, ensure_ascii=False),
     )

@@ -12,7 +12,7 @@ import { ModelListPicker } from '@/components/ai-model/ModelListPicker'
 
 /**
  * 项目顶栏的「模型」chip：显示本项目实际生效的模型；点开可在设置页那套接口下为本项目覆盖模型与参数。
- * 保存后本项目内所有 AI 生成（向导 / 角色 / 大纲 / 桥段 / 正文 / 分析 / 仿写…）立即按覆盖值走
+ * 保存后本项目内所有 AI 生成（向导 / 角色 / 总纲 / 卷纲 / 正文 / 分析 / 仿写…）立即按覆盖值走
  * （请求带 X-Project-Id，后端 get_user_ai_service 合并）。
  */
 export function ProjectModelPicker({ projectId }: { projectId: string }) {

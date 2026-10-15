@@ -3,7 +3,7 @@
 - POST /api/book-dissect/upload  上传 txt/md → 切分 → 返回 task_id + 章节预览（不接 LLM）
 - GET  /api/book-dissect/{task_id}  查询任务状态
 - POST /api/book-dissect/{task_id}/extraction-plan  启动前预估分批 / 调用次数（不接 LLM）
-- POST /api/book-dissect/{task_id}/start-extraction  启动抽取（V5：拆书卡 → 情节单元 → 骨架 → 文风；跑在 AIJobManager 后台任务里，可停止）
+- POST /api/book-dissect/{task_id}/start-extraction  启动抽取（拆书卡 → 剧情单元 → 分卷 / 骨架 → 文风；跑在 AIJobManager 后台任务里，可停止）
 - POST /api/book-dissect/{task_id}/cancel  手动停止运行中的抽取
 - DELETE /api/book-dissect/{task_id}  删除任务并清理磁盘（运行中会先停止）
 
@@ -21,8 +21,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
-from sqlalchemy import delete, select, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.settings import get_user_ai_service
@@ -69,11 +68,6 @@ ALLOWED_SUFFIXES = {".txt", ".md", ".markdown"}
 # 上传文件持久化目录（含切分后的全文，供后续 LLM 抽取使用）
 UPLOAD_DIR = DATA_DIR / "book_dissect_uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
-# V2-V4 老引擎的实体图谱表（模型已删，老库残表删任务时按名清理）
-LEGACY_EXTRACTION_TABLES = (
-    "book_dissect_relations", "book_dissect_events", "book_dissect_entities", "book_dissect_dictionary",
-)
 
 # 切分预览返回的最大章节数（仅截取前 N 章给前端）
 PREVIEW_LIMIT = 10
@@ -245,7 +239,7 @@ def _to_response(task: BookDissectTask) -> BookDissectTaskResponse:
         total_words=task.total_words or 0,
         chapters_meta=_parse_chapters_meta(task.chapters_meta),
         # 引擎版本：老任务可能为 1（仅用于识别），新任务统一为 2
-        version=task.version or 2,
+        version=task.version or 5,
         extraction_phase=task.extraction_phase,
         chapters_total=task.chapters_total or 0,
         chapters_extracted=task.chapters_extracted or 0,
@@ -324,7 +318,7 @@ async def start_extraction(
     ai_service: AIService = Depends(get_user_ai_service),
     db: AsyncSession = Depends(get_db),
 ):
-    """启动 LLM 抽取（V5：分批拆书卡 → 情节单元 → 全书骨架 → 文风指纹 → 参考包），跑在 ai_jobs 后台任务里，可随时 /cancel 停止。
+    """启动 LLM 抽取（分批拆书卡 → 剧情单元 → 分卷 / 全书骨架 → 文风指纹 → 参考包），跑在 ai_jobs 后台任务里，可随时 /cancel 停止。
 
     Body（可选）：
     - `sampling_mode`: "all" / "every_n" / "key_only"（默认 "all"）
@@ -488,8 +482,8 @@ def _normalize_extraction_options(
 
 
 # V5 拆书卡之后的 LLM 调用估算（与 extractor_v5 各阶段对应）：
-#   情节单元 ≈ 目标章数 / 每轮窗口卡数（plan_arc_window 按模型上下文 / Max Tokens 规划，8-60 张）
-#   阶段划分 ≈ 单元数 / 40（单元平均约 4 章 → 每 160 章一块）
+#   剧情单元 ≈ 目标章数 / 每轮窗口卡数（plan_arc_window 按模型上下文 / Max Tokens 规划，8-60 张）
+#   分卷 ≈ 单元数 / 40（单元平均约 4 章 → 每 160 章一块）
 #   骨架 / 人物功能谱 / 写法手册 3 次 + 文风定性 1 次 + 例句 3 章各 1 次
 _V5_FIXED_POST_CALLS = 7
 
@@ -497,7 +491,7 @@ _V5_FIXED_POST_CALLS = 7
 def _estimate_post_extraction_calls(
     target_chapters: int, *, model: Optional[str], max_tokens: Optional[int],
 ) -> tuple[int, int, int]:
-    """返回 (拆书卡之后总调用数, 其中情节单元轮数, 情节单元每轮卡数)。"""
+    """返回 (拆书卡之后总调用数, 其中剧情单元轮数, 剧情单元每轮卡数)。"""
     arc_plan = plan_arc_window(target_chapters, model=model, max_tokens=max_tokens)
     if target_chapters <= 0:
         return 0, 0, arc_plan.window_new
@@ -574,7 +568,7 @@ async def _ensure_task_owned(
 
 
 # ============================================================
-# V5 浏览：拆书卡 / 情节单元
+# 浏览：拆书卡 / 剧情单元
 # ============================================================
 
 
@@ -623,7 +617,7 @@ async def v5_get_card(task_id: str, chapter_number: int, user: User = Depends(re
 
 @router.get("/{task_id}/arcs", response_model=List[StoryArcSchema])
 async def v5_list_arcs(task_id: str, user: User = Depends(require_login), db: AsyncSession = Depends(get_db)):
-    """情节单元全量列表，按单元编号升序。"""
+    """剧情单元全量列表，按单元编号升序。"""
     await _ensure_task_owned(db, task_id, user.user_id)
     rows = (await db.execute(
         select(BookDissectStoryArc).where(BookDissectStoryArc.task_id == task_id).order_by(BookDissectStoryArc.arc_index)
@@ -657,7 +651,7 @@ async def delete_task(
     """删除拆书任务并清理磁盘全文 + 所有派生数据。
 
     SQLite 未启用 PRAGMA foreign_keys=ON，外键 ondelete=CASCADE 不生效，
-    必须显式清理：ReferencePack（及其项目挂载）+ 拆书卡 / 情节单元表，
+    必须显式清理：ReferencePack（及其项目挂载）+ 拆书卡 / 剧情单元表，
     否则会留下仍可被项目引用的孤儿参考包与孤儿抽取数据。
     V2-V4 老引擎的 4 张实体图谱表已不再建模，但老库里可能仍有残表与残行，
     用原生 SQL 顺手清掉；表不存在（新库）时忽略。
@@ -700,14 +694,9 @@ async def delete_task(
         )
         await db.execute(delete(ReferencePack).where(ReferencePack.id == pack_id))
 
-    # 2. 抽取数据表：拆书卡 + 情节单元；老引擎残表按名清理
+    # 2. 抽取数据表：拆书卡 + 剧情单元
     await db.execute(delete(BookDissectChapterFact).where(BookDissectChapterFact.task_id == task_id))
     await db.execute(delete(BookDissectStoryArc).where(BookDissectStoryArc.task_id == task_id))
-    for table in LEGACY_EXTRACTION_TABLES:
-        try:
-            await db.execute(text(f"DELETE FROM {table} WHERE task_id = :task_id"), {"task_id": task_id})
-        except OperationalError:
-            pass  # 新库没有这张表
 
     # 3. 任务本体
     await db.delete(task)
@@ -717,51 +706,4 @@ async def delete_task(
         user.user_id, task_id, pack_id or "-",
     )
     return {"message": "任务已删除", "task_id": task_id}
-
-
-# ============================================================
-# 一键填充新项目（apply-to-wizard）
-# ============================================================
-
-
-# V3 R6 废弃说明：保留接口路径仅用于发出 410 Gone 信号，避免老前端 / 脚本静默踩坑。
-# 原路径 POST /api/book-dissect/{task_id}/apply-to-wizard 将拆书产物直接复刻为新项目，
-# 在 V3 重构中被判定为"错路"（让用户照抄原书、丢弃了作者自己的创作意图）。
-# 正确路径：从作者自己的项目起步 → 挂载参考包（ReferencePack）→ 章节编辑器中「一键仿写」。
-# 详见：@/agent-docs/features/book_dissect_v3_imitation_design.md §6 R6
-DEPRECATION_DETAIL = {
-    "code": "apply_to_wizard_deprecated",
-    "message": "拆书「一键创建项目」接口已废弃。该路径会直接复刻原书内容为新项目，不符合作者自主创作理念。",
-    "migration": [
-        "1. 在 《参考库》 页面查看本任务对应的参考包（ReferencePack）",
-        "2. 在 《项目设置 · 参考库》 中把参考包挂载到你自己的项目",
-        "3. 在项目章节编辑器点击 《一键仿写》，填写本次创作意图后生成草稿",
-    ],
-    "new_endpoints": [
-        "POST /api/projects/{project_id}/reference-packs",
-        "POST /api/projects/{project_id}/imitate-chapter-stream",
-        "POST /api/projects/{project_id}/imitate-chapter-preview",
-    ],
-}
-
-
-@router.post(
-    "/{task_id}/apply-to-wizard",
-    status_code=410,
-    summary="[已废弃] 拆书一键创建项目",
-    deprecated=True,
-)
-async def apply_to_wizard(
-    task_id: str,
-    user: User = Depends(require_login),
-):
-    """V3 R6：该接口已废弃。任何调用一律返 410 Gone 并携带迁移指引。
-
-    保留路由者名与路径以便老前端 / 脚本查出废弃信号；后续可考虑彻底删除路由。
-    """
-    logger.info(
-        "[V3-R6] 拦截已废弃的 apply_to_wizard 调用 user=%s task=%s",
-        user.user_id, task_id,
-    )
-    raise HTTPException(status_code=410, detail=DEPRECATION_DETAIL)
 

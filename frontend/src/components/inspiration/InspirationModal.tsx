@@ -34,7 +34,7 @@ interface InspirationModalProps {
   /** T2.1：第二参带上 outline 完成时后端给的下一步路由建议 */
   onEnterProject: (
     projectId: string,
-    options?: { nextRoute?: 'bridge_planning' | 'chapter_outlines' },
+    options?: { nextRoute?: 'volume_planning' | 'chapter_outlines' },
   ) => void;
   onProjectCreated?: (projectId: string) => void | Promise<void>;
 }
@@ -245,7 +245,7 @@ export default function InspirationModal({
     if (!state.projectId || !readyToGenerate || runningNode) return;
     if (
       node !== 'outline' &&
-      node !== 'plotLines' &&
+      node !== 'volumes' &&
       !window.confirm('会清理该环节之后的旧角色、大纲和章节，再从这里向后重跑。继续吗？')
     ) {
       return;
@@ -280,7 +280,7 @@ export default function InspirationModal({
           runningNode={runningNode}
           canRegenerate={Boolean(state.projectId && readyToGenerate)}
           onRegenerate={(node) => void handleRegenerateNode(node)}
-          onEnterProject={() => state.projectId && onEnterProject(state.projectId, { nextRoute: 'bridge_planning' })}
+          onEnterProject={() => state.projectId && onEnterProject(state.projectId, { nextRoute: 'volume_planning' })}
           onRestart={handleReset}
         />
       );

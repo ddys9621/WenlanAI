@@ -1,6 +1,6 @@
 """SSE 生成器 → ai_jobs runner 适配器。
 
-向导四步（world_building / characters / outline / plot_lines）都是"产出 SSE 文本"的 async generator
+向导四步（world_building / characters / outline / volumes）都是"产出 SSE 文本"的 async generator
 （`data: {json}\\n\\n`，见 app.utils.sse_response）。要让它们跑在通用后台任务上又不改那两千行生成器，
 这里把生成器产出解析回事件并转发进任务：
 - progress → job.publish（最新态）；chunk / content → content 日志（可回放重建全文）

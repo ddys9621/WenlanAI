@@ -85,10 +85,11 @@ export function getNodePreview(node: GenerationNodeKey, artifacts: GenerationArt
     return artifacts.characters.length > 4 ? `${names} 等 ${artifacts.characters.length} 人` : names;
   }
 
-  if (node === 'plotLines') {
-    const lines = artifacts.plotLines;
-    if (!lines) return null;
-    return `主线《${lines.main_line.title}》${lines.main_line.beat_count} 个节点 → ${lines.plan_preview.total_bridges} 个桥段 / ${lines.plan_preview.total_chapters} 章`;
+  if (node === 'volumes') {
+    const result = artifacts.volumes;
+    if (!result || result.volumes.length === 0) return null;
+    const titles = result.volumes.slice(0, 3).map((v) => `《${v.title}》`).join('、');
+    return `共 ${result.volumes.length} 卷 / ${result.chapter_count} 章：${titles}${result.volumes.length > 3 ? ' …' : ''}`;
   }
 
   const content = artifacts.outline?.content;

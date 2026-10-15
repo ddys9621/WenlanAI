@@ -85,10 +85,6 @@ class AssemblyContext:
     chapter_outline_id: Optional[str] = None
     target_word_count: int = 3000
 
-    # K2 桥段相关（章节生成时按桥段位置注入）
-    bridge_position: Optional[str] = None     # 'intro' / 'build' / 'payoff' / 'aftermath'
-    bridge_context: Optional[dict[str, Any]] = None
-
     # 场景生成
     plot_card_id: Optional[str] = None
 

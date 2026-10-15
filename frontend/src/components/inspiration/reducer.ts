@@ -199,7 +199,7 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
         ...state,
         currentStep: 'generating',
         projectTitle: action.payload.title,
-        generationSteps: { worldBuilding: 'pending', characters: 'pending', outline: 'pending', plotLines: 'pending' },
+        generationSteps: { worldBuilding: 'pending', characters: 'pending', outline: 'pending', volumes: 'pending' },
         progress: 0,
         progressMessage: '开始创建项目...',
         loading: true,

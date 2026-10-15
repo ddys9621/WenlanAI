@@ -223,106 +223,6 @@ async def build_world_map(db: AsyncSession, ctx: Any) -> str:
     return f"【🗺 世界地图】\n{overview}" if overview else ""
 
 
-async def build_plot_lines_with_beats(db: AsyncSession, ctx: Any) -> str:
-    """主线节点 + 桥段配额（由 bridge_slot_planner 确定）+ 副线节点概览。
-
-    供 bridge_planning 场景填充桥段时了解全书骨架。前置不满足（无唯一主线 / 无节点）返回空串。
-    配额与章号完全来自 compute_bridge_slots，与骨架建表用同一算法，保证 prompt 与 DB 一致。
-    """
-    from app.models.plot_line import PlotLine
-    from app.services.bridge_slot_planner import (
-        BridgePlanningPreconditionError,
-        compute_bridge_slots,
-        parse_plot_line,
-    )
-
-    result = await db.execute(
-        select(PlotLine).where(PlotLine.project_id == ctx.project_id).order_by(PlotLine.order_index)
-    )
-    lines = [parse_plot_line(l) for l in result.scalars().all()]
-    try:
-        plan = compute_bridge_slots(lines)
-    except BridgePlanningPreconditionError:
-        return ""
-
-    main = next(l for l in lines if l.id == plan.main_line_id)
-    chunks: list[str] = ["【📈 全书骨架：主线节点 → 桥段配额】"]
-    chunks.append(
-        f"总桥段数：{plan.total_bridges}；总章数：{plan.total_chapters}；每桥段 4 章，配额由系统按节点权重确定。"
-    )
-    chunks.append(f"\n▼ 主线：{main.title}")
-    for beat in main.beats:
-        quota = plan.beat_quotas.get(beat.index, 0)
-        beat_slots = [s for s in plan.slots if s.beat_index == beat.index]
-        c_start = beat_slots[0].chapter_start if beat_slots else 0
-        c_end = beat_slots[-1].chapter_end if beat_slots else 0
-        desc_part = f"｜{beat.description[:60]}" if beat.description else ""
-        chunks.append(
-            f"  [节点 {beat.index}] {beat.title}  权重 {beat.weight:.0%}  → {quota} 个桥段（第 {c_start}-{c_end} 章）{desc_part}"
-        )
-
-    label = {"sub": "支线", "character": "角色线"}
-    mode_label = {"companion": "伴生", "inserted": "插入", "converge": "汇流"}
-    budgets = {b.plot_line_id: b for b in plan.line_budgets}
-    for line in lines:
-        if line.line_type == "main" or not line.beats:
-            continue
-        budget = budgets.get(line.id)
-        if budget is not None and budget.anchored:
-            head = (
-                f"{mode_label.get(line.mode or '', line.mode)}型，锚定主线节点 {line.anchor_start_beat}-{line.anchor_end_beat}，"
-                f"预算 {line.estimated_chapters} 章 ≈ 主推 {budget.primary_quota} 个桥段"
-                f"（实际主推 {budget.primary_bridges}，保温 {budget.mention_bridges}）"
-            )
-        else:
-            head = "未锚定，按进度比例挂到主线桥段"
-        chunks.append(f"\n▼ {label.get(line.line_type, '其他')}：{line.title}（{head}）")
-        for beat in line.beats:
-            desc_part = f"｜{beat.description[:60]}" if beat.description else ""
-            anchor_part = ""
-            if beat.anchor_beat is not None:
-                anchor_part = f"  → 主线节点 {beat.anchor_beat}{'（汇流）' if beat.relation == 'merge' else ''}"
-            chunks.append(f"  [节点 {beat.index}] {beat.title}  权重 {beat.weight:.0%}{anchor_part}{desc_part}")
-    return "\n".join(chunks)
-
-async def build_bridge_position(db: AsyncSession, ctx: Any) -> str:
-    """K2 桥段位置约束（章节级，不缓存）。
-
-    Phase 2 完整版：使用 bridge_position_prompts 的 4 套 prompt 模板。
-    """
-    if not ctx.bridge_position or not ctx.bridge_context:
-        return ""
-
-    from app.services.reference_pack.bridge_position_prompts import (
-        format_position_constraint,
-    )
-
-    text = format_position_constraint(
-        position=ctx.bridge_position,
-        bridge_title=ctx.bridge_context.get("title", "未命名桥段"),
-        bridge_goal=ctx.bridge_context.get("goal", ""),
-        bridge_showoff=ctx.bridge_context.get("showoff_point", ""),
-        target_word_count=ctx.target_word_count or 3000,
-        next_bridge_goal=ctx.bridge_context.get(
-            "next_bridge_goal", "（下一桥段未设定）"
-        ),
-        template=ctx.bridge_context.get("template") or "showoff",
-        opening=ctx.bridge_context.get("opening"),
-        prev_bridge_hook=ctx.bridge_context.get("prev_bridge_hook") or "",
-        shape=ctx.bridge_context.get("shape") or "standard",
-        c3_hook_style=ctx.bridge_context.get("c3_hook_style") or "none",
-        positions=ctx.bridge_context.get("positions"),
-        index_in_bridge=ctx.bridge_context.get("index_in_bridge"),
-    )
-    primary_secondary = ctx.bridge_context.get("primary_secondary")
-    if text and primary_secondary:
-        text += (
-            f"\n\n【🧵 本桥段主 B 线】{primary_secondary}\n"
-            "本章可用 1-2 个场景推进这条支线（放在不与上面位置语义冲突的位置），不得让它抢走本章主线重心。"
-        )
-    return text
-
-
 async def build_history_full(db: AsyncSession, ctx: Any) -> str:
     """最近 N 章的完整摘要（按 HISTORICAL_CONTEXT_TABLE.full_count）。
 
@@ -391,10 +291,7 @@ def _make_dissect_builder(dimension: str) -> Callable[[AsyncSession, Any], Await
             return ""
         from app.services.reference_pack.dimension_compressor import compress_dimension
         try:
-            return compress_dimension(
-                json_text, dimension, strength,
-                pipeline_version=int(getattr(pack, "pipeline_version", None) or 2),
-            ) or ""
+            return compress_dimension(json_text, dimension, strength) or ""
         except Exception as exc:  # pragma: no cover - 防御性
             logger.warning(
                 "compressor 失败 dim=%s strength=%s err=%s", dimension, strength, exc
@@ -420,14 +317,9 @@ _CORPUS_CHARS_PER_ITEM = {"light": 200, "medium": 320, "deep": 450}
 async def build_dissect_corpus(db: AsyncSession, ctx: Any) -> str:
     """corpus：BM25 检索项目挂载参考包的拆书卡（章节级动态，不缓存）。
 
-    锚文本按上下文取（章纲 → 剧情卡 → 桥段目标 / 爽点 → 用户输入 → 书名 + 主题）；
-    top_k 查 CORPUS_TOPK；bridge_position 对应的功能标签命中加 30% 分数。
+    锚文本按上下文取（章纲 → 剧情卡 → 用户输入 → 书名 + 主题）；top_k 查 CORPUS_TOPK。
     """
-    from app.services.book_dissect.chapter_card_retriever import (
-        BRIDGE_POSITION_TAGS,
-        ChapterCardRetriever,
-        format_card_hits,
-    )
+    from app.services.book_dissect.chapter_card_retriever import ChapterCardRetriever, format_card_hits
     from app.services.reference_pack.policy_tables import get_corpus_top_k
 
     top_k = get_corpus_top_k(ctx.scene, ctx.model_name)
@@ -439,10 +331,7 @@ async def build_dissect_corpus(db: AsyncSession, ctx: Any) -> str:
     query = await _corpus_anchor_text(db, ctx)
     if not query:
         return ""
-    hits = await ChapterCardRetriever().retrieve(
-        db, task_ids=[p.task_id for p in packs], query=query, top_k=top_k,
-        boost_tags=BRIDGE_POSITION_TAGS.get(getattr(ctx, "bridge_position", None) or "", ()),
-    )
+    hits = await ChapterCardRetriever().retrieve(db, task_ids=[p.task_id for p in packs], query=query, top_k=top_k)
     if not hits:
         return ""
     strength = _get_strength_for(ctx, "corpus")
@@ -469,9 +358,6 @@ async def _corpus_anchor_text(db: AsyncSession, ctx: Any) -> str:
         card = (await db.execute(select(PlotCard).where(PlotCard.id == ctx.plot_card_id))).scalar_one_or_none()
         if card:
             parts = [card.title, card.content]
-    if not any(parts):
-        bc = getattr(ctx, "bridge_context", None) or {}
-        parts = [bc.get("title"), bc.get("goal"), bc.get("showoff_point")]
     if not any(parts):
         parts = [getattr(ctx, "user_input", None)]
     if not any(parts):
@@ -529,8 +415,6 @@ SLOT_BUILDERS: dict[str, Callable[[AsyncSession, Any], Awaitable[str]]] = {
     "chapter_outline":        build_chapter_outline,
     "output_spec":            build_output_spec,
     # user 段 - 业务
-    "bridge_position":        build_bridge_position,
-    "plot_lines_with_beats":  build_plot_lines_with_beats,  # V4.1 方案 C
     "project_characters":     build_project_characters,     # 评审问题 A：本书角色
     "world_rules_table":      build_world_rules_table,      # 评审问题 A：世界规则表
     "world_map":              build_world_map,              # 世界地图：地点方位远近
@@ -548,5 +432,5 @@ SLOT_BUILDERS: dict[str, Callable[[AsyncSession, Any], Awaitable[str]]] = {
 }
 
 
-# 供 bridge_planning_service 生成 provenance 时取参考包标题
+# 供规划服务取参考包标题
 get_first_attached_pack = _get_first_attached_pack

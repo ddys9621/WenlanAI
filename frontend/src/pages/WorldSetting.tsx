@@ -19,7 +19,7 @@ import { cn } from '@/lib/utils';
 import { useStore } from '@/store';
 import { useProjectSync } from '@/store/hooks';
 import { wizardStreamApi } from '@/services/api';
-import type { BridgeRhythm, C3HookStyle, PlatformPreset, Project } from '@/types';
+import type { PlatformPreset, Project } from '@/types';
 import { mergeUntouched } from '@/utils/draftMerge';
 import { MCPSelector } from '@/components/MCPSelector';
 import {
@@ -41,20 +41,12 @@ interface WorldSettingForm {
   theme: string;
   genre: string;
   generation_prompt: string;
-  c3_hook_style: C3HookStyle;
   platform_preset: PlatformPreset | '';
-  bridge_rhythm: BridgeRhythm;
-  rolling_planning: boolean;
   world_time_period: string;
   world_location: string;
   world_atmosphere: string;
   world_rules: string;
 }
-
-const C3_HOOK_OPTIONS: { value: C3HookStyle; label: string; description: string }[] = [
-  { value: 'none', label: '不留钩子（默认）', description: '兑现章爽完即收，靠爽感把读者带进下一章；适合付费连载。' },
-  { value: 'soft', label: '收束 + 半钩', description: '收束场景后再落一个不解释的小异样（≤2 句）；适合免费平台，每章末都要钩子。' },
-];
 
 const PLATFORM_OPTIONS: { value: PlatformPreset | ''; label: string; description: string }[] = [
   { value: '', label: '通用', description: '不套平台写法，单章字数按章纲。' },
@@ -64,15 +56,8 @@ const PLATFORM_OPTIONS: { value: PlatformPreset | ''; label: string; description
   { value: 'qimao', label: '七猫（免费阅读）', description: '单章 2000-3000 字，节奏快、爽点直给、章末必留钩子。' },
 ];
 
-const RHYTHM_OPTIONS: { value: BridgeRhythm; label: string; description: string }[] = [
-  { value: 'fixed4', label: '固定每桥段 4 章', description: '所有桥段都是 代入→拉扯→兑现→善后 4 章；短篇或已规划的项目保持不变。' },
-  { value: 'varied', label: '变长桥段（推荐长篇）', description: '3-12 章不等：开篇快进、卷中高潮、高潮后低谷、卷末多波兑现 + 缓冲章，避免几百个同构循环。' },
-];
-
-const longformFromProject = (p: { platform_preset?: PlatformPreset | null; bridge_rhythm?: BridgeRhythm | null; rolling_planning?: boolean | null }) => ({
+const longformFromProject = (p: { platform_preset?: PlatformPreset | null }) => ({
   platform_preset: (p.platform_preset ?? '') as PlatformPreset | '',
-  bridge_rhythm: (p.bridge_rhythm === 'varied' ? 'varied' : 'fixed4') as BridgeRhythm,
-  rolling_planning: Boolean(p.rolling_planning),
 });
 
 const formFromProject = (p: Project): WorldSettingForm => ({
@@ -80,7 +65,6 @@ const formFromProject = (p: Project): WorldSettingForm => ({
   theme: p.theme || '',
   genre: p.genre || '',
   generation_prompt: p.generation_prompt || '',
-  c3_hook_style: p.c3_hook_style === 'soft' ? 'soft' : 'none',
   ...longformFromProject(p),
   world_time_period: p.world_time_period || '',
   world_location: p.world_location || '',
@@ -136,10 +120,7 @@ export default function WorldSetting() {
     theme: '',
     genre: '',
     generation_prompt: '',
-    c3_hook_style: 'none',
     platform_preset: '',
-    bridge_rhythm: 'fixed4',
-    rolling_planning: false,
     world_time_period: '',
     world_location: '',
     world_atmosphere: '',
@@ -364,29 +345,6 @@ export default function WorldSetting() {
           )}
         </div>
 
-        <div className="mt-5">
-          <label className="mb-1.5 block text-[13px] font-medium text-content">桥段兑现章（C3）末尾</label>
-          {editing ? (
-            <select
-              value={form.c3_hook_style}
-              onChange={(e) => setForm((prev) => ({ ...prev, c3_hook_style: e.target.value as C3HookStyle }))}
-              className="hh-field"
-            >
-              {C3_HOOK_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
-              ))}
-            </select>
-          ) : (
-            <p className="text-sm leading-6 text-content">
-              {C3_HOOK_OPTIONS.find((opt) => opt.value === form.c3_hook_style)?.label}
-            </p>
-          )}
-          <p className="mt-1 text-xs leading-5 text-content-tertiary">
-            {C3_HOOK_OPTIONS.find((opt) => opt.value === form.c3_hook_style)?.description}
-            影响桥段填充、章纲展开与正文写作三处 prompt；已填充的桥段需重新填充才会生效。
-          </p>
-        </div>
-
         <div className="mt-6 border-t border-surface-border pt-5">
           <h3 className="text-[13px] font-semibold text-content">长篇写作设置</h3>
           <div className="mt-3 grid gap-4 md:grid-cols-2">
@@ -409,48 +367,10 @@ export default function WorldSetting() {
               )}
               <p className="mt-1 text-xs leading-5 text-content-tertiary">
                 {PLATFORM_OPTIONS.find((opt) => opt.value === form.platform_preset)?.description}
-                影响正文写法提示与新展开章纲的默认字数。
-              </p>
-            </div>
-            <div>
-              <label className="mb-1.5 block text-[13px] font-medium text-content">桥段节奏</label>
-              {editing ? (
-                <select
-                  value={form.bridge_rhythm}
-                  onChange={(e) => setForm((prev) => ({ ...prev, bridge_rhythm: e.target.value as BridgeRhythm }))}
-                  className="hh-field"
-                >
-                  {RHYTHM_OPTIONS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>{opt.label}</option>
-                  ))}
-                </select>
-              ) : (
-                <p className="text-sm leading-6 text-content">
-                  {RHYTHM_OPTIONS.find((opt) => opt.value === form.bridge_rhythm)?.label}
-                </p>
-              )}
-              <p className="mt-1 text-xs leading-5 text-content-tertiary">
-                {RHYTHM_OPTIONS.find((opt) => opt.value === form.bridge_rhythm)?.description}
-                只影响之后新生成的桥段骨架。
+                影响正文写法提示与新生成章纲的默认字数。
               </p>
             </div>
           </div>
-          <label className="mt-4 flex items-start gap-2 text-sm text-content">
-            <input
-              type="checkbox"
-              className="mt-1"
-              checked={form.rolling_planning}
-              disabled={!editing}
-              onChange={(e) => setForm((prev) => ({ ...prev, rolling_planning: e.target.checked }))}
-            />
-            <span>
-              滚动规划
-              <span className="block text-xs leading-5 text-content-tertiary">
-                桥段填充只做到已写章节之后约 48 章、章纲展开只做到之后约 12 章；远处的等写到附近再带着实际进展规划，
-                避免几百章后计划和正文越走越远（服务端批量生成会自动接着规划）。
-              </span>
-            </span>
-          </label>
         </div>
       </section>
 

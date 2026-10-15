@@ -3,8 +3,8 @@
 与 AnalysisTask 的区别：
 - 不挂任何项目/章节外键，因为拆书时项目尚未创建
 - 全文不入库，落到磁盘 storage_path，只在 chapters_meta 存元信息
-- result_json 仅存 V2 网文专有产物（项目骨架 / 文风 / 概览统计）
-完整的角色 / 地点 / 关系 / 事件走专用表（见 book_dissect_entity / relation / event 等）
+- result_json 只存抽取结果概览（参考包 ID / 生成的维度 / 章节与单元计数）
+拆书卡在 book_dissect_chapter_facts，剧情单元在 book_dissect_story_arcs，各维度产物在 reference_packs
 """
 from sqlalchemy import Column, String, Integer, Text, DateTime, Index
 from sqlalchemy.sql import func
@@ -17,7 +17,7 @@ class BookDissectTask(Base):
     拆书任务表
 
     状态流转: pending -> running -> completed/failed/cancelled（cancelled = 用户手动停止，可重新抽取）
-    阶段切片（V2）: splitting -> scanning -> dictionary -> extracting -> aggregating -> synthesizing -> done
+    阶段: split_done -> queued -> splitting -> cards -> arcs -> skeleton -> style -> pack -> done
     """
     __tablename__ = "book_dissect_tasks"
 
@@ -29,7 +29,7 @@ class BookDissectTask(Base):
                     comment="任务状态: pending/running/completed/failed/cancelled")
     progress = Column(Integer, default=0, comment="进度 0-100")
     stage = Column(String(50), nullable=True,
-                   comment="当前阶段：splitting/scanning/dictionary/extracting/aggregating/synthesizing/done")
+                   comment="当前阶段：split_done/queued/splitting/cards/arcs/skeleton/style/pack/done")
     error_message = Column(Text, nullable=True, comment="错误信息")
 
     # 上传文件信息
@@ -46,22 +46,20 @@ class BookDissectTask(Base):
 
     # 拆解结果（完成后填充）
     result_json = Column(Text, nullable=True,
-                         comment="V2 网文专有产物（项目骨架/文风/概览统计）")
+                         comment="抽取结果概览 JSON：pack_id / generated_dimensions / 章节与单元计数")
 
-    # 引擎版本字段（仍保留以识别存量老任务；新任务统一为 2）
-    version = Column(Integer, default=2, comment="拆书引擎版本；当前仅使用 V2")
-    extraction_phase = Column(String(50), nullable=True,
-                              comment="V2 细粒度阶段：scanning/dictionary/extracting/aggregating/synthesizing")
-    chapters_total = Column(Integer, default=0, comment="V2 计划逐章抽取的章节总数（采样模式可少于 chapter_count）")
-    chapters_extracted = Column(Integer, default=0, comment="V2 已成功抽取的章节数")
-    chapters_failed = Column(Integer, default=0, comment="V2 抽取失败的章节数")
+    # 抽取流水线版本（与参考包 pipeline_version 一致）
+    version = Column(Integer, default=5, comment="拆书流水线版本")
+    extraction_phase = Column(String(50), nullable=True, comment="细粒度阶段（同 stage）")
+    chapters_total = Column(Integer, default=0, comment="计划抽取拆书卡的章节总数（采样模式可少于 chapter_count）")
+    chapters_extracted = Column(Integer, default=0, comment="已成功抽出拆书卡的章节数")
+    chapters_failed = Column(Integer, default=0, comment="抽取失败的章节数")
     sampling_mode = Column(String(20), default="all",
-                           comment="V2 采样模式：all(全部)/every_n(每隔N章)/key_only(关键章节)")
-    sampling_param = Column(Integer, default=1, comment="V2 采样参数（如 every_n 模式下的 N）")
+                           comment="采样模式：all(全部)/every_n(每隔N章)/key_only(关键章节)")
+    sampling_param = Column(Integer, default=1, comment="采样参数（如 every_n 模式下的 N）")
 
-    # V3.1 字段
     extraction_engine = Column(String(20), default="auto",
-                               comment="V3.1 抽取引擎：auto(按上下文自动分批)/chunked(逐章)/long_context(整本一批)")
+                               comment="抽取引擎：auto(按上下文自动分批)/chunked(逐章)/long_context(整本一批)")
 
     # 分批抽取字段
     chapters_per_request = Column(Integer, default=0,

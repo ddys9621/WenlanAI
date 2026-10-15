@@ -1,5 +1,5 @@
 /**
- * 拆书 V5 视图：JSON 值 → 展示文本 的纯函数（无 React 依赖，便于单测）
+ * 拆书视图：JSON 值 → 展示文本 的纯函数（无 React 依赖，便于单测）
  */
 
 /** 任意 JSON 值安全转字符串（嵌套 dict / array 扁平化，避免 "[object Object]"） */
@@ -73,19 +73,20 @@ export function paceToneClass(pace: string | undefined): string {
   return PACE_TONE[pace ?? ''] ?? 'text-content'
 }
 
+/** 章在剧情单元里的位置 */
 export const CHAPTER_ROLE_LABEL: Record<string, string> = {
-  intro: '起',
-  build: '承',
-  payoff: '爽',
-  aftermath: '收',
-  transition: '转',
+  open: '开启',
+  advance: '推进',
+  turn: '转折',
+  close: '收束',
+  transition: '过渡',
 }
 
 export const EXCERPT_KIND_LABEL: Record<string, string> = {
   opening: '开篇',
   dialogue: '对白',
   action: '动作',
-  payoff: '爽点',
+  payoff: '高点',
   ending_hook: '章末钩子',
   description: '描写',
 }

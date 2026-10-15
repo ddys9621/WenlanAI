@@ -24,7 +24,6 @@ from app.logger import setup_logging, get_logger
 from app.middleware import RequestIDMiddleware
 from app.middleware.auth_middleware import AuthMiddleware
 from app.mcp.registry import mcp_registry
-from app.migrations.auto_migrator import run_auto_migrations
 
 setup_logging(
     level=config_settings.log_level,
@@ -49,14 +48,15 @@ async def lifespan(app: FastAPI):
     # 在应用启动时初始化数据库表结构
     try:
         from app.database import get_engine, Base
+        from app.utils.legacy_db import legacy_schema_reason
 
-        # 使用全局引擎创建所有表
+        # 使用全局引擎创建所有表（结构完全由模型决定，不迁移旧库；发现 1.x 的库就停下，不在旧库上建表）
         engine = await get_engine("_global_init_")
         async with engine.begin() as conn:
+            legacy = await conn.run_sync(legacy_schema_reason)
+            if legacy:
+                raise RuntimeError(legacy)
             await conn.run_sync(Base.metadata.create_all)
-
-        # 自动执行需要的迁移（幂等）
-        await run_auto_migrations(engine)
 
         _startup_state["database_ready"] = True
         _startup_state["database_error"] = None
@@ -228,7 +228,7 @@ from app.api import (
     wizard_stream, relationships, organizations,
     auth, settings, writing_styles, memories,
     mcp_plugins, mcp_marketplace, admin, inspiration,
-    plot_cards, plot_lines, chapter_outlines, story_outlines,
+    plot_cards, chapter_outlines, story_outlines, volumes,
     world_rules, scene_generation, book_dissect,
     reference_pack, imitation, announcement
 )
@@ -254,15 +254,11 @@ app.include_router(memories.router)  # 记忆管理API (已包含/api前缀)
 app.include_router(mcp_plugins.router, prefix="/api")  # MCP插件管理API
 app.include_router(mcp_marketplace.router, prefix="/api")  # MCP商城（内置精选目录 + 一键安装）
 
-# 新增剧情相关API
+# 规划：总纲（故事大纲）→ 卷纲（剧情单元）→ 章纲；剧情卡片
 app.include_router(story_outlines.router, prefix="/api")
+app.include_router(volumes.router, prefix="/api")
 app.include_router(plot_cards.router, prefix="/api")
-app.include_router(plot_lines.router, prefix="/api")
 app.include_router(chapter_outlines.router, prefix="/api")
-
-# V4.1 K2 桥段四章结构 API
-from app.api import plot_bridges as _plot_bridges
-app.include_router(_plot_bridges.router, prefix="/api")
 
 # 通用 AI 后台任务：列表 / 快照 / 回放续尾 / 取消（各业务的发起端点仍在各自模块）
 from app.api import ai_jobs as _ai_jobs_api
@@ -303,6 +299,10 @@ app.include_router(_chapter_candidates.router, prefix="/api")
 # 智能助笔：当前章的续写 / 改写 / 润色 / 核对 / 提问（修改类结果是候选稿）
 from app.api import writing_assistant as _writing_assistant
 app.include_router(_writing_assistant.router, prefix="/api")
+
+# 行内补全：编辑器停笔时按光标前后正文给一小段灰色建议（Tab 采用；直连流式，不进后台任务）
+from app.api import inline_completion as _inline_completion
+app.include_router(_inline_completion.router, prefix="/api")
 
 # 世界地图：作者标注的平面沙盘 + 地点档案 + AI 布局候选
 from app.api import world_map as _world_map

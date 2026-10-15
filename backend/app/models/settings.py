@@ -26,6 +26,7 @@ class Settings(Base):
         comment="采样多样性开关：关闭后不传 top_p / 频率惩罚 / 存在惩罚（模型不支持时关）",
     )
     analysis_model = Column(String(100), nullable=True, comment="分析 / 抽取 / 摘要专用模型；空 = 跟随主模型")
+    completion_model = Column(String(100), nullable=True, comment="编辑器行内补全专用模型；空 = 跟随项目模型")
     # 思考/推理强度（全局生效）：OpenAI 走 reasoning_effort，Anthropic 走 thinking.budget_tokens
     reasoning_enabled = Column(Boolean, nullable=False, default=False, comment="是否启用思考/推理模式")
     reasoning_effort = Column(String(20), default="medium", comment="统一思考强度档位/OpenAI reasoning_effort: none|minimal|low|medium|high|xhigh|max")

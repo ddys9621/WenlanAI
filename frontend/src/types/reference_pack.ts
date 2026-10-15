@@ -1,7 +1,7 @@
 /**
- * 拆书参考包类型定义（V5）
+ * 拆书参考包类型定义
  *
- * 参见：@/agent-docs/features/book_dissect_v5_design.md §5-§6
+ * 维度与作者自己的规划链对应：synopsis（全书骨架 ≈ 总纲）/ bridges（剧情单元库 ≈ 卷纲里的一件件事）/ 拆书卡（≈ 章纲）。
  * 后端 schema：@/backend/app/schemas/reference_pack.py
  */
 
@@ -11,22 +11,15 @@ export type ReferencePackStatus = 'generating' | 'ready' | 'partial' | 'failed';
  * 注入维度（与后端 ReferenceDimension Literal 一致，否则挂载请求会 422）
  */
 export type ReferenceDimension =
-  | 'synopsis' // 全书骨架（类型 / 前提 / 大矛盾 / 金手指 / 阶段 / 爽点）
-  | 'bridges' // 桥段库（情节单元聚合 + 典型单元）
+  | 'synopsis' // 全书骨架（梗概 / 全书主线 / 分卷 / 卖点 / 成长路线）
+  | 'bridges' // 剧情单元库（单元长短 / 强弱交替 / 兑现方式 + 典型单元；键名沿用 bridges）
   | 'style' // 文风指纹（prompt_content + 量化指标 + 例句）
   | 'character_archive' // 人物功能谱
   | 'methodology' // 写法手册
-  | 'structure' // 结构统计（钩子 / 节奏 / 爽点密度 / 张力曲线）
+  | 'structure' // 结构统计（钩子 / 节奏 / 兑现密度 / 张力曲线）
   | 'corpus'; // 拆书卡检索（按本次内容 BM25 命中原书章）
 
 export type ReferenceStrength = 'light' | 'medium' | 'deep';
-
-/** V5 流水线版本号；小于此值的参考包为 V2-V4 老包（只读，建议重新抽取） */
-export const V5_PIPELINE_VERSION = 5;
-
-export function isV5Pack(pack: { pipeline_version?: number | null } | null | undefined): boolean {
-  return (pack?.pipeline_version ?? 2) >= V5_PIPELINE_VERSION;
-}
 
 /**
  * 参考包列表项（不含维度正文）
@@ -38,7 +31,7 @@ export interface ReferencePackSummary {
   source_book_title: string;
   status: ReferencePackStatus;
   generated_dimensions: string[];
-  /** 2 = V2-V4 老包；5 = V5 */
+  /** 拆书流水线版本（参考包内容格式） */
   pipeline_version: number;
   error_message: string | null;
   attached_project_count: number;
@@ -49,8 +42,7 @@ export interface ReferencePackSummary {
 /**
  * 参考包详情（六个维度正文一次返回）
  *
- * 维度内部为灵活的 dict；null 表示该维度未生成（partial 状态下常见）。
- * pipeline_version >= 5 时六个字段是下方 *Data 形状；老包同名字段是 V2-V4 形状，前端只读 JSON 展示。
+ * 维度内部为灵活的 dict（形状见下方 *Data）；null 表示该维度未生成（partial 状态下常见）。
  */
 export interface ReferencePackDetail extends ReferencePackSummary {
   synopsis: Record<string, unknown> | null;
@@ -97,19 +89,20 @@ export interface AttachReferencePackResponse {
 }
 
 // ============================================================
-// V5 六个维度的"软约束"类型（实际仍为 Record<string, unknown>，
+// 六个维度的"软约束"类型（实际仍为 Record<string, unknown>，
 // 此处仅作 IDE 自动补全提示，方便组件渲染时识别字段名）
 // 后端产出：skeleton_builder / style_fingerprint / dissect_stats
 // ============================================================
 
-/** 全书骨架里的一个阶段（skeleton_builder.build_stages） */
-export interface SkeletonStage {
+/** 原书的一卷（skeleton_builder.build_volumes，对应作者的卷纲） */
+export interface SkeletonVolume {
   title?: string;
-  core_conflict?: string;
-  protagonist_goal?: string;
-  key_upgrades?: string;
-  signature_arc?: string;
+  summary?: string;
+  goal?: string;
+  climax?: string;
   ending_hook?: string;
+  threads?: string[];
+  growth?: string;
   arc_start?: number;
   arc_end?: number;
   chapter_start?: number;
@@ -119,24 +112,27 @@ export interface SkeletonStage {
   [k: string]: unknown;
 }
 
-/** synopsis：全书骨架（skeleton_builder.build_skeleton） */
+/** synopsis：全书骨架（skeleton_builder.build_skeleton，对应作者的总纲） */
 export interface SkeletonData {
   genre_tag?: string;
-  one_line_premise?: string;
+  premise?: string;
+  main_plot?: string;
   main_conflict?: string;
-  golden_finger?: { what?: string; how_it_works?: string; evolution?: string[]; [k: string]: unknown } | string | null;
-  stages?: SkeletonStage[];
-  top_payoffs?: Array<{ stage?: string; arcs?: string; buildup?: string; trigger?: string; reward?: string; [k: string]: unknown }>;
-  growth_system?: string;
+  /** 主角的特殊能力 / 核心优势；没有时为「无」 */
+  golden_finger?: { what?: string; how_it_works?: string; limits?: string; evolution?: string[]; [k: string]: unknown } | string | null;
+  selling_points?: string[];
+  main_tropes?: string[];
+  growth_route?: string;
   power_system?: string;
+  ultimate_goal?: string;
+  volumes?: SkeletonVolume[];
+  high_points?: Array<{ volume?: string; arcs?: string; setup?: string; trigger?: string; result?: string; [k: string]: unknown }>;
   long_foreshadowing?: Array<{ setup?: string; payoff?: string; role?: string; [k: string]: unknown }>;
-  reading_promise?: string;
   opening_strategy?: string;
-  pipeline_version?: number;
   [k: string]: unknown;
 }
 
-/** 情节单元（v5_types.StoryArc；bridges.typical_arcs 与 GET /arcs 同形） */
+/** 剧情单元（v5_types.StoryArc；bridges.typical_arcs 与 GET /arcs 同形）：一件完整的事 */
 export interface StoryArcData {
   arc_index: number;
   start_chapter: number;
@@ -144,12 +140,13 @@ export interface StoryArcData {
   title?: string;
   function?: string;
   boundary_reason?: string;
+  story?: string;
   structure?: string;
-  protagonist_chain?: string;
+  approach?: string;
+  turn?: string;
   emotion_curve?: string;
   payoff?: string;
   payoff_type?: string;
-  golden_finger_usage?: string;
   character_changes?: string;
   gains_costs?: string;
   foreshadowing?: string;
@@ -159,16 +156,19 @@ export interface StoryArcData {
   [k: string]: unknown;
 }
 
-/** bridges：桥段库聚合（dissect_stats.build_bridges_payload） */
-export interface BridgesV5Data {
-  pipeline_version?: number;
+/** bridges：剧情单元库（dissect_stats.build_units_payload） */
+export interface UnitsData {
   arc_count?: number;
   avg_arc_length?: number;
   arc_length_distribution?: Record<string, number>;
   payoff_type_distribution?: Record<string, number>;
   payoff_density?: string;
   typical_arcs?: StoryArcData[];
-  role_pattern?: { avg_intro_chapters?: number; avg_build_chapters?: number; payoff_position_ratio?: number; [k: string]: unknown };
+  role_pattern?: { avg_open_chapters?: number; avg_advance_chapters?: number; turn_position_ratio?: number; [k: string]: unknown };
+  /** 单元强弱序列，如「强中弱强」 */
+  unit_rhythm?: string;
+  /** 强单元后面接缓和的比例（0-1） */
+  relief_after_strong?: number;
   [k: string]: unknown;
 }
 
@@ -184,11 +184,10 @@ export interface StyleFingerprintData {
   /** style_stats.compute_style_metrics 的量化指标 */
   metrics?: Record<string, unknown>;
   examples?: Array<{ kind?: string; chapter?: number; text?: string }>;
-  pipeline_version?: number;
   [k: string]: unknown;
 }
 
-/** 老包 / 通用文风字段（导入写作风格库只用到这几项） */
+/** 导入写作风格库只用到这几项 */
 export type StyleData = Pick<StyleFingerprintData, 'name' | 'description' | 'prompt_content' | 'traits'>;
 
 /** character_archive：人物功能谱（skeleton_builder.build_character_functions） */
@@ -196,15 +195,15 @@ export interface CharacterFunctionsData {
   protagonist?: {
     name?: string;
     persona?: string;
-    golden_finger?: string;
+    /** 核心优势 / 特殊能力；没有时为「无」 */
+    advantage?: string;
     flaws_and_pressure?: string;
-    growth_track?: Array<{ stage?: string; state?: string }>;
+    growth_track?: Array<{ volume?: string; state?: string }>;
     [k: string]: unknown;
   } | null;
   allies?: Array<{ name?: string; function_role?: string; arc_span?: string; technique?: string; [k: string]: unknown }>;
   antagonists?: Array<{ name?: string; tier?: string; conflict_nature?: string; escalation?: string; outcome?: string; [k: string]: unknown }>;
   function_slots?: Array<{ slot?: string; how_used?: string; [k: string]: unknown }>;
-  pipeline_version?: number;
   [k: string]: unknown;
 }
 
@@ -224,46 +223,28 @@ export interface StructureStatsData {
   avg_arc_length?: number;
   arc_length_distribution?: Record<string, number>;
   payoff_type_distribution?: Record<string, number>;
+  unit_rhythm?: string;
+  relief_after_strong?: number;
   hook_examples?: Array<{ chapter?: number; type?: string; text?: string }>;
   [k: string]: unknown;
 }
 
-/** methodology：写法手册（V3 五键形状未变） */
+/** 写法手册的一条：模式 + 依据（章号 / 单元编号）+ 给作者的建议 */
+export interface MethodologyItem {
+  pattern?: string;
+  evidence?: string;
+  writing_tips?: string;
+  [k: string]: unknown;
+}
+
+/** methodology：写法手册（skeleton_builder.build_methodology） */
 export interface MethodologyData {
-  golden_finger_pattern?: {
-    type?: string;
-    balance_mechanism?: string;
-    evolution_pattern?: string;
-    writing_tips?: string;
-    [k: string]: unknown;
-  } | null;
-  opening_hook_pattern?: {
-    hook_type?: string;
-    first_chapter_strategy?: string;
-    writing_tips?: string;
-    [k: string]: unknown;
-  } | null;
-  facepunch_rhythm?: {
-    small_facepunch_freq?: string;
-    big_facepunch_freq?: string;
-    three_elements_pattern?: string;
-    writing_tips?: string;
-    [k: string]: unknown;
-  } | null;
-  power_progression?: {
-    system_type?: string;
-    level_count?: number;
-    pace?: string;
-    writing_tips?: string;
-    [k: string]: unknown;
-  } | null;
-  highlight_density?: {
-    small_per_n_chapters?: number;
-    medium_per_n_chapters?: number;
-    big_per_n_chapters?: number;
-    writing_tips?: string;
-    [k: string]: unknown;
-  } | null;
+  opening_pattern?: MethodologyItem | null;
+  volume_rhythm?: MethodologyItem | null;
+  unit_design?: MethodologyItem | null;
+  tension_rhythm?: MethodologyItem | null;
+  growth_progression?: MethodologyItem | null;
+  advantage_usage?: MethodologyItem | null;
 }
 
 // ============================================================

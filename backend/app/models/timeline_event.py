@@ -22,7 +22,6 @@ class TimelineEvent(Base):
     time_marker = Column(String(200), nullable=True)
     actor_ids = Column(JSON, nullable=True)
     target_ids = Column(JSON, nullable=True)
-    plot_line_ids = Column(JSON, nullable=True)
     public_visibility = Column(String(20), default="public", index=True)
 
     created_at = Column(DateTime, server_default=func.now())

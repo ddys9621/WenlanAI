@@ -405,9 +405,9 @@ function DeleteDialog({
 const IMPORT_STAT_LABELS: Record<string, string> = {
   characters: '角色',
   chapters: '章节',
-  outlines: '大纲',
+  outlines: '总纲',
   plot_cards: '剧情卡片',
-  plot_lines: '剧情线',
+  volumes: '卷纲',
   chapter_outlines: '章纲',
   writing_styles: '写作风格',
   world_rules: '世界规则',
@@ -653,12 +653,12 @@ export default function ProjectList() {
   // 向导创建完成（F5：支持 next_wizard_route 决定跳转目标）
   const handleWizardSuccess = async (
     projectId: string,
-    options?: { nextRoute?: 'bridge_planning' | 'chapter_outlines' }
+    options?: { nextRoute?: 'volume_planning' | 'chapter_outlines' }
   ) => {
     setShowWizard(false)
     await refreshProjects()
-    if (options?.nextRoute === 'bridge_planning') {
-      navigate(`/project/${projectId}/plot-bridges`)
+    if (options?.nextRoute === 'volume_planning') {
+      navigate(`/project/${projectId}/outline/volumes`)
     } else {
       navigate(`/project/${projectId}`)
     }
@@ -671,11 +671,11 @@ export default function ProjectList() {
   // F5：灵感模式完成跳转，同样支持 next_wizard_route
   const handleEnterInspiredProject = (
     projectId: string,
-    options?: { nextRoute?: 'bridge_planning' | 'chapter_outlines' }
+    options?: { nextRoute?: 'volume_planning' | 'chapter_outlines' }
   ) => {
     closeInspiration()
-    if (options?.nextRoute === 'bridge_planning') {
-      navigate(`/project/${projectId}/plot-bridges`)
+    if (options?.nextRoute === 'volume_planning') {
+      navigate(`/project/${projectId}/outline/volumes`)
     } else {
       navigate(`/project/${projectId}`)
     }
@@ -846,12 +846,8 @@ interface WizardForm {
   chapter_count: number
   character_count: number
   requirements: string
-  /** 向导步骤 4：支线数量（主线固定 1 条并覆盖全书章节数） */
-  sub_line_count: number
   /** 目标平台（空 = 通用） */
   platform_preset: PlatformPreset | ''
-  /** 长篇模式：变长桥段 + 滚动规划 */
-  longform_mode: boolean
 }
 
 const DEFAULT_WIZARD_FORM: WizardForm = {
@@ -864,9 +860,7 @@ const DEFAULT_WIZARD_FORM: WizardForm = {
   chapter_count: 30,
   character_count: 5,
   requirements: '',
-  sub_line_count: 2,
   platform_preset: '',
-  longform_mode: false,
 }
 
 const PLATFORM_CHOICES: { value: PlatformPreset | ''; label: string }[] = [
@@ -876,8 +870,6 @@ const PLATFORM_CHOICES: { value: PlatformPreset | ''; label: string }[] = [
   { value: 'jinjiang', label: '晋江（女频）' },
   { value: 'qimao', label: '七猫（免费）' },
 ]
-/** 章节数达到这个量级时向导默认打开长篇模式 */
-const LONGFORM_SUGGEST_CHAPTERS = 200
 
 const GENRE_OPTIONS = ['玄幻', '奇幻', '武侠', '仙侠', '都市', '现实', '历史', '军事', '游戏', '体育', '科幻', '悬疑', '灵异', '二次元', '言情', '现言', '古言']
 const PERSPECTIVE_OPTIONS = ['第一人称', '第三人称', '全知视角']
@@ -938,7 +930,7 @@ function WizardModal({
   onClose: () => void;
   onSuccess: (
     projectId: string,
-    options?: { nextRoute?: 'bridge_planning' | 'chapter_outlines' }
+    options?: { nextRoute?: 'volume_planning' | 'chapter_outlines' }
   ) => void;
   /** V3.2-A：拆书页跳转过来时传入，在 mount 后拉取该任务对应的参考包预填 */
   initialPackTaskId?: string | null;
@@ -1072,9 +1064,8 @@ function WizardModal({
           selected_plugins: selectedPlugins,
           // V3.2-B：透传拆书参考包；项目创建成功后后端会自动挂载
           ...r8Payload(),
-          // 长篇设置：平台预设（选了平台会带出 C3 章末默认）+ 长篇模式（变长桥段 + 滚动规划）
+          // 长篇设置：平台预设（单章字数与写法提示）
           ...(form.platform_preset ? { platform_preset: form.platform_preset } : {}),
-          ...(form.longform_mode ? { bridge_rhythm: 'varied' as const, rolling_planning: true } : {}),
         },
         {
           signal: controller.signal,
@@ -1183,24 +1174,19 @@ function WizardModal({
 
       if (controller.signal.aborted) return
       if (stepConfirm) {
-        await waitForConfirm('lines', 75, '故事大纲已生成，请确认后继续生成剧情线')
+        await waitForConfirm('lines', 75, '故事大纲已生成，请确认后继续生成卷纲')
       }
       if (controller.signal.aborted) return
 
-      // Step 4: 剧情线（主线 ×1 + 支线 ×N，主线预计章节数 = 项目章节数）
+      // Step 4: 卷纲（按总纲分卷，并把第 1 卷细化为剧情单元；全书章数 = 项目章节数）
       setSteps(s => ({ ...s, lines: 'processing' }))
-      setProgressMsg('正在生成剧情线...')
+      setProgressMsg('正在生成卷纲...')
       setProgress(75)
 
-      await wizardStreamApi.generatePlotLinesStream(
+      await wizardStreamApi.generateVolumesStream(
         {
           project_id: pid,
           chapter_count: form.chapter_count,
-          sub_line_count: form.sub_line_count,
-          requirements: form.requirements.trim() || undefined,
-          enable_mcp: enableMcp,
-          selected_plugins: selectedPlugins,
-          ...r8Payload(),
         },
         {
           signal: controller.signal,
@@ -1210,7 +1196,9 @@ function WizardModal({
           },
           onResult: (result) => {
             setLinesPreview(
-              `主线《${result.main_line.title}》${result.main_line.beat_count} 个节点 → ${result.plan_preview.total_bridges} 个桥段 / ${result.plan_preview.total_chapters} 章`
+              `共 ${result.volumes.length} 卷 / ${result.chapter_count} 章：` +
+              result.volumes.slice(0, 4).map(v => `《${v.title}》`).join('、') +
+              (result.volumes.length > 4 ? ' …' : '')
             )
             setSteps(s => ({ ...s, lines: 'completed' }))
           },
@@ -1266,13 +1254,12 @@ function WizardModal({
     } catch { /* api 拦截器已 toast */ }
   }
 
-  const enterProject = () => onSuccess(projectId, { nextRoute: 'bridge_planning' })
-  const enterLabel = '进入桥段规划'
+  const enterProject = () => onSuccess(projectId, { nextRoute: 'volume_planning' })
+  const enterLabel = '进入卷纲规划'
   const isSuccess = phase === 'done' && !error
   const canClose = phase === 'form' || phase === 'done' || Boolean(error)
 
   const advancedSummary = [
-    `${form.sub_line_count} 条支线`,
     stepConfirm ? '分步确认' : '连续生成',
     refPack.enabled ? '拆书参考已启用' : '未用拆书参考',
     enableMcp ? 'MCP 已启用' : '未用 MCP',
@@ -1329,9 +1316,9 @@ function WizardModal({
             </h2>
             <p className="mt-1 text-sm text-content-secondary">
               {phase === 'form'
-                ? '填好书名与简介，AI 将依次生成世界观、角色、故事大纲与剧情线。'
+                ? '填好书名与简介，AI 将依次生成世界观、角色、总纲与卷纲。'
                 : isSuccess
-                  ? '设定与剧情线已就位，下一步进入桥段规划，为整本书搭好章节骨架。'
+                  ? '设定与卷纲已就位，下一步在卷纲里逐个剧情单元生成章纲，确认后就能开写。'
                   : `《${form.title}》`}
             </p>
           </div>
@@ -1443,7 +1430,6 @@ function WizardModal({
                     onChange={e => {
                       const n = Number(e.target.value)
                       updateField('chapter_count', n)
-                      if (n >= LONGFORM_SUGGEST_CHAPTERS && !form.longform_mode) updateField('longform_mode', true)
                     }}
                     className="hh-field"
                   />
@@ -1459,7 +1445,7 @@ function WizardModal({
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div>
                 <div>
                   <label className="hh-label">目标平台</label>
                   <select
@@ -1472,18 +1458,6 @@ function WizardModal({
                     ))}
                   </select>
                 </div>
-                <label className="flex cursor-pointer items-start gap-2 pt-6 text-xs text-content-secondary">
-                  <input
-                    type="checkbox"
-                    className="mt-0.5"
-                    checked={form.longform_mode}
-                    onChange={e => updateField('longform_mode', e.target.checked)}
-                  />
-                  <span className="leading-5">
-                    <span className="font-medium text-content">长篇模式</span>
-                    （变长桥段 + 滚动规划，写 {LONGFORM_SUGGEST_CHAPTERS} 章以上建议打开）
-                  </span>
-                </label>
               </div>
 
               <div>
@@ -1533,22 +1507,6 @@ function WizardModal({
                       }}
                     />
 
-                    {/* 向导步骤 4：支线数量（主线固定 1 条，覆盖全书章节数） */}
-                    <div>
-                      <label className="hh-label">支线数量</label>
-                      <input
-                        type="number"
-                        min={0}
-                        max={4}
-                        value={form.sub_line_count}
-                        onChange={e => updateField('sub_line_count', Math.max(0, Math.min(4, Number(e.target.value) || 0)))}
-                        className="hh-field"
-                      />
-                      <p className="mt-1 text-xs text-content-tertiary">
-                        主线固定 1 条并覆盖全书 {form.chapter_count} 章；支线锚定主线节点、按篇幅预算挂到桥段（每桥段只主推一条）。大纲完成后自动生成剧情线，再进入桥段规划。
-                      </p>
-                    </div>
-
                     {/* 分步确认开关：世界观/角色各生成完暂停确认 */}
                     <ToggleRow
                       checked={stepConfirm}
@@ -1576,8 +1534,8 @@ function WizardModal({
               <ol className="hh-subpanel divide-y divide-surface-border/80">
                 <StepRow status={steps.world} title="世界观构建" description="时代、地点、氛围与核心规则" />
                 <StepRow status={steps.chars} title="角色生成" description={`${form.character_count} 位主要角色及关系`} />
-                <StepRow status={steps.outline} title="故事大纲" description={`${form.chapter_count} 章整体结构`} />
-                <StepRow status={steps.lines} title="剧情线" description={`1 条主线 + ${form.sub_line_count} 条支线，含节点`} />
+                <StepRow status={steps.outline} title="总纲" description={`${form.chapter_count} 章的全书主线`} />
+                <StepRow status={steps.lines} title="卷纲" description="按总纲分卷，第 1 卷细化为剧情单元" />
               </ol>
               {isSuccess && linesPreview && (
                 <p className="text-xs leading-6 text-content-secondary">{linesPreview}</p>
@@ -1599,7 +1557,7 @@ function WizardModal({
               {awaitingStep && !error && phase === 'generating' && (
                 <div className="space-y-3 border border-brand/25 bg-brand/5 p-4">
                   <p className="text-sm font-medium text-content">
-                    {awaitingStep === 'chars' ? '世界观已生成，确认后继续生成角色' : awaitingStep === 'outline' ? '角色已生成，确认后继续生成故事大纲' : '故事大纲已生成，确认后继续生成剧情线'}
+                    {awaitingStep === 'chars' ? '世界观已生成，确认后继续生成角色' : awaitingStep === 'outline' ? '角色已生成，确认后继续生成故事大纲' : '总纲已生成，确认后继续生成卷纲'}
                   </p>
                   {awaitingStep === 'chars' && worldPreview && (
                     <dl className="grid gap-x-4 gap-y-1 text-xs leading-6 text-content-secondary sm:grid-cols-[auto_1fr]">
@@ -1625,7 +1583,7 @@ function WizardModal({
                   </p>
                   <button onClick={() => continueGateRef.current?.()} className="hh-btn-primary hh-btn-sm">
                     <Sparkles className="h-3.5 w-3.5" />
-                    继续生成{awaitingStep === 'chars' ? '角色' : awaitingStep === 'outline' ? '故事大纲' : '剧情线'}
+                    继续生成{awaitingStep === 'chars' ? '角色' : awaitingStep === 'outline' ? '总纲' : '卷纲'}
                   </button>
                 </div>
               )}

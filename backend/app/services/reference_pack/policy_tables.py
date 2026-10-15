@@ -129,10 +129,9 @@ def get_model_tier(model_name: str) -> ModelTier:
 # 每个 (scene, tier) entry 明确写死每个维度的 strength
 # strength: 'off' / 'light' / 'medium' / 'deep'
 #
-# V5（book_dissect_v5_design.md §5）维度集合收敛为 7 维：
-#   synopsis（全书骨架）/ bridges（桥段库）/ style（文风指纹）/ character_archive（人物功能谱）
-#   / methodology（写法手册）/ structure（结构统计）/ corpus（拆书卡检索）
-# archetypes / worldbuilding / entities / relations / events 随实体图谱抽取一并删除。
+# 拆书维度共 7 维（与作者的 总纲 → 卷纲 → 章纲 对应）：
+#   synopsis（全书骨架 ≈ 总纲）/ bridges（剧情单元库 ≈ 卷纲里的一件件事，键名沿用）/ style（文风指纹）
+#   / character_archive（人物功能谱）/ methodology（写法手册）/ structure（结构统计）/ corpus（拆书卡检索 ≈ 章纲）
 
 V5_DIMENSIONS: tuple[str, ...] = (
     "synopsis", "bridges", "style", "character_archive", "methodology", "structure", "corpus",
@@ -158,13 +157,13 @@ POLICY_TABLE: dict[tuple[str, ModelTier], dict[str, Strength]] = {
     ("story_outline", "L"):  {"synopsis": "deep", "methodology": "deep", "bridges": "medium", "structure": "medium"},
     ("story_outline", "XL"): {"synopsis": "deep", "methodology": "deep", "bridges": "deep", "structure": "deep"},
 
-    # ============ 3.5 桥段规划（K2 核心场景）============
-    ("bridge_planning", "S"):  {"bridges": "medium", "synopsis": "light", "methodology": "light"},
-    ("bridge_planning", "M"):  {"bridges": "deep", "methodology": "deep", "synopsis": "medium",
+    # ============ 3.5 卷纲规划（分卷 / 细化剧情单元）============
+    ("volume_planning", "S"):  {"bridges": "medium", "synopsis": "light", "methodology": "light"},
+    ("volume_planning", "M"):  {"bridges": "deep", "methodology": "deep", "synopsis": "medium",
                                 "structure": "medium", "character_archive": "medium"},
-    ("bridge_planning", "L"):  {"bridges": "deep", "methodology": "deep", "synopsis": "medium",
+    ("volume_planning", "L"):  {"bridges": "deep", "methodology": "deep", "synopsis": "medium",
                                 "structure": "medium", "character_archive": "medium"},
-    ("bridge_planning", "XL"): {"bridges": "deep", "methodology": "deep", "synopsis": "deep",
+    ("volume_planning", "XL"): {"bridges": "deep", "methodology": "deep", "synopsis": "deep",
                                 "structure": "deep", "character_archive": "deep"},
 
     # ============ 4. 章纲（批量）============

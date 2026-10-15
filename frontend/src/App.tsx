@@ -24,7 +24,6 @@ const BookDissect = lazy(() => import('@/pages/BookDissect'))
 const ReferencePackLibrary = lazy(() => import('@/pages/ReferencePackLibrary'))
 const ReferencePackDetail = lazy(() => import('@/pages/ReferencePackDetail'))
 const ProjectReferencePacks = lazy(() => import('@/pages/ProjectReferencePacks'))
-const PlotBridges = lazy(() => import('@/pages/PlotBridges'))
 const WorldMap = lazy(() => import('@/pages/WorldMap'))
 
 export default function App() {
@@ -63,7 +62,6 @@ export default function App() {
             <Route path="writing-styles" element={<WritingStyles />} />
             <Route path="memories" element={<Memories />} />
             <Route path="reference-packs" element={<ProjectReferencePacks />} />
-            <Route path="plot-bridges" element={<PlotBridges />} />
           </Route>
 
           {/* 独立页面 */}

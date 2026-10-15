@@ -1,7 +1,7 @@
 """API 层公共依赖：登录校验与项目归属校验。
 
 此前 8 个 api 模块各有一份逐字相同的 verify_project_access、5 个模块各有一份 require_login；
-统一到这里。plot_bridges 的版本对非本人返回 403，语义不同，保留原地。
+统一到这里。
 """
 from typing import Any, Iterable, Optional
 

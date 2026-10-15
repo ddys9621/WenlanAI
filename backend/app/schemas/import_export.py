@@ -114,17 +114,6 @@ class WorldRuleExportData(BaseModel):
     created_at: Optional[str] = None
 
 
-class PlotLineExportData(BaseModel):
-    """剧情线导出数据"""
-    name: str
-    description: Optional[str] = None
-    line_type: str = "main"
-    status: str = "active"
-    order_index: int = 0
-    timeline_data: Optional[Any] = None  # 时间线节点数据(beats),JSON结构
-    created_at: Optional[str] = None
-
-
 class ChapterOutlineExportData(BaseModel):
     """章节大纲导出数据"""
     chapter_number: int
@@ -141,35 +130,39 @@ class ChapterOutlineExportData(BaseModel):
     emotional_arc: Optional[str] = None
     chapter_hook: Optional[str] = None
     narrative_tasks: Optional[Any] = None  # 本章叙事任务（伏笔 / 承诺），JSON 结构
+    # 章节契约 + 卷纲归属（按卷序号关联，导入时挂到新卷上）
+    entry_state: Optional[str] = None
+    exit_state: Optional[str] = None
+    forbidden: Optional[List[str]] = None
+    volume_number: Optional[int] = None
+    unit_index: Optional[int] = None
     created_at: Optional[str] = None
+
+
+class VolumeExportData(BaseModel):
+    """卷纲导出数据（剧情单元 / 线索编排原样带上）"""
+    volume_number: int
+    title: str = ""
+    chapter_start: int
+    chapter_end: int
+    summary: Optional[str] = None
+    goal: Optional[str] = None
+    climax: Optional[str] = None
+    ending_hook: Optional[str] = None
+    units: List[Dict[str, Any]] = []
+    threads: List[str] = []
+    review_note: Optional[str] = None
+    review_status: Optional[str] = None
 
 
 class PlotCardExportData(BaseModel):
     """剧情卡片导出数据"""
-    # 兼容字段:保留用于向后兼容旧版本(v1.0.0),新版本使用独立的关联数组
-    plot_line_name: Optional[str] = None
-    chapter_outline_number: Optional[int] = None
     title: str
     content: Optional[str] = None
     card_type: str = "event"
     order_index: int = 0
     tags: Optional[str] = None  # JSON格式标签
     created_at: Optional[str] = None
-
-
-class ChapterOutlinePlotLineLinkExportData(BaseModel):
-    """章节大纲-剧情线关联导出数据"""
-    chapter_outline_number: int
-    plot_line_name: str
-    role: Optional[str] = "main"
-    order_index: Optional[int] = None
-    timeline_coverage: Optional[Any] = None  # 时间线覆盖数据,JSON结构
-
-
-class PlotCardPlotLineLinkExportData(BaseModel):
-    """剧情卡片-剧情线关联导出数据"""
-    card_title: str
-    plot_line_name: str
 
 
 class PlotCardChapterOutlineLinkExportData(BaseModel):
@@ -182,7 +175,7 @@ class PlotCardChapterOutlineLinkExportData(BaseModel):
 
 class ProjectExportData(BaseModel):
     """项目完整导出数据"""
-    version: str = "1.1.0"
+    version: str = "2.0.0"
     export_time: str
     project: Dict[str, Any]
     chapters: List[ChapterExportData] = []
@@ -195,12 +188,9 @@ class ProjectExportData(BaseModel):
     generation_history: List[GenerationHistoryExportData] = []
     # v1.0.0 字段
     world_rules: List[WorldRuleExportData] = []
-    plot_lines: List[PlotLineExportData] = []
+    volumes: List[VolumeExportData] = []
     chapter_outlines: List[ChapterOutlineExportData] = []
     plot_cards: List[PlotCardExportData] = []
-    # v1.1.0 新增:关联关系数组
-    chapter_outline_plot_line_links: List[ChapterOutlinePlotLineLinkExportData] = []
-    plot_card_plot_line_links: List[PlotCardPlotLineLinkExportData] = []
     plot_card_chapter_outline_links: List[PlotCardChapterOutlineLinkExportData] = []
 
 

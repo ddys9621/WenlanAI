@@ -1,6 +1,6 @@
 """服务端批量写作队列（跑在 ai_jobs 上：关掉浏览器也不停，刷新可接管）。
 
-每章：[缺章纲 → 自动滚动规划（填充 / 展开覆盖本章的桥段）] → 生成候选稿（带截断续写，失败自动重试）→
+每章：[缺章纲 → 自动规划（细化覆盖本章的卷纲 / 展开覆盖本章的剧情单元）] → 生成候选稿（带截断续写，失败自动重试）→
 质量闸门（AI 味分过高 / 字数严重不足 → 重写一次）→ 自动采用最后一稿写入正文 → 分析（记忆 / 状态卡 / 伏笔结算）→
 一致性闸门（严重问题暂停）。
 
@@ -112,32 +112,10 @@ def _default_analyze() -> Analyze:
 
 
 async def default_expand(db: Any, project_id: str, chapter_number: int, ai_service: Any) -> bool:
-    """自动滚动规划：找覆盖本章的桥段；draft → 先填充（只填到本章附近），ready → 展开成章纲。成功返回 True。"""
-    from app.models.plot_bridge import PlotBridge
-    from app.services.bridge_planning_service import FILL_LOOKAHEAD_CHAPTERS, BridgePlanningService
-    from app.services.bridge_slot_planner import bridge_chapter_range
+    """自动规划：找覆盖本章的卷纲；没细化就先拆剧情单元，再把覆盖本章的单元展开成章纲。成功返回 True。"""
+    from app.services.volume_service import ensure_outline_for_chapter
 
-    bridges = (await db.execute(
-        select(PlotBridge).where(PlotBridge.project_id == project_id).order_by(PlotBridge.bridge_number)
-    )).scalars().all()
-    target = next((b for b in bridges if bridge_chapter_range(b)[0] <= chapter_number <= bridge_chapter_range(b)[1]), None)
-    if target is None:
-        return False
-    service = BridgePlanningService(ai_service=ai_service)
-    if target.status == "draft":
-        async for event in service.fill_bridges(db, project_id, model_name=None, beat_index=target.beat_index,
-                                                max_chapter=chapter_number + FILL_LOOKAHEAD_CHAPTERS):
-            if event.get("type") == "done":
-                break
-        await db.refresh(target)
-    # 前面还没展开的 ready 桥段要先按顺序展开（展开要求前一桥段 completed）
-    for bridge in bridges:
-        await db.refresh(bridge)
-        if bridge.bridge_number > target.bridge_number:
-            break
-        if bridge.status == "ready":
-            await service.expand_bridge_to_chapters(db, bridge.id, model_name=None)
-    return True
+    return await ensure_outline_for_chapter(db, project_id, chapter_number, ai_service)
 
 
 def isolated_sqlite_engine(database_url: str) -> Any:
@@ -294,7 +272,7 @@ async def run_batch(
                         logger.warning("[Batch] 第 %d 章自动规划失败: %s", number, exc)
                         state.warnings.append(f"第 {number} 章自动规划失败：{exc}")
                 if chapter is None or not chapter.chapter_outline_id:
-                    state.message = f"第 {number} 章没有章纲（请先规划 / 展开桥段），批量在此停止"
+                    state.message = f"第 {number} 章没有章纲（请先在谋篇页规划卷纲 / 生成章纲），批量在此停止"
                     emit(number, None, "no_outline")
                     break
                 chapter_id, has_content = chapter.id, bool((chapter.content or "").strip())

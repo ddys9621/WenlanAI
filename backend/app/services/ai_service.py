@@ -576,6 +576,8 @@ class AIService:
     sampling_enabled: bool = True
     # 分析 / 抽取 / 摘要专用模型（用户设置 preferences.analysis_model）；None = 跟随 default_model
     analysis_model: Optional[str] = None
+    # 编辑器行内补全专用模型（用户设置 completion_model，由 get_user_ai_service 注入）；None = 跟随 default_model
+    completion_model: Optional[str] = None
 
     def __init__(
         self,

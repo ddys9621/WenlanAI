@@ -266,7 +266,7 @@ describe('摘要选择器（横幅 / 托盘只关心摘要，正文 content 事�
     const afterProgress = selectRunningSummaries(useAIJobsStore.getState(), 'p1');
     expect(summariesEqual(afterContent, afterProgress)).toBe(false);
     expect(afterProgress[0].progress?.pct).toBe(50);
-    expect(selectRunningSummaries(useAIJobsStore.getState(), 'p1', ['plot_lines_generate'])).toEqual([]);
+    expect(selectRunningSummaries(useAIJobsStore.getState(), 'p1', ['volume_plan'])).toEqual([]);
     expect(selectAllSummaries(useAIJobsStore.getState()).map((j) => j.id)).toEqual(['js']);
   });
 });

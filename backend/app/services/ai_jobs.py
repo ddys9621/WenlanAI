@@ -280,7 +280,7 @@ class JobSession:
     """`async with job_session_factory(user_id)() as db`：后台任务用的会话，引擎按 user_id 惰性获取。
 
     任务寿命超过请求，不能复用 Depends(get_db) 的会话（请求结束即关闭）。
-    与 book_dissect/extractor_v2._create_task_session 同一套路（原 plot_bridges._JobSession 搬到这里）。
+    与 book_dissect/extractor_v2._create_task_session 同一套路。
     """
 
     def __init__(self, user_id: str):

@@ -1,7 +1,8 @@
 /**
- * 全局智能助笔 ·「对话」界面（参考岚笺 GlobalAssistantHost 的 agent 页）：
- * 一个输入框，助笔用全书工具自己定位目标；回复附「处理记录」；修改只给候选（内容修改候选 / 章节候选稿），确认后才写入；
- * 需要作者决定时出提问卡，回答后接着处理；可开「发送前核对」先看本次会带给模型的内容。对话保存在服务端，刷新后可续接。
+ * 全局智能助笔 ·「共创室」对话界面（参考岚笺 GlobalAssistantHost 的 agent 页 + creative-team）：
+ * 一个输入框和一支创作团队：主编默认发言、可以把事交给成员，作者也能「@成员」直接找人；回复附「处理记录」；
+ * 修改只给候选（内容修改候选 / 章节候选稿），规划给草案卡片（卷纲 / 剧情单元 / 章纲），确认后才写入；
+ * 顶部的创作进度告诉作者下一步；需要作者决定时出提问卡；对话保存在服务端，刷新后可续接。
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import {
@@ -13,13 +14,15 @@ import { assistantApi } from '@/services/api';
 import { AIJobError, runAIJob, useAIJobsStore, waitForAIJob } from '@/store/aiJobsStore';
 import { emitAssistantData, pageContextOf, useAssistantStore, type AssistantDataChange } from '@/store/assistantStore';
 import type {
-  AssistantAnswer, AssistantChapterCandidateRef, AssistantFieldCandidate, AssistantMessageView, AssistantPageContext, AssistantPreview,
-  AssistantRunResult, AssistantSessionView,
+  AssistantAnswer, AssistantChapterCandidateRef, AssistantFieldCandidate, AssistantMember, AssistantMessageView, AssistantPageContext,
+  AssistantPreview, AssistantProgress, AssistantRunResult, AssistantSessionView, AssistantTeam,
 } from '@/types/assistant';
 import { appendQuote, appendRequest, HISTORY_LIMIT } from '@/utils/assistantText';
+import { mentionMember } from '@/utils/cocreation';
 import type { SSEClientOptions, SSEMessage } from '@/utils/sseClient';
 import { AuthorQuestionCard } from './AuthorQuestionCard';
 import { FieldCandidateCard } from './FieldCandidateCard';
+import { MemberAvatar, PlanCard, ProgressStrip, TeamBar, TeamSettings } from './CocreationParts';
 
 const MAX_CHARS = 4000;
 const REVIEW_KEY = 'assistant-review-before-send';
@@ -28,15 +31,13 @@ interface LiveTurn {
   goal: string;
   steps: { label: string; detail: string; ok: boolean }[];
   text: string;
+  /** 本轮发言的成员（speaker 事件） */
+  member?: AssistantMember | null;
+  /** 主编交给成员的事：处理中 / 成员的回复 */
+  delegations: { member: AssistantMember; task: string; content: string }[];
 }
 
-const STARTERS: { title: string; hint: string; text: string; needsChapter?: boolean }[] = [
-  { title: '推敲设想', hint: '梳理主角目标、冲突与悬念', text: '帮我完善核心设想，重点检查主角目标、核心冲突和故事悬念。我的想法是：' },
-  { title: '完善人物', hint: '把动机与经历接到情节里', text: '帮我完善人物设定，重点补足动机、关系与成长变化。要讨论的人物是：' },
-  { title: '接着写', hint: '围绕本章章纲推进情节', text: '结合本章章纲和已有正文，帮我续写接下来的情节。希望突出：', needsChapter: true },
-  { title: '讨论写法', hint: '比较方案，再决定怎么写', text: '先和我讨论以下情节的几种写法，比较人物动机、节奏和后续影响，暂不修改原文。情节是：' },
-  { title: '看看待办', hint: '本书现在需要处理什么', text: '看看这本书现在有哪些需要我处理的事项，按优先级列出来，并说明先做哪件。' },
-];
+const newLive = (goal: string, text = ''): LiveTurn => ({ goal, steps: [], text, delegations: [] });
 
 /** 回复里的 **加粗** 显示成粗体，其余照原样换行 */
 function RichText({ text }: { text: string }) {
@@ -100,6 +101,9 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
   const [preview, setPreview] = useState<{ data: AssistantPreview; key: string } | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
+  const [team, setTeam] = useState<AssistantTeam | null>(null);
+  const [showTeam, setShowTeam] = useState(false);
+  const [progress, setProgress] = useState<AssistantProgress | null>(null);
   const jobIdRef = useRef<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -122,6 +126,17 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
     }
   }, [projectId]);
 
+  const loadProgress = useCallback(async () => {
+    try {
+      setProgress(await assistantApi.progress(projectId));
+    } catch { /* 进度只是提示，读不到就不显示 */ }
+  }, [projectId]);
+
+  useEffect(() => {
+    void assistantApi.team(projectId).then(setTeam).catch(() => setTeam(null));
+    void loadProgress();
+  }, [loadProgress, projectId]);
+
   useEffect(() => { sessionStorage.setItem(`assistant-draft:${projectId}`, draft); }, [draft, projectId]);
 
   const handleEvent = useCallback((m: SSEMessage) => {
@@ -143,8 +158,35 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
       pendingRef.current.data.push({ entity: 'chapter_candidate', chapterId: item.chapter_id, targetId: item.id });
     } else if (m.type === 'navigate' && typeof m.page === 'string') {
       pendingRef.current.nav = m.page;
+    } else if (m.type === 'speaker' && m.member) {
+      const member = m.member as AssistantMember;
+      setLive((prev) => (prev ? { ...prev, member } : prev));
+    } else if (m.type === 'member_start' && m.member) {
+      const member = m.member as AssistantMember;
+      const task = String(m.task ?? '');
+      setLive((prev) => (prev ? { ...prev, delegations: [...prev.delegations, { member, task, content: '' }] } : prev));
+      scrollToEnd();
+    } else if (m.type === 'member_message' && m.member) {
+      const member = m.member as AssistantMember;
+      const content = String(m.content ?? '');
+      setLive((prev) => {
+        if (!prev) return prev;
+        const index = prev.delegations.findIndex((d) => d.member.id === member.id && !d.content);
+        const delegations = index < 0
+          ? [...prev.delegations, { member, task: '', content }]
+          : prev.delegations.map((d, i) => (i === index ? { ...d, content } : d));
+        return { ...prev, delegations };
+      });
+      scrollToEnd();
+    } else if (m.type === 'plan' && m.plan) {
+      const kind = (m.plan as { kind?: string }).kind;
+      pendingRef.current.data.push({ entity: kind === 'outlines' ? 'chapter_outline' : 'volume' });
+    } else if (m.type === 'job' && m.job) {
+      const job = m.job as { title?: string };
+      toast.success(`${job.title ?? '后台任务'}已开始，进度在右下角任务托盘`);
+      void useAIJobsStore.getState().syncFromServer(projectId);
     }
-  }, [scrollToEnd]);
+  }, [projectId, scrollToEnd]);
 
   const flushPending = useCallback(() => {
     const { nav, data } = pendingRef.current;
@@ -157,7 +199,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
   const follow = useCallback(async (jobId: string, goal: string) => {
     jobIdRef.current = jobId;
     setBusy(true);
-    setLive({ goal, steps: [], text: useAIJobsStore.getState().jobs[jobId]?.content ?? '' });
+    setLive(newLive(goal, useAIJobsStore.getState().jobs[jobId]?.content ?? ''));
     const unsubscribe = useAIJobsStore.getState().subscribe(jobId, (m) => handleEvent(m));
     try {
       await waitForAIJob(jobId);
@@ -170,9 +212,10 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
       setLive(null);
       await reload();
       flushPending();
+      void loadProgress();
       scrollToEnd();
     }
-  }, [flushPending, handleEvent, reload, scrollToEnd]);
+  }, [flushPending, handleEvent, loadProgress, reload, scrollToEnd]);
 
   useEffect(() => {
     let cancelled = false;
@@ -203,7 +246,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
 
   const runJob = async (goal: string, connect: (o: SSEClientOptions<AssistantRunResult>) => Promise<unknown>) => {
     setBusy(true);
-    setLive({ goal, steps: [], text: '' });
+    setLive(newLive(goal));
     scrollToEnd();
     try {
       await runAIJob<AssistantRunResult>({
@@ -226,6 +269,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
       setLive(null);
       await reload();
       flushPending();
+      void loadProgress();
       scrollToEnd();
     }
   };
@@ -316,7 +360,15 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
   const messages = view?.messages ?? [];
   const waitingRun = view?.active_run?.status === 'waiting_input' ? view.active_run : null;
   const historyCount = Math.min(messages.length, HISTORY_LIMIT);
-  const hasChapter = Boolean(page.chapter_id);
+  const members = team?.members ?? [];
+  const mention = (member: AssistantMember) => {
+    setDraft((prev) => mentionMember(prev, member.name));
+    requestAnimationFrame(() => inputRef.current?.focus());
+  };
+  const askEditor = (label: string) => {
+    setDraft((prev) => appendRequest(mentionMember(prev, '主编'), `请看看创作进度，按建议推进下一步：${label}。需要我拍板的地方先问我。`));
+    requestAnimationFrame(() => inputRef.current?.focus());
+  };
 
   const renderMessage = (m: AssistantMessageView): ReactNode => {
     const fieldCandidates = m.candidates.map((id) => candidatesById.get(id)).filter((c): c is AssistantFieldCandidate => Boolean(c));
@@ -325,7 +377,10 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
       <article key={m.id} className={cn('rounded border px-3 py-2.5', isUser ? 'border-surface-border-light bg-surface-paper' : 'border-surface-border bg-white')}>
         <header className="mb-1 flex items-center justify-between gap-2">
           <span className="flex items-center gap-1.5 text-[11px] font-medium text-content-tertiary">
-            {isUser ? '你' : <><Sparkles className="h-3 w-3 text-brand" />智能助笔</>}
+            {isUser ? '你' : m.member
+              ? <><MemberAvatar member={m.member} /><span className="text-content-secondary">{m.member.name}</span></>
+              : <><Sparkles className="h-3 w-3 text-brand" />智能助笔</>}
+            {m.delegated && <span className="lj-badge lj-badge--muted">受主编委托</span>}
             {m.answer && <span className="lj-badge lj-badge--muted">回答</span>}
             {m.question && <span className="lj-badge lj-badge--candidate">提问</span>}
           </span>
@@ -352,6 +407,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
           </div>
         ))}
         {m.chapter_candidates.map((item) => <ChapterCandidateLink key={item.id} item={item} onOpen={openChapterCandidate} />)}
+        {(m.plans ?? []).map((plan, i) => <PlanCard key={`${m.id}-plan-${i}`} plan={plan} onNavigate={(p) => onNavigate(p)} />)}
       </article>
     );
   };
@@ -364,36 +420,59 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
           {page.selection && <span className="lj-badge lj-badge--candidate">已选 {page.selection.text.length} 字</span>}
           <span className="ml-auto flex items-center gap-0.5 text-content-tertiary">当前内容<ChevronDown className="h-3 w-3" /></span>
         </summary>
-        <p className="mt-1 leading-5 text-content-tertiary">助笔会参考你所在的页面，但不限于这里：可以直接说要处理的设定、人物或章节，它会自己定位。</p>
+        <p className="mt-1 leading-5 text-content-tertiary">共创室会参考你所在的页面，但不限于这里：可以直接说要处理的设定、人物或章节，团队会自己定位。</p>
         {page.selection && <p className="mt-1 line-clamp-3 border-l-2 border-gold-300 pl-2 leading-5">{page.selection.text}</p>}
       </details>
+      {progress && <ProgressStrip progress={progress} onAsk={askEditor} disabled={busy} />}
 
       <div ref={listRef} className="min-h-0 flex-1 space-y-2.5 overflow-y-auto px-3 py-3">
+        {showTeam && team && <TeamSettings projectId={projectId} team={team} onChange={setTeam} onClose={() => setShowTeam(false)} />}
         {loadError && <p className="rounded border border-cinnabar/30 bg-cinnabar-wash px-3 py-2 text-xs text-cinnabar">{loadError}</p>}
         {!messages.length && !live && (
           <div className="rounded border border-dashed border-surface-border bg-surface-paper px-3 py-3">
-            <p className="text-[11px] tracking-wide text-content-tertiary">围绕这部作品，一起推敲</p>
-            <h3 className="mt-0.5 font-serif text-base font-semibold text-content">说说你想怎么改</h3>
+            <p className="text-[11px] tracking-wide text-content-tertiary">共创室 · 一支团队陪你把书写完</p>
+            <h3 className="mt-0.5 font-serif text-base font-semibold text-content">从一个想法开始</h3>
             <p className="mt-1 text-xs leading-6 text-content-secondary">
-              可以把背景、目标和顾虑一起说清楚。助笔会查找相关内容，需要你决定时先提问，修改后给你完整候选，确认了才写入。
+              主编会先弄清你想写什么，再按 总纲 → 卷纲 → 章纲 → 正文 推进，把专业的事交给世界观、人物、总纲、章节、正文、审校几位成员。
+              需要你拍板时会先问你；所有改动和规划都是候选或草案，你确认了才写进书里。
             </p>
+            {members.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {members.map((mb) => (
+                  <button key={mb.id} onClick={() => mention(mb)} className="flex items-center gap-1 rounded border border-surface-border-light bg-white px-1.5 py-1 text-[11px] text-content-secondary hover:border-brand/40" title={mb.responsibility}>
+                    <MemberAvatar member={mb} />{mb.name}
+                  </button>
+                ))}
+              </div>
+            )}
             <div className="mt-2 grid grid-cols-2 gap-1.5">
-              {STARTERS.filter((s) => !s.needsChapter || hasChapter).map((s) => (
-                <button key={s.title} onClick={() => { setDraft((prev) => appendRequest(prev, s.text)); inputRef.current?.focus(); }}
+              {(team?.starters ?? []).map((s) => (
+                <button key={s.id} onClick={() => { setDraft((prev) => appendRequest(prev, s.message)); inputRef.current?.focus(); }}
                   className="rounded border border-surface-border-light bg-white px-2.5 py-2 text-left hover:border-brand/40 hover:bg-brand-50">
-                  <span className="block text-xs font-semibold text-content">{s.title}</span>
+                  <span className="block text-xs font-semibold text-content">{s.label}</span>
                   <span className="block text-[11px] text-content-tertiary">{s.hint}</span>
                 </button>
               ))}
             </div>
-            <p className="mt-2 text-[11px] text-content-tertiary">快捷入口只填入要求，不会自动发送；已有草稿会保留。</p>
+            <p className="mt-2 text-[11px] text-content-tertiary">快捷入口只填入要求，不会自动发送；已有草稿会保留。点成员头像可以「@」他直接对话。</p>
           </div>
         )}
         {messages.map(renderMessage)}
+        {live?.delegations.map((d, i) => (
+          <article key={`delegation-${i}`} className="rounded border border-surface-border bg-white px-3 py-2.5">
+            <header className="mb-1 flex items-center gap-1.5 text-[11px] font-medium text-content-tertiary">
+              <MemberAvatar member={d.member} /><span className="text-content-secondary">{d.member.name}</span>
+              <span className="lj-badge lj-badge--muted">受主编委托</span>
+              {!d.content && <Loader2 className="h-3 w-3 animate-spin text-brand" />}
+            </header>
+            {d.content ? <RichText text={d.content} /> : <p className="text-xs text-content-tertiary">正在处理：{d.task || '主编交代的事'}</p>}
+          </article>
+        ))}
         {live && (
           <article className="rounded border border-brand/30 bg-white px-3 py-2.5">
             <header className="mb-1 flex items-center gap-1.5 text-[11px] font-medium text-brand">
-              <Loader2 className="h-3 w-3 animate-spin" />智能助笔 · {live.text ? '正在回复' : live.steps.length ? '正在处理' : '思考中'}
+              <Loader2 className="h-3 w-3 animate-spin" />
+              {live.member ? <><MemberAvatar member={live.member} />{live.member.name}</> : '智能助笔'} · {live.text ? '正在回复' : live.steps.length ? '正在处理' : '思考中'}
             </header>
             {live.text ? <RichText text={live.text} /> : <p className="text-xs text-content-tertiary">正在查找相关内容…</p>}
             <StepList steps={live.steps} live />
@@ -426,7 +505,8 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
       <div className="border-t border-surface-border bg-white px-3 py-2">
         {notice && <p className="mb-1 text-[11px] text-content-tertiary">{notice}</p>}
         {busy && <p className="mb-1 text-[11px] text-brand">正在处理本轮要求…可以先写下一条，处理完再发。</p>}
-        {waitingRun && !busy && <p className="mb-1 text-[11px] text-gold-500">助笔在等你回答上面的问题；直接发新要求会结束那轮提问。</p>}
+        {waitingRun && !busy && <p className="mb-1 text-[11px] text-gold-500">团队在等你回答上面的问题；直接发新要求会结束那轮提问。</p>}
+        <TeamBar members={members} onMention={mention} onOpenSettings={() => setShowTeam((v) => !v)} />
         <textarea
           ref={inputRef}
           value={draft}
@@ -434,7 +514,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
           onKeyDown={onKeyDown}
           rows={3}
           maxLength={MAX_CHARS}
-          placeholder="描述你的想法，或引用上面的内容继续追问…（Ctrl+Enter 发送）"
+          placeholder="和主编说说你的想法；「@成员」可直接找人…（Ctrl+Enter 发送）"
           className="hh-textarea text-sm"
         />
         <div className="mt-1.5 flex flex-wrap items-center gap-2">

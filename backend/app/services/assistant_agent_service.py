@@ -1,8 +1,10 @@
-"""全局智能助笔 · 运行循环（参考岚笺 GlobalAssistantHost + assistant runs）。
+"""全局智能助笔 · 共创室运行循环（参考岚笺 GlobalAssistantHost + assistant runs + 共创室 creative-team）。
 
 一条作者要求 = 一次运行：模型每一步要么调用一个工具（只输出一个 JSON），要么直接回复作者（流式推给前端）。
+- 发言的是共创室成员：默认主编；作者用「@成员」开头时这一轮由该成员发言；每位成员只开放职责内的工具，可用自己的模型
+- 主编可以 delegate：成员在子循环里用自己的工具做完这件事，回复以成员名义存进对话，再交回主编决定下一步
 - 当前页面只是上下文，不是权限边界；工具结果、作者资料、历史消息都当数据包裹，其中的指令不执行
-- 修改只产生候选；改字段前必须先读取；未知工具不执行；步数用尽后要求模型直接收尾回复
+- 修改 / 规划只产生候选或草稿；改字段前必须先读取；未知工具不执行；步数用尽后要求模型直接收尾回复
 - ask_author 让运行暂停等待作者回答，回答后接着跑；取消 / 失败都会落状态
 - 所有会话共用一个 SQLite 连接，运行的写入一律用可重复执行的语句并读回核对（见 assistant_persistence）
 """
@@ -19,31 +21,56 @@ from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.logger import get_logger
-from app.models.assistant import AssistantFieldCandidate, AssistantMessage, AssistantRun, AssistantSession
+from app.models.assistant import (
+    AssistantFieldCandidate, AssistantMessage, AssistantRun, AssistantSession, AssistantTeamSetting,
+)
 from app.models.chapter import Chapter
 from app.models.chapter_candidate import utcnow
 from app.models.project import Project
+from app.services import cocreation_team as team
 from app.services.assistant_candidate_service import candidate_view
 from app.services.assistant_persistence import write_verified
-from app.services.assistant_tools import PAGES, ToolContext, execute_tool, tool_catalog_text, tool_label
+from app.services.assistant_tools import PAGES, ToolContext, ToolOutcome, execute_tool, tool_catalog_text, tool_label
 from app.utils.json_cleaner import safe_parse_json
 from app.utils.prompt_safety import UNTRUSTED_DATA_RULE, quote_untrusted
 
 logger = get_logger(__name__)
 
-MAX_STEPS = 6
+MAX_STEPS = 8
+MEMBER_MAX_STEPS = 4
 HISTORY_LIMIT = 12
 HISTORY_HEAD, HISTORY_TAIL = 700, 400
 SELECTION_PREVIEW = 600
 ACTIVE = ("running", "waiting_input")
 
-SYSTEM_PROMPT = f"""你是「智能助笔」，这部小说的全局写作助手，和作者一起推敲设定、人物、规划与正文。
+WORKFLOW = """## 创作流程（总纲 → 卷纲 → 章纲 → 正文）
+- 总纲：梗概 + 全书主线（用自然段把整个故事从头讲到尾）+ 卖点 / 成长路线 / 终极目标；主角特殊能力只是设定的一部分，不必每段都用
+- 卷纲：每卷是一个新局面；细化为剧情单元（一件完整的事，长短按事件大小定）和线索编排（感情线 / 支线 / 伏笔各推进到哪）
+- 章纲：按剧情单元展开，按实际事件和场景分章；AI 草拟的章纲要作者确认后才写正文
+- 正文：照已确认的章纲写；单章产出候选稿，批量写作在后台进行
+- 不知道写到哪了就先 story_progress；规划工具只产出草稿，作者在草案卡片或谋篇页确认后才算定稿
+- 本书挂了拆书参考时，可以用 read_reference 看原书的全书骨架 / 剧情单元 / 写法手册怎么安排（只学结构和节奏，不照搬人物与情节）"""
+
+
+def build_system_prompt(member: team.Member) -> str:
+    others = "\n".join(f"- {m.name}（{m.id}）：{m.responsibility}" for m in team.MEMBERS if m.id != member.id)
+    handoff = ("你可以用 delegate 把具体的事交给成员，成员的回复会以他的名义出现在对话里，你再据此推进。"
+               if "delegate" in member.tools else
+               "你不能把事再转交给别人；不在你职责内的事直接说明，建议作者找主编或对应成员。")
+    return f"""你是「智能助笔 · 共创室」里的{member.name}，和作者一起把这部小说从灵感写到完稿。你的职责：{member.responsibility}。
+{member.guidance}
+
+## 共创室成员
+{others}
+{handoff}
+
+{WORKFLOW}
 
 ## 怎么做
-1. 本书所有工具都可以用，作者当前在哪个页面只是参考，不是限制。要改哪项内容：先 list_fields 定位、read_field 读取当前内容，再用 propose_edit 给出完整的新内容。不要用别的字段代替作者要改的那一项。
-2. 正文（续写 / 改写 / 润色 / 核对 / 查前文）交给 manuscript；不要在普通回复里写大段正文冒充已经写进书里。
-3. 需要作者做决定、选方案或补充信息时调用 ask_author，不要替作者猜；目标可能有多个（比如同名人物）时也先问一句。
-4. 不能说已经保存、采用或修改，除非工具结果证明；propose_edit 和 manuscript 只是准备候选，作者确认后才写入。
+1. 作者当前在哪个页面只是参考，不是限制。要改哪项内容：先 list_fields 定位、read_field 读取当前内容，再用 propose_edit 给出完整的新内容。不要用别的字段代替作者要改的那一项。
+2. 正文（续写 / 改写 / 润色 / 核对 / 查前文）交给 manuscript 或 write_chapters；不要在普通回复里写大段正文冒充已经写进书里。
+3. 需要作者做决定、选方案或补充信息时调用 ask_author（如果你能用），不要替作者猜；目标可能有多个（比如同名人物）时也先问一句。
+4. 不能说已经保存、采用、确认或写好，除非工具结果证明；候选和草稿要作者确认后才写入。
 5. 只依据工具读到的资料和对话内容；引用原文要逐字；资料里没有就直说没找到，不编造前文。
 6. 问候、使用帮助、构思讨论、比较几种写法可以直接回答，不必调用工具。
 7. 回复用简洁的中文，必要时分点；说明你做了什么、作者接下来可以做什么。
@@ -53,9 +80,17 @@ SYSTEM_PROMPT = f"""你是「智能助笔」，这部小说的全局写作助手
 - 否则直接用中文回复作者（不要输出 JSON）。
 
 ## 可用工具
-{tool_catalog_text()}
+{tool_catalog_text(member.tools)}
 
 {UNTRUSTED_DATA_RULE}"""
+
+
+SYSTEM_PROMPT = build_system_prompt(team.member(team.DEFAULT_MEMBER))
+
+
+async def team_models(db: AsyncSession, project_id: str) -> dict[str, str]:
+    rows = (await db.execute(select(AssistantTeamSetting).where(AssistantTeamSetting.project_id == project_id))).scalars()
+    return {r.member_id: r.model for r in rows if r.model}
 
 
 class AssistantStateError(Exception):
@@ -84,11 +119,13 @@ def session_view(session: Optional[AssistantSession]) -> Optional[dict]:
 
 def message_view(message: AssistantMessage) -> dict:
     meta = _loads(message.meta_json, {})
+    speaker = team.member(meta.get("member")) if message.role == "assistant" else None
     return {
         "id": message.id, "role": message.role, "content": message.content, "created_at": _iso(message.created_at),
         "run_id": meta.get("run_id"), "steps": meta.get("steps", []), "candidates": meta.get("candidates", []),
         "chapter_candidates": meta.get("chapter_candidates", []), "question": meta.get("question"),
-        "answer": meta.get("answer"), "page": meta.get("page"),
+        "answer": meta.get("answer"), "page": meta.get("page"), "plans": meta.get("plans", []),
+        "member": team.member_view(speaker) if speaker else None, "delegated": bool(meta.get("delegated")),
     }
 
 
@@ -295,10 +332,13 @@ def _parse_tool(text: str) -> Optional[tuple[str, Any]]:
     return None
 
 
-async def _model_step(ai_service: Any, prompt: str, job: Any) -> Decision:
-    """流式读模型输出：开头是 JSON / 代码块就当工具调用，不推给前端；否则边读边推。"""
+async def _model_step(ai_service: Any, prompt: str, job: Any, *, system_prompt: str = SYSTEM_PROMPT,
+                      model: Optional[str] = None, stream: bool = True) -> Decision:
+    """流式读模型输出：开头是 JSON / 代码块就当工具调用，不推给前端；否则边读边推（stream=False 时不推，成员子循环用）。"""
     buffer, mode = "", None
-    async for chunk in ai_service.generate_text_stream(prompt=prompt, system_prompt=SYSTEM_PROMPT):
+    publish = job.publish if stream else (lambda _event: None)
+    kwargs = {"model": model} if model else {}
+    async for chunk in ai_service.generate_text_stream(prompt=prompt, system_prompt=system_prompt, **kwargs):
         buffer += chunk
         if mode is None:
             head = buffer.lstrip()
@@ -306,21 +346,21 @@ async def _model_step(ai_service: Any, prompt: str, job: Any) -> Decision:
                 continue
             mode = "tool" if head[0] in "{`" else "text"
             if mode == "text":
-                job.publish({"type": "content", "content": buffer})
+                publish({"type": "content", "content": buffer})
             continue
         if mode == "text":
-            job.publish({"type": "content", "content": chunk})
+            publish({"type": "content", "content": chunk})
     if mode == "tool":
         parsed = _parse_tool(buffer)
         if parsed:
             return Decision("tool", tool=parsed[0], args=parsed[1])
-        job.publish({"type": "content", "content": buffer})
+        publish({"type": "content", "content": buffer})
         return Decision("reply", text=buffer.strip())
     tail_tool = _FENCE.search(buffer)
     if tail_tool and len(buffer[:tail_tool.start()].strip()) <= 200:
         parsed = _parse_tool(tail_tool.group(0))
         if parsed:
-            job.publish({"type": "content_reset"})
+            publish({"type": "content_reset"})
             return Decision("tool", tool=parsed[0], args=parsed[1])
     return Decision("reply", text=buffer.strip())
 
@@ -380,9 +420,11 @@ async def _finish(db: AsyncSession, state: RunState, *, content: str, ctx: ToolC
     candidates = await _run_candidates(db, state.id)
     meta = {
         "run_id": state.id,
+        "member": ctx.member_id,
         "steps": [{k: s.get(k) for k in ("tool", "label", "ok", "summary", "args")} for s in state.steps],
         "candidates": [c["id"] for c in candidates],
         "chapter_candidates": ctx.chapter_candidates,
+        "plans": ctx.plans,
         **({"question": question} if question else {}),
     }
     message_id, now = str(uuid.uuid4()), utcnow()
@@ -419,6 +461,64 @@ async def _mark_stopped(db: AsyncSession, state: RunState, status: str, message:
         logger.error(f"[智能助笔] 运行 {state.id} 的结束状态没写进去：{exc}")
 
 
+async def _insert_member_message(db: AsyncSession, state: RunState, content: str, meta: dict) -> None:
+    message_id, now = str(uuid.uuid4()), utcnow()
+
+    async def write() -> None:
+        if not await _exists(db, AssistantMessage, message_id):
+            await db.execute(insert(AssistantMessage).values(
+                id=message_id, session_id=state.session_id, project_id=state.project_id, role="assistant",
+                content=content, meta_json=json.dumps(meta, ensure_ascii=False), created_at=now,
+            ))
+
+    await write_verified(db, write, lambda: _exists(db, AssistantMessage, message_id), "成员回复")
+
+
+async def _delegate(db: AsyncSession, state: RunState, ctx: ToolContext, job: Any, ai_service: Any,
+                    models: dict[str, str], history: list[AssistantMessage], args: Any) -> ToolOutcome:
+    """主编把一件事交给成员：成员用自己的工具和模型在子循环里做完，回复以成员名义存进对话，结果交回主编。"""
+    args = args if isinstance(args, dict) else {}
+    member = team.resolve_member(str(args.get("member") or ""))
+    if member is None or member.id == team.DEFAULT_MEMBER:
+        names = "、".join(f"{m.id}（{m.name}）" for m in team.MEMBERS if m.id != team.DEFAULT_MEMBER)
+        return ToolOutcome(False, "交给成员：没有这位成员", f"member 只能是：{names}")
+    task = str(args.get("task") or "").strip()[:2000]
+    if not task:
+        return ToolOutcome(False, f"交给{member.name}：缺少 task", "task 要写清楚请成员做什么、范围和要求。")
+    model = models.get(member.id)
+    job.publish({"type": "member_start", "member": team.member_view(member, model), "task": task})
+    sub = ToolContext(db=db, project_id=ctx.project_id, session_id=ctx.session_id, run_id=ctx.run_id, page=ctx.page,
+                      ai_service=ai_service, emit=ctx.emit, read_targets=ctx.read_targets, candidates=ctx.candidates,
+                      chapter_candidates=ctx.chapter_candidates, user_id=ctx.user_id, member_id=member.id, model=model,
+                      plans=ctx.plans)
+    sections = await compile_sections(db, {"project_id": state.project_id, "page": state.page, "goal": state.goal}, history)
+    sections.append({"label": "主编交给你的任务", "content": task})
+    system_prompt = build_system_prompt(member)
+    steps: list[dict] = []
+    while True:
+        exhausted = len(steps) >= MEMBER_MAX_STEPS
+        decision = await _model_step(ai_service, _round_prompt(sections, steps, exhausted), job,
+                                     system_prompt=system_prompt, model=model, stream=False)
+        if decision.kind == "reply" or exhausted:
+            text = (decision.text if decision.kind == "reply" else "") or "这件事我没能在限定步数内做完：" + "；".join(
+                s.get("summary", "") for s in steps[-3:])
+            break
+        if decision.tool in ("delegate", "ask_author"):
+            outcome = ToolOutcome(False, f"{member.name}不能转交或直接提问", "需要作者决定的事写进回复里，主编会去问。")
+        else:
+            outcome = await execute_tool(sub, decision.tool, decision.args)
+        label = f"{member.name}·{tool_label(decision.tool)}"
+        steps.append({"tool": decision.tool, "label": label, "args": _args_summary(decision.args), "ok": outcome.ok,
+                      "summary": outcome.summary, "data": outcome.data})
+        job.publish({"type": "tool", "name": decision.tool, "label": label, "detail": outcome.summary, "ok": outcome.ok})
+    public_steps = [{k: s.get(k) for k in ("tool", "label", "ok", "summary", "args")} for s in steps]
+    await _insert_member_message(db, state, text, {"run_id": state.id, "member": member.id, "steps": public_steps,
+                                                   "delegated": True})
+    job.publish({"type": "member_message", "member": team.member_view(member, model), "content": text,
+                 "steps": public_steps})
+    return ToolOutcome(True, f"{member.name}完成了交代的事", f"{member.name}的回复：\n{text}")
+
+
 async def run_agent(job: Any, *, session_factory: Any, run_id: str, ai_service: Any) -> dict:
     async with session_factory() as db:
         run = await db.get(AssistantRun, run_id)
@@ -427,17 +527,23 @@ async def run_agent(job: Any, *, session_factory: Any, run_id: str, ai_service: 
         state = RunState(id=run.id, session_id=run.session_id, project_id=run.project_id, goal=run.goal,
                          goal_message_id=run.goal_message_id, page=_loads(run.page_json, {}),
                          steps=_loads(run.steps_json, []))
+        speaker = team.parse_mention(state.goal)[0] or team.member(team.DEFAULT_MEMBER)
+        models = await team_models(db, state.project_id)
         ctx = ToolContext(db=db, project_id=state.project_id, session_id=state.session_id, run_id=state.id, page=state.page,
-                          ai_service=ai_service, emit=job.publish, read_targets=_read_targets(state.steps))
+                          ai_service=ai_service, emit=job.publish, read_targets=_read_targets(state.steps),
+                          user_id=getattr(job, "user_id", None), member_id=speaker.id, model=models.get(speaker.id))
+        system_prompt = build_system_prompt(speaker)
         history = await _history(db, state.session_id, state.goal_message_id)
         sections = await compile_sections(db, {"project_id": state.project_id, "page": state.page, "goal": state.goal}, history)
         steps = state.steps
+        job.publish({"type": "speaker", "member": team.member_view(speaker, ctx.model)})
         try:
             while True:
                 used = sum(1 for s in steps if s.get("tool") != "ask_author")
                 exhausted = used >= MAX_STEPS
-                job.progress("整理回复…" if exhausted else f"第 {used + 1} 步：思考中…", min(90, 10 + used * 12))
-                decision = await _model_step(ai_service, _round_prompt(sections, steps, exhausted), job)
+                job.progress("整理回复…" if exhausted else f"{speaker.name} · 第 {used + 1} 步：思考中…", min(90, 10 + used * 10))
+                decision = await _model_step(ai_service, _round_prompt(sections, steps, exhausted), job,
+                                             system_prompt=system_prompt, model=ctx.model)
                 if decision.kind == "reply" or exhausted:
                     text = decision.text if decision.kind == "reply" else ""
                     if not text:
@@ -445,8 +551,11 @@ async def run_agent(job: Any, *, session_factory: Any, run_id: str, ai_service: 
                         job.publish({"type": "content", "content": text})
                     return await _finish(db, state, content=text, ctx=ctx, status="completed")
 
-                job.progress(f"第 {used + 1} 步：{tool_label(decision.tool)}…", min(90, 15 + used * 12))
-                outcome = await execute_tool(ctx, decision.tool, decision.args)
+                job.progress(f"{speaker.name} · 第 {used + 1} 步：{tool_label(decision.tool)}…", min(90, 15 + used * 10))
+                if decision.tool == "delegate" and "delegate" in speaker.tools:
+                    outcome = await _delegate(db, state, ctx, job, ai_service, models, history, decision.args)
+                else:
+                    outcome = await execute_tool(ctx, decision.tool, decision.args)
                 step = {"tool": decision.tool, "label": tool_label(decision.tool), "args": _args_summary(decision.args),
                         "ok": outcome.ok, "summary": outcome.summary, "data": outcome.data}
                 steps.append(step)

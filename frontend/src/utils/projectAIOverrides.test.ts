@@ -30,6 +30,13 @@ describe('projectAIOverrides', () => {
     expect(follow.reasoning_effort).toBe('high')
   })
 
+  it('normalizeOverrides：本项目关闭采样多样性时清掉 top_p / 惩罚；开启或跟随全局时保留', () => {
+    const off = normalizeOverrides({ sampling_enabled: false, top_p: 0.9, frequency_penalty: 0.4, presence_penalty: 0.4, temperature: 1 })
+    expect(off).toMatchObject({ sampling_enabled: false, top_p: null, frequency_penalty: null, presence_penalty: null, temperature: 1 })
+    expect(normalizeOverrides({ sampling_enabled: true, top_p: 0.9 }).top_p).toBe(0.9)
+    expect(normalizeOverrides({ top_p: 0.9 })).toMatchObject({ sampling_enabled: null, top_p: 0.9 })
+  })
+
   it('modelChipLabel：有模型显示模型名，否则提示未选择', () => {
     expect(modelChipLabel({ llm_model: 'claude-3' })).toBe('claude-3')
     expect(modelChipLabel({ llm_model: '' })).toBe('未选择模型')

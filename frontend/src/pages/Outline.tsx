@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
-import { Plus, Pencil, Trash2, FileText, Loader2, Sparkles, LayoutGrid, GitBranch, BookOpen, BarChart3, Check, ChevronDown, ChevronUp, Link2, Eye } from 'lucide-react'
+import { useParams } from 'react-router-dom'
+import { Plus, Pencil, Trash2, FileText, Loader2, Sparkles, LayoutGrid, Layers, BookOpen, Check, Eye } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 import { useStore } from '@/store/index'
 import { useOutlineSync } from '@/store/hooks'
-import { usePlotCardSync, usePlotLineSync, useChapterOutlineSync } from '@/store/plotHooks'
+import { usePlotCardSync, useVolumeSync, useChapterOutlineSync } from '@/store/plotHooks'
 import { useAIJobsStore, useRunningAIJobs } from '@/store/aiJobsStore'
 import { useAssistantDataChange } from '@/hooks/useAssistantPage'
 import type { AssistantDataChange } from '@/store/assistantStore'
-import { wizardStreamApi, outlineApi, chapterOutlineApi, chapterOutlineLinkApi, plotLineApi, plotCardApi } from '@/services/api'
+import { wizardStreamApi, chapterOutlineApi, plotCardApi } from '@/services/api'
+import { VolumesView } from '@/components/outline/VolumesView'
 import { AIJobBanner } from '@/components/ai-job/AIJobBanner'
 import { MCPSelector } from '@/components/MCPSelector'
 import {
@@ -21,81 +22,37 @@ import { Modal as UiModal, type ModalSize } from '@/components/ui/Modal'
 import type {
   Outline, OutlineCreate, OutlineUpdate,
   PlotCard, PlotCardCreate, PlotCardUpdate,
-  PlotLine, PlotLineCreate, PlotLineUpdate,
-  PlotLineProgress, TimelineData, TimelineBeat,
-  PlotCardGenerateRequest, PlotLineGenerateRequest,
+  PlotCardGenerateRequest, Volume,
   ChapterOutline, ChapterOutlineCreate, ChapterOutlineUpdate,
   ChapterOutlineBatchCreateRequest, NarrativeTasks,
 } from '@/types'
 
-type TabKey = 'outlines' | 'plotCards' | 'plotLines' | 'chapterOutlines' | 'overview'
+type TabKey = 'outlines' | 'volumes' | 'chapterOutlines' | 'plotCards'
 
-const TABS: { key: TabKey; label: string; icon: React.ElementType }[] = [
-  { key: 'outlines', label: '故事大纲', icon: FileText },
-  { key: 'plotCards', label: '剧情卡片', icon: LayoutGrid },
-  { key: 'plotLines', label: '剧情线', icon: GitBranch },
-  { key: 'chapterOutlines', label: '章纲', icon: BookOpen },
-  { key: 'overview', label: '关联总览', icon: BarChart3 },
+/** 谋篇：总纲 → 卷纲（剧情单元 + 线索编排）→ 章纲；剧情卡片是可选的灵感素材 */
+const TABS: { key: TabKey; label: string; icon: React.ElementType; path: string }[] = [
+  { key: 'outlines', label: '总纲', icon: FileText, path: '' },
+  { key: 'volumes', label: '卷纲', icon: Layers, path: 'volumes' },
+  { key: 'chapterOutlines', label: '章纲', icon: BookOpen, path: 'chapters' },
+  { key: 'plotCards', label: '剧情卡片', icon: LayoutGrid, path: 'cards' },
 ]
 
-const PLOT_LINE_TYPE_LABELS: Record<string, string> = {
-  main: '主线',
-  sub: '支线',
-  character: '角色线',
-  foreshadow: '伏笔线',
-  other: '其他',
-}
-
-const PLOT_LINE_TYPE_ALIASES: Record<string, string> = {
-  main: 'main',
-  '主线': 'main',
-  sub: 'sub',
-  '支线': 'sub',
-  character: 'character',
-  '角色线': 'character',
-  foreshadow: 'foreshadow',
-  '伏笔线': 'foreshadow',
-  other: 'other',
-  '其他': 'other',
-}
-
-const PLOT_LINE_TYPE_COLORS: Record<string, string> = {
-  main: 'bg-brand/10 text-brand',
-  sub: 'bg-surface-hover text-content-secondary',
-  character: 'bg-surface-hover text-content-secondary',
-  foreshadow: 'bg-surface-hover text-content-secondary',
-  other: 'bg-surface-hover text-content-secondary',
-}
+const tabFromPath = (path?: string): TabKey => TABS.find((t) => t.path && path?.startsWith(t.path))?.key ?? 'outlines'
 
 const STATUS_TAG = 'px-2 py-0.5 text-[11px] font-medium'
-
-const normalizePlotLineType = (type?: string | null) => {
-  const value = type?.trim()
-  if (!value) return 'main'
-  return PLOT_LINE_TYPE_ALIASES[value] || value
-}
-
-const getPlotLineTypeLabel = (type?: string | null) => {
-  const normalized = normalizePlotLineType(type)
-  return PLOT_LINE_TYPE_LABELS[normalized] || normalized
-}
-
-const getPlotLineTypeColor = (type?: string | null) => {
-  const normalized = normalizePlotLineType(type)
-  return PLOT_LINE_TYPE_COLORS[normalized] || PLOT_LINE_TYPE_COLORS.other
-}
-
 
 export default function OutlinePage() {
   const { currentProject, outlines } = useStore()
   const projectId = currentProject?.id
-  const [activeTab, setActiveTab] = useState<TabKey>('outlines')
+  const subPath = useParams()['*']
+  const [activeTab, setActiveTab] = useState<TabKey>(() => tabFromPath(subPath))
+  useEffect(() => { setActiveTab(tabFromPath(subPath)) }, [subPath])
   const [loading, setLoading] = useState(false)
 
   // hooks
   const { refreshOutlines, createOutline, updateOutline, deleteOutline, activateOutline } = useOutlineSync()
   const { plotCards, refreshPlotCards, createPlotCard, updatePlotCard, deletePlotCard } = usePlotCardSync()
-  const { plotLines, refreshPlotLines, createPlotLine, updatePlotLine: updatePlotLineData, deletePlotLine } = usePlotLineSync()
+  const { volumes, refreshVolumes, saveVolume, confirmVolume, deleteVolume } = useVolumeSync()
   const { chapterOutlines, refreshChapterOutlines, createChapterOutline, updateChapterOutline: updateChapterOutlineData, deleteChapterOutline, batchCreateChapterOutlines } = useChapterOutlineSync()
 
   // 初始化加载
@@ -105,15 +62,19 @@ export default function OutlinePage() {
     Promise.all([
       refreshOutlines(),
       refreshPlotCards(projectId),
-      refreshPlotLines(projectId),
+      refreshVolumes(projectId),
       refreshChapterOutlines(projectId),
     ]).finally(() => setLoading(false))
-  }, [projectId, refreshChapterOutlines, refreshOutlines, refreshPlotCards, refreshPlotLines])
+  }, [projectId, refreshChapterOutlines, refreshOutlines, refreshPlotCards, refreshVolumes])
 
-  // 全局智能助笔改了章纲 / 故事前提（改前提会把章纲标成「上游已改」）：刷新章纲
+  // 全局智能助笔改了章纲 / 总纲（改总纲会把卷纲和章纲标成「上游已改」）或规划了卷纲：刷新
   const onAssistantData = useCallback((change: AssistantDataChange) => {
-    if (projectId && (change.entity === 'chapter_outline' || change.entity === 'story_outline')) void refreshChapterOutlines(projectId)
-  }, [projectId, refreshChapterOutlines])
+    if (!projectId) return
+    if (change.entity === 'chapter_outline' || change.entity === 'story_outline' || change.entity === 'volume') {
+      void refreshChapterOutlines(projectId)
+      void refreshVolumes(projectId)
+    }
+  }, [projectId, refreshChapterOutlines, refreshVolumes])
   useAssistantDataChange(onAssistantData)
 
   // ==================== Tab 容器 ====================
@@ -121,9 +82,10 @@ export default function OutlinePage() {
     <div className="animate-fade-in space-y-6">
       <section className="lj-page-header">
         <div className="min-w-0">
-          <h1 className="lj-page-title">故事大纲</h1>
-          <p className="mt-2 max-w-[560px] text-sm leading-6 text-content-secondary">
-            先定整本书的骨架，再拆成剧情卡片、剧情线与章纲。当前有 {outlines.length} 个大纲版本、{plotCards.length} 张剧情卡片、{plotLines.length} 条剧情线、{chapterOutlines.length} 份章纲。
+          <h1 className="lj-page-title">谋篇</h1>
+          <p className="mt-2 max-w-[600px] text-sm leading-6 text-content-secondary">
+            总纲定全书主线，卷纲把每卷拆成几件完整的事，章纲把每件事落到章；AI 草拟的都要你确认后才写正文。
+            当前 {outlines.length} 个总纲版本、{volumes.length} 卷卷纲、{chapterOutlines.length} 份章纲。
           </p>
         </div>
 
@@ -154,10 +116,22 @@ export default function OutlinePage() {
       ) : (
         <>
           {activeTab === 'outlines' && <OutlinesView outlines={outlines} projectId={projectId} createOutline={createOutline} updateOutline={updateOutline} deleteOutline={deleteOutline} activateOutline={activateOutline} refreshOutlines={refreshOutlines} />}
+          {activeTab === 'volumes' && (
+            <VolumesView
+              projectId={projectId}
+              chapterCount={currentProject?.chapter_count}
+              volumes={volumes}
+              chapterOutlines={chapterOutlines}
+              refreshVolumes={refreshVolumes}
+              refreshChapterOutlines={() => (projectId ? refreshChapterOutlines(projectId) : Promise.resolve())}
+              saveVolume={saveVolume}
+              confirmVolume={confirmVolume}
+              deleteVolume={deleteVolume}
+              onOpenChapterOutlines={() => setActiveTab('chapterOutlines')}
+            />
+          )}
+          {activeTab === 'chapterOutlines' && <ChapterOutlinesView chapterOutlines={chapterOutlines} volumes={volumes} projectId={projectId} createChapterOutline={createChapterOutline} updateChapterOutline={updateChapterOutlineData} deleteChapterOutline={deleteChapterOutline} batchCreateChapterOutlines={batchCreateChapterOutlines} onOpenVolumes={() => setActiveTab('volumes')} onRefresh={() => (projectId ? refreshChapterOutlines(projectId) : Promise.resolve())} />}
           {activeTab === 'plotCards' && <PlotCardsView plotCards={plotCards} projectId={projectId} outlines={outlines} createPlotCard={createPlotCard} updatePlotCard={updatePlotCard} deletePlotCard={deletePlotCard} refreshPlotCards={refreshPlotCards} />}
-          {activeTab === 'plotLines' && <PlotLinesView plotLines={plotLines} plotCards={plotCards} projectId={projectId} outlines={outlines} createPlotLine={createPlotLine} updatePlotLine={updatePlotLineData} deletePlotLine={deletePlotLine} refreshPlotLines={refreshPlotLines} />}
-          {activeTab === 'chapterOutlines' && <ChapterOutlinesView chapterOutlines={chapterOutlines} projectId={projectId} createChapterOutline={createChapterOutline} updateChapterOutline={updateChapterOutlineData} deleteChapterOutline={deleteChapterOutline} batchCreateChapterOutlines={batchCreateChapterOutlines} plotLines={plotLines} onRefresh={() => (projectId ? refreshChapterOutlines(projectId) : Promise.resolve())} />}
-          {activeTab === 'overview' && <OverviewPanel plotCards={plotCards} plotLines={plotLines} chapterOutlines={chapterOutlines} />}
         </>
       )}
     </div>
@@ -205,7 +179,7 @@ function OutlinesView({ outlines, projectId, createOutline, updateOutline, delet
 }) {
   const [showModal, setShowModal] = useState(false)
   const [editing, setEditing] = useState<Outline | null>(null)
-  const [form, setForm] = useState({ title: '', premise: '', golden_finger: '', selling_points: '', power_system: '', main_tropes: '', ultimate_goal: '', opening_hook: '' })
+  const [form, setForm] = useState({ title: '', premise: '', main_plot: '', golden_finger: '', selling_points: '', power_system: '', main_tropes: '', ultimate_goal: '', opening_hook: '' })
   const [generating, setGenerating] = useState(false)
   const [showGenModal, setShowGenModal] = useState(false)
   const [genForm, setGenForm] = useState({ narrative_perspective: '第三人称', chapter_count: 30, target_words: 100000, requirements: '' })
@@ -214,29 +188,14 @@ function OutlinesView({ outlines, projectId, createOutline, updateOutline, delet
   // R8：拆书参考包选择器状态（默认关；disabled 时不传任何 R8 字段走"自动模式"）
   const [genRefPack, setGenRefPack] = useState<ReferencePackSelectorValue>(DEFAULT_SELECTOR_VALUE)
   const [viewingOutline, setViewingOutline] = useState<Outline | null>(null)
-  const [expandedOutlineId, setExpandedOutlineId] = useState<string | null>(null)
-  const [linkedPlotLines, setLinkedPlotLines] = useState<Record<string, Array<{ id: string; title: string; description?: string; line_type?: string }>>>({})
-  const [loadingLinks, setLoadingLinks] = useState<string | null>(null)
-
-  const togglePlotLines = async (outlineId: string) => {
-    if (expandedOutlineId === outlineId) { setExpandedOutlineId(null); return }
-    setExpandedOutlineId(outlineId)
-    if (linkedPlotLines[outlineId]) return
-    setLoadingLinks(outlineId)
-    try {
-      const lines = await outlineApi.getPlotLines(outlineId)
-      setLinkedPlotLines(prev => ({ ...prev, [outlineId]: lines }))
-    } catch { /* ignore failed relation preview */ }
-    finally { setLoadingLinks(null) }
-  }
-
-  const openCreate = () => { setEditing(null); setForm({ title: '', premise: '', golden_finger: '', selling_points: '', power_system: '', main_tropes: '', ultimate_goal: '', opening_hook: '' }); setShowModal(true) }
+  const openCreate = () => { setEditing(null); setForm({ title: '', premise: '', main_plot: '', golden_finger: '', selling_points: '', power_system: '', main_tropes: '', ultimate_goal: '', opening_hook: '' }); setShowModal(true) }
   const openEdit = (o: Outline) => {
-    const f = { title: o.title, premise: o.content, golden_finger: '', selling_points: '', power_system: '', main_tropes: '', ultimate_goal: '', opening_hook: '' };
+    const f = { title: o.title, premise: o.content, main_plot: '', golden_finger: '', selling_points: '', power_system: '', main_tropes: '', ultimate_goal: '', opening_hook: '' };
     try {
       const parsed = JSON.parse(o.content);
       if (typeof parsed === 'object') {
         f.premise = parsed.premise || '';
+        f.main_plot = parsed.main_plot || '';
         f.golden_finger = parsed.golden_finger || '';
         f.selling_points = Array.isArray(parsed.selling_points) ? parsed.selling_points.join('、') : (parsed.selling_points || '');
         f.power_system = parsed.power_system || '';
@@ -281,8 +240,15 @@ function OutlinesView({ outlines, projectId, createOutline, updateOutline, delet
   const handleSubmit = async () => {
     if (!projectId) return
     if (!form.title.trim()) { toast.error('请填写标题'); return }
+    let original: Record<string, unknown> = {}
+    try {
+      const parsed = editing ? JSON.parse(editing.content) : null
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) original = parsed as Record<string, unknown>
+    } catch { /* 旧的纯文本总纲：整段当作梗概 */ }
     const contentJson = JSON.stringify({
+      ...original,
       premise: form.premise,
+      main_plot: form.main_plot,
       golden_finger: form.golden_finger,
       selling_points: form.selling_points.split(/[、,，]/).map(s => s.trim()).filter(Boolean),
       power_system: form.power_system,
@@ -316,7 +282,7 @@ function OutlinesView({ outlines, projectId, createOutline, updateOutline, delet
         <div className="min-w-0">
           <h2 className="text-lg font-semibold tracking-tight text-content">大纲版本</h2>
           <p className="mt-1 text-sm leading-6 text-content-secondary">
-            整本书的骨架：梗概、金手指、卖点与终极目标。活跃版本会作为剧情卡片、剧情线与章纲生成的依据，共 {outlines.length} 个版本。
+            整本书的骨架：梗概、全书主线、卖点与终极目标。活跃版本是分卷、细化卷纲和生成章纲的依据，共 {outlines.length} 个版本。
           </p>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2.5">
@@ -355,14 +321,6 @@ function OutlinesView({ outlines, projectId, createOutline, updateOutline, delet
                     {o.content && <p className="mt-1.5 line-clamp-3 whitespace-pre-wrap text-[13px] leading-6 text-content-secondary">{(() => {
                       try { const parsed = JSON.parse(o.content); return typeof parsed === 'object' ? (parsed.premise || parsed.content || JSON.stringify(parsed, null, 2)) : o.content; } catch { return o.content; }
                     })()}</p>}
-                    <button
-                      onClick={() => togglePlotLines(o.id)}
-                      className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-brand hover:text-brand-600"
-                    >
-                      <GitBranch className="h-3 w-3" />
-                      关联剧情线
-                      {expandedOutlineId === o.id ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-                    </button>
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
@@ -376,25 +334,6 @@ function OutlinesView({ outlines, projectId, createOutline, updateOutline, delet
                   <button onClick={() => handleDelete(o)} className="hh-icon-btn-plain h-8 w-8 hover:text-red-500" title="删除"><Trash2 className="h-3.5 w-3.5" /></button>
                 </div>
               </div>
-              {expandedOutlineId === o.id && (
-                <div className="mt-3 border-t border-surface-border/80 pt-3">
-                  {loadingLinks === o.id ? (
-                    <div className="flex items-center gap-2 text-xs text-content-secondary"><Loader2 className="h-3 w-3 animate-spin" />加载中...</div>
-                  ) : (linkedPlotLines[o.id] || []).length === 0 ? (
-                    <p className="text-xs text-content-tertiary">暂无关联剧情线</p>
-                  ) : (
-                    <div className="flex flex-wrap gap-2">
-                      {(linkedPlotLines[o.id] || []).map(pl => (
-                        <span key={pl.id} className="hh-tag">
-                          <GitBranch className="h-3 w-3" />
-                          {pl.title}
-                          {pl.line_type && <span className="text-brand/60">({getPlotLineTypeLabel(pl.line_type)})</span>}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
             </article>
           ))}
         </div>
@@ -475,8 +414,12 @@ function OutlinesView({ outlines, projectId, createOutline, updateOutline, delet
               <textarea value={form.premise} onChange={e => setForm(f => ({ ...f, premise: e.target.value }))} rows={4} placeholder="5-8句话概括整个故事..." className="hh-textarea" />
             </div>
             <div>
-              <label className="hh-label">金手指设定</label>
-              <input value={form.golden_finger} onChange={e => setForm(f => ({ ...f, golden_finger: e.target.value }))} placeholder="主角的核心优势" className="hh-field" />
+              <label className="hh-label">全书主线</label>
+              <textarea value={form.main_plot} onChange={e => setForm(f => ({ ...f, main_plot: e.target.value }))} rows={6} placeholder="用自然段把整本书从开始讲到结局：主角在什么处境下做了什么选择、别人怎样回应、结果如何、又引出什么" className="hh-textarea" />
+            </div>
+            <div>
+              <label className="hh-label">主角特殊能力（可选）</label>
+              <input value={form.golden_finger} onChange={e => setForm(f => ({ ...f, golden_finger: e.target.value }))} placeholder="系统 / 重生 / 传承……题材不需要就留空或填「无」；它只是设定，不必每段剧情都用" className="hh-field" />
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
@@ -489,7 +432,7 @@ function OutlinesView({ outlines, projectId, createOutline, updateOutline, delet
               </div>
             </div>
             <div>
-              <label className="hh-label">升级路线</label>
+              <label className="hh-label">成长路线</label>
               <input value={form.power_system} onChange={e => setForm(f => ({ ...f, power_system: e.target.value }))} placeholder="用→连接各阶段" className="hh-field" />
             </div>
             <div>
@@ -509,9 +452,10 @@ function OutlinesView({ outlines, projectId, createOutline, updateOutline, delet
         try { const p = JSON.parse(viewingOutline.content); if (typeof p === 'object' && p !== null) parsed = p as Record<string, unknown>; } catch { /* render raw outline content */ }
         const labels: Array<[string, string]> = [
           ['premise', '故事梗概'],
-          ['golden_finger', '金手指设定'],
+          ['main_plot', '全书主线'],
+          ['golden_finger', '主角特殊能力'],
           ['selling_points', '核心卖点'],
-          ['power_system', '升级路线'],
+          ['power_system', '成长路线'],
           ['main_tropes', '主要套路'],
           ['ultimate_goal', '终极目标'],
           ['opening_hook', '开篇钩子'],
@@ -769,593 +713,6 @@ function PlotCardsView({ plotCards, projectId, outlines, createPlotCard, updateP
     </section>
   )
 }
-// ==================== Tab 3: 剧情线 ====================
-type EditableBeat = {
-  key: string
-  title: string
-  description: string
-  weight: number
-}
-
-function PlotLinesView({ plotLines, projectId, outlines, plotCards, createPlotLine, updatePlotLine, deletePlotLine, refreshPlotLines }: {
-  plotLines: PlotLine[]
-  projectId?: string
-  outlines: Outline[]
-  plotCards: PlotCard[]
-  createPlotLine: (data: PlotLineCreate) => Promise<PlotLine>
-  updatePlotLine: (id: string, data: PlotLineUpdate) => Promise<PlotLine>
-  deletePlotLine: (id: string) => Promise<void>
-  refreshPlotLines: (projectId: string) => Promise<unknown>
-}) {
-  const defaultLineType = normalizePlotLineType(plotLines[0]?.line_type)
-  const [showModal, setShowModal] = useState(false)
-  const [editing, setEditing] = useState<PlotLine | null>(null)
-  const [viewing, setViewing] = useState<PlotLine | null>(null)
-  const [viewingProgress, setViewingProgress] = useState<PlotLineProgress | null>(null)
-  const [loadingProgress, setLoadingProgress] = useState(false)
-  const [form, setForm] = useState({ title: '', description: '', line_type: defaultLineType, estimated_chapters: 0, beats: [] as EditableBeat[] })
-  // AI 生成走通用后台任务：禁用态由 store 派生（刷新后仍正确）
-  const startJob = useAIJobsStore((s) => s.start)
-  const generating = useRunningAIJobs(projectId, ['plot_lines_generate']).length > 0
-  const [showGenModal, setShowGenModal] = useState(false)
-  const [genForm, setGenForm] = useState({ line_type: defaultLineType, count: 3, prompt: '', based_on_lines: [] as string[], based_on_cards: [] as string[] })
-  const [genEnableMcp, setGenEnableMcp] = useState(false)
-  const [genPlugins, setGenPlugins] = useState<string[]>([])
-
-  const presetLineTypes = ['main', 'sub', 'character', 'foreshadow', 'other']
-  const lineTypes = Array.from(new Set([
-    ...presetLineTypes,
-    ...plotLines.map(line => normalizePlotLineType(line.line_type)),
-    normalizePlotLineType(form.line_type),
-    normalizePlotLineType(genForm.line_type),
-  ].filter(Boolean)))
-
-
-  const toEditableBeats = (line: PlotLine | null): EditableBeat[] => {
-    const beats = Array.isArray(line?.timeline_data?.beats) ? line.timeline_data.beats : []
-    return beats
-      .slice()
-      .sort((a: TimelineBeat, b: TimelineBeat) => a.index - b.index)
-      .map((beat: TimelineBeat, index: number) => ({
-        key: beat.key || `beat_${index + 1}`,
-        title: beat.title || '',
-        description: beat.description || '',
-        weight: Number.isFinite(Number(beat.weight)) ? Number(beat.weight) : 0,
-      }))
-  }
-
-  const buildTimelineData = (beats: EditableBeat[]): TimelineData | undefined => {
-    const cleaned = beats
-      .map((beat, index) => ({
-        index: index + 1,
-        key: beat.key.trim() || `beat_${index + 1}`,
-        title: beat.title.trim(),
-        description: beat.description.trim() || undefined,
-        weight: Number(beat.weight),
-      }))
-      .filter(beat => beat.title)
-
-    return cleaned.length > 0 ? { beats: cleaned } : undefined
-  }
-
-  const totalWeight = form.beats.reduce((sum, beat) => sum + (Number(beat.weight) || 0), 0)
-  const weightIsValid = form.beats.length === 0 || Math.abs(totalWeight - 1) < 0.01
-
-  const rebalanceBeats = (beats: EditableBeat[]) => {
-    if (beats.length === 0) return []
-    const evenWeight = Number((1 / beats.length).toFixed(2))
-    const next = beats.map((beat, index) => ({
-      ...beat,
-      weight: index === beats.length - 1
-        ? Number((1 - evenWeight * (beats.length - 1)).toFixed(2))
-        : evenWeight,
-    }))
-    return next
-  }
-
-  const openCreate = () => {
-    setEditing(null)
-    setForm({ title: '', description: '', line_type: defaultLineType, estimated_chapters: 0, beats: [] })
-    setShowModal(true)
-  }
-
-  const openEdit = (line: PlotLine) => {
-    setEditing(line)
-    setForm({
-      title: line.title,
-      description: line.description || '',
-      line_type: normalizePlotLineType(line.line_type),
-      estimated_chapters: line.estimated_chapters ?? 0,
-      beats: toEditableBeats(line),
-    })
-    setShowModal(true)
-  }
-
-  const openView = async (line: PlotLine) => {
-    setViewing(line)
-    setViewingProgress(null)
-    setLoadingProgress(true)
-    try {
-      const progress = await plotLineApi.getPlotLineProgress(line.id)
-      setViewingProgress(progress)
-    } catch (error) {
-      console.error('加载剧情线进度失败:', error)
-      toast.error('加载剧情线详情失败')
-    } finally {
-      setLoadingProgress(false)
-    }
-  }
-
-  const handleBeatChange = (index: number, field: keyof EditableBeat, value: string | number) => {
-    setForm(prev => ({
-      ...prev,
-      beats: prev.beats.map((beat, beatIndex) => beatIndex === index ? { ...beat, [field]: field === 'weight' ? Number(value) : value } : beat),
-    }))
-  }
-
-  const handleAddBeat = () => {
-    setForm(prev => ({
-      ...prev,
-      beats: rebalanceBeats([
-        ...prev.beats,
-        {
-          key: `beat_${prev.beats.length + 1}`,
-          title: '',
-          description: '',
-          weight: 0,
-        },
-      ]),
-    }))
-  }
-
-  const handleRemoveBeat = (index: number) => {
-    setForm(prev => ({
-      ...prev,
-      beats: rebalanceBeats(prev.beats.filter((_, beatIndex) => beatIndex !== index)),
-    }))
-  }
-
-  const handleSubmit = async () => {
-    if (!projectId) return
-    if (!form.title.trim()) { toast.error('请填写名称'); return }
-    if (form.beats.some(beat => !beat.title.trim())) { toast.error('请先补全所有节点标题'); return }
-    if (!weightIsValid) { toast.error('节点权重总和必须接近 1.00'); return }
-
-    const timelineData = buildTimelineData(form.beats)
-    try {
-      if (editing) {
-        await updatePlotLine(editing.id, {
-          title: form.title,
-          description: form.description,
-          line_type: normalizePlotLineType(form.line_type),
-          estimated_chapters: form.estimated_chapters || undefined,
-          timeline_data: timelineData,
-        })
-      } else {
-        await createPlotLine({
-          project_id: projectId,
-          title: form.title,
-          description: form.description,
-          line_type: normalizePlotLineType(form.line_type),
-          estimated_chapters: form.estimated_chapters || undefined,
-          timeline_data: timelineData,
-        })
-      }
-      setShowModal(false)
-    } catch { /* hook 已 toast */ }
-  }
-
-  /** AI 生成剧情线：通用后台任务（弹窗展示每条结构 / 节点规划 / MCP / 参考包进度；可最小化、可停止、刷新后可重连） */
-  const handleGenerate = async () => {
-    if (!projectId) return
-    const activeOutline = outlines.find(o => o.is_active) || outlines[0]
-    const payload: PlotLineGenerateRequest = {
-      project_id: projectId,
-      story_outline_id: activeOutline?.id,
-      line_type: normalizePlotLineType(genForm.line_type),
-      count: genForm.count,
-      based_on_lines: genForm.based_on_lines.length ? genForm.based_on_lines : undefined,
-      based_on_cards: genForm.based_on_cards.length ? genForm.based_on_cards : undefined,
-      prompt: genForm.prompt.trim() || undefined,
-      extend_existing: false,
-      enable_mcp: genEnableMcp,
-      selected_plugins: genPlugins,
-    }
-    setShowGenModal(false)
-    try {
-      await startJob({
-        kind: 'plot_lines_generate',
-        title: `AI 生成剧情线（${genForm.count} 条）`,
-        projectId,
-        connect: (options) => plotLineApi.generatePlotLinesStream(payload, options),
-        onSettled: (job) => {
-          if (job.status !== 'done') return
-          const lines = Array.isArray(job.result) ? job.result : []
-          toast.success(`成功生成 ${lines.length} 条剧情线`)
-          void refreshPlotLines(projectId)
-        },
-      })
-    } catch (err) { toast.error(err instanceof Error ? err.message : 'AI 生成剧情线失败') }
-  }
-
-  const handleDelete = async (l: PlotLine) => {
-    if (!confirm(`确定删除「${l.title}」？`)) return
-    try { await deletePlotLine(l.id) } catch { /* hook 已 toast */ }
-  }
-
-  return (
-    <section className="hh-panel space-y-4 p-6">
-      <AIJobBanner projectId={projectId} kinds={['plot_lines_generate']} />
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div className="min-w-0">
-          <h2 className="text-lg font-semibold tracking-tight text-content">剧情线</h2>
-          <p className="mt-1 text-sm leading-6 text-content-secondary">
-            主线、支线与伏笔线各自的推进节奏；节点权重决定章纲覆盖时的进度计算，共 {plotLines.length} 条。
-          </p>
-        </div>
-        <div className="flex shrink-0 flex-wrap items-center gap-2.5">
-          <button onClick={() => setShowGenModal(true)} disabled={generating} className="hh-btn-secondary">
-            {generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4 text-brand" />}
-            AI 生成
-          </button>
-          <button onClick={openCreate} className="hh-btn-primary">
-            <Plus className="h-4 w-4" />
-            新建剧情线
-          </button>
-        </div>
-      </div>
-
-      {plotLines.length === 0 ? (
-        <EmptyBlock
-          icon={GitBranch}
-          title="还没有剧情线"
-          hint="点击右上角「新建剧情线」手动规划，或用「AI 生成」基于故事大纲与剧情卡片生成主线和支线。"
-        />
-      ) : (
-        <div className="mt-6 space-y-3">
-          {plotLines.map(l => (
-            <article key={l.id} className="hh-subpanel p-4">
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex min-w-0 flex-1 items-start gap-3">
-                  <span className="flex h-10 w-10 shrink-0 items-center justify-center bg-brand/10 text-brand">
-                    <GitBranch className="h-5 w-5" />
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h3 className="min-w-0 max-w-full truncate text-[15px] font-semibold text-content">{l.title}</h3>
-                      <span className={cn(STATUS_TAG, getPlotLineTypeColor(l.line_type))}>{getPlotLineTypeLabel(l.line_type)}</span>
-                    </div>
-                    {l.description && <p className="mt-1.5 line-clamp-2 text-[13px] leading-6 text-content-secondary">{l.description}</p>}
-                    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-content-tertiary tabular-nums">
-                      {l.plot_card_count != null && <span>关联卡片: {l.plot_card_count}</span>}
-                      {l.chapter_outline_count != null && <span>关联章纲: {l.chapter_outline_count}</span>}
-                      {l.estimated_chapters != null && l.estimated_chapters > 0 && <span>预计章节: {l.estimated_chapters}</span>}
-                    </div>
-                  </div>
-                </div>
-                <div className="flex shrink-0 items-center gap-1">
-                  <button onClick={() => openView(l)} className="hh-icon-btn-plain h-8 w-8" title="查看详情"><Eye className="h-3.5 w-3.5" /></button>
-                  <button onClick={() => openEdit(l)} className="hh-icon-btn-plain h-8 w-8" title="编辑剧情线与节点"><Pencil className="h-3.5 w-3.5" /></button>
-                  <button onClick={() => handleDelete(l)} className="hh-icon-btn-plain h-8 w-8 hover:text-red-500" title="删除"><Trash2 className="h-3.5 w-3.5" /></button>
-                </div>
-              </div>
-              {Array.isArray(l.timeline_data?.beats) && l.timeline_data.beats.length > 0 ? (
-                <div className="mt-4 border-t border-surface-border/80 pt-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-xs font-medium text-content">剧情节点</p>
-                    <span className="text-xs text-content-tertiary tabular-nums">{l.timeline_data.beats.length} 个</span>
-                  </div>
-                  <div className="mt-1 divide-y divide-surface-border/80">
-                    {l.timeline_data.beats.slice(0, 4).map((beat: TimelineBeat) => (
-                      <div key={`${l.id}-${beat.index}`} className="flex items-center justify-between gap-3 py-2">
-                        <div className="min-w-0">
-                          <p className="truncate text-xs font-medium text-content">节点 {beat.index} · {beat.title}</p>
-                          {beat.description && <p className="mt-0.5 line-clamp-2 text-xs leading-5 text-content-secondary">{beat.description}</p>}
-                        </div>
-                        <span className="shrink-0 text-[11px] text-content-tertiary tabular-nums">权重 {(Number(beat.weight) * 100).toFixed(0)}%</span>
-                      </div>
-                    ))}
-                  </div>
-                  {l.timeline_data.beats.length > 4 && (
-                    <p className="mt-2 text-xs text-content-tertiary">还有 {l.timeline_data.beats.length - 4} 个节点，点击右侧「查看详情」可查看全部。</p>
-                  )}
-                </div>
-              ) : (
-                <div className="mt-4 border border-dashed border-surface-border px-3 py-2.5 text-xs text-content-tertiary">
-                  暂无节点，点击右侧「编辑」可直接补充剧情节点。
-                </div>
-              )}
-            </article>
-          ))}
-        </div>
-      )}
-
-      {showGenModal && (
-        <Modal
-          title="AI 生成剧情线"
-          onClose={() => setShowGenModal(false)}
-          closeOnMaskClick={false}
-          footer={(
-            <>
-              <button onClick={() => setShowGenModal(false)} className="hh-btn-ghost">取消</button>
-              <button onClick={handleGenerate} disabled={generating} className="hh-btn-primary">
-                {generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-                开始生成
-              </button>
-            </>
-          )}
-        >
-          <div className="space-y-5">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <label className="hh-label">剧情线类型</label>
-                <select value={genForm.line_type} onChange={e => setGenForm(f => ({ ...f, line_type: e.target.value }))} className="hh-field">
-                  {lineTypes.map(t => <option key={t} value={t}>{getPlotLineTypeLabel(t)}</option>)}
-                </select>
-              </div>
-              <div>
-                <label className="hh-label">生成数量</label>
-                <input type="number" min={1} max={10} value={genForm.count} onChange={e => setGenForm(f => ({ ...f, count: Number(e.target.value) }))} className="hh-field" />
-              </div>
-            </div>
-            <div>
-              <label className="hh-label">基于已有剧情线（可选，保持连贯性）</label>
-              <div className="hh-subpanel max-h-32 space-y-0.5 overflow-y-auto p-1.5">
-                {plotLines.length > 0 ? plotLines.map(pl => (
-                  <label key={pl.id} className="flex cursor-pointer items-center gap-2 px-2 py-1.5 text-sm text-content hover:bg-brand/5">
-                    <input type="checkbox" checked={genForm.based_on_lines.includes(pl.id)} onChange={e => {
-                      setGenForm(f => ({ ...f, based_on_lines: e.target.checked ? [...f.based_on_lines, pl.id] : f.based_on_lines.filter(id => id !== pl.id) }))
-                    }} className="h-3.5 w-3.5" />
-                    <span>{pl.title}</span>
-                    <span className="text-xs text-content-tertiary">[{getPlotLineTypeLabel(pl.line_type)}]</span>
-                  </label>
-                )) : <p className="px-2 py-1.5 text-xs text-content-tertiary">暂无已有剧情线</p>}
-              </div>
-            </div>
-            <div>
-              <label className="hh-label">基于剧情卡片（可选）</label>
-              <div className="hh-subpanel max-h-32 space-y-0.5 overflow-y-auto p-1.5">
-                {plotCards.length > 0 ? plotCards.map(pc => (
-                  <label key={pc.id} className="flex cursor-pointer items-center gap-2 px-2 py-1.5 text-sm text-content hover:bg-brand/5">
-                    <input type="checkbox" checked={genForm.based_on_cards.includes(pc.id)} onChange={e => {
-                      setGenForm(f => ({ ...f, based_on_cards: e.target.checked ? [...f.based_on_cards, pc.id] : f.based_on_cards.filter(id => id !== pc.id) }))
-                    }} className="h-3.5 w-3.5" />
-                    <span>{pc.title}</span>
-                    <span className="text-xs text-content-tertiary">[{pc.card_type}]</span>
-                  </label>
-                )) : <p className="px-2 py-1.5 text-xs text-content-tertiary">暂无剧情卡片</p>}
-              </div>
-            </div>
-            <div>
-              <label className="hh-label">提示词（可选）</label>
-              <textarea value={genForm.prompt} onChange={e => setGenForm(f => ({ ...f, prompt: e.target.value }))} placeholder="对剧情线的特殊要求..." rows={2} className="hh-textarea" />
-            </div>
-            <MCPSelector value={{ enable: genEnableMcp, selected: genPlugins }} onChange={({ enable, selected }) => { setGenEnableMcp(enable); setGenPlugins(selected) }} />
-          </div>
-        </Modal>
-      )}
-
-      {showModal && (
-        <Modal
-          title={editing ? '编辑剧情线' : '新建剧情线'}
-          onClose={() => setShowModal(false)}
-          size="2xl"
-          closeOnMaskClick={false}
-          footer={(
-            <>
-              <button onClick={() => setShowModal(false)} className="hh-btn-ghost">取消</button>
-              <button onClick={handleSubmit} className="hh-btn-primary">确定</button>
-            </>
-          )}
-        >
-          <div className="space-y-5">
-            <div>
-              <label className="hh-label">名称</label>
-              <input value={form.title} onChange={e => setForm(f => ({ ...f, title: e.target.value }))} className="hh-field" />
-            </div>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <label className="hh-label">类型</label>
-                <select value={form.line_type} onChange={e => setForm(f => ({ ...f, line_type: e.target.value }))} className="hh-field">
-                  {lineTypes.map(t => <option key={t} value={t}>{getPlotLineTypeLabel(t)}</option>)}
-                </select>
-              </div>
-              <div>
-                <label className="hh-label">预计章节数</label>
-                <input type="number" value={form.estimated_chapters} onChange={e => setForm(f => ({ ...f, estimated_chapters: Number(e.target.value) }))} className="hh-field" />
-              </div>
-            </div>
-            <div>
-              <label className="hh-label">描述</label>
-              <textarea value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))} rows={4} className="hh-textarea" />
-            </div>
-            <div className="hh-subpanel space-y-4 p-4">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                <div>
-                  <p className="text-sm font-medium text-content">剧情节点</p>
-                  <p className="mt-1 text-xs leading-5 text-content-secondary">可直接编辑节点标题、描述和权重，权重总和需要接近 1.00。</p>
-                </div>
-                <div className="flex shrink-0 items-center gap-2">
-                  {form.beats.length > 1 && (
-                    <button onClick={() => setForm(prev => ({ ...prev, beats: rebalanceBeats(prev.beats) }))} className="hh-btn-ghost hh-btn-sm">
-                      平均分配权重
-                    </button>
-                  )}
-                  <button onClick={handleAddBeat} className="hh-btn-secondary hh-btn-sm">
-                    <Plus className="h-3.5 w-3.5" />添加节点
-                  </button>
-                </div>
-              </div>
-
-              {form.beats.length === 0 ? (
-                <div className="border border-dashed border-surface-border px-4 py-5 text-center text-xs leading-5 text-content-tertiary">
-                  还没有节点。添加后就能在列表里看到节点摘要，也能在详情里看到完整进度。
-                </div>
-              ) : (
-                <div className="max-h-[42vh] space-y-3 overflow-y-auto pr-1">
-                  {form.beats.map((beat, index) => (
-                    <div key={`beat-editor-${index}`} className="space-y-3 border border-surface-border bg-white/70 p-4">
-                      <div className="flex items-center justify-between gap-3">
-                        <p className="text-sm font-medium text-content">节点 {index + 1}</p>
-                        <button onClick={() => handleRemoveBeat(index)} className="hh-icon-btn-plain h-8 w-8 hover:text-red-500" title="删除节点">
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                        <div>
-                          <label className="hh-label">节点标题</label>
-                          <input value={beat.title} onChange={e => handleBeatChange(index, 'title', e.target.value)} placeholder={`例如：节点 ${index + 1}`} className="hh-field" />
-                        </div>
-                        <div>
-                          <label className="hh-label">节点标识</label>
-                          <input value={beat.key} onChange={e => handleBeatChange(index, 'key', e.target.value)} placeholder={`beat_${index + 1}`} className="hh-field" />
-                        </div>
-                      </div>
-                      <div>
-                        <label className="hh-label">节点描述</label>
-                        <textarea value={beat.description} onChange={e => handleBeatChange(index, 'description', e.target.value)} rows={3} className="hh-textarea" />
-                      </div>
-                      <div>
-                        <label className="hh-label">权重</label>
-                        <input type="number" min={0} max={1} step={0.01} value={beat.weight} onChange={e => handleBeatChange(index, 'weight', e.target.value)} className="hh-field" />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              <div className={cn('px-3 py-2 text-xs font-medium', weightIsValid ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600')}>
-                当前权重总和：{totalWeight.toFixed(2)}{weightIsValid ? '，可以保存。' : '，请调整到 1.00 附近。'}
-              </div>
-            </div>
-          </div>
-        </Modal>
-      )}
-
-      {viewing && (
-        <Modal
-          title={`剧情线详情：${viewing.title}`}
-          onClose={() => { setViewing(null); setViewingProgress(null) }}
-          size="2xl"
-          footer={(
-            <button onClick={() => { const current = viewing; setViewing(null); setViewingProgress(null); if (current) openEdit(current) }} className="hh-btn-primary">
-              <Pencil className="h-3.5 w-3.5" />编辑节点
-            </button>
-          )}
-        >
-          <div className="space-y-5">
-            {/* 顶部元信息栏 */}
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-              <span className={cn(STATUS_TAG, getPlotLineTypeColor(viewing.line_type))}>{getPlotLineTypeLabel(viewing.line_type)}</span>
-              <div className="flex flex-wrap items-center gap-4 text-xs text-content-secondary tabular-nums">
-                {viewing.estimated_chapters != null && viewing.estimated_chapters > 0 && (
-                  <span className="inline-flex items-center gap-1"><BookOpen className="h-3.5 w-3.5" />预计 {viewing.estimated_chapters} 章</span>
-                )}
-                <span className="inline-flex items-center gap-1"><Link2 className="h-3.5 w-3.5" />章纲 {viewing.chapter_outline_count ?? 0}</span>
-                <span className="inline-flex items-center gap-1"><LayoutGrid className="h-3.5 w-3.5" />卡片 {viewing.plot_card_count ?? 0}</span>
-              </div>
-            </div>
-
-            {/* 剧情简介 */}
-            {viewing.description && (
-              <div className="hh-subpanel p-4">
-                <p className="text-xs font-medium text-content-tertiary">剧情简介</p>
-                <p className="mt-1.5 whitespace-pre-wrap text-sm leading-7 text-content">{viewing.description}</p>
-              </div>
-            )}
-
-            {/* 整体进度概览 */}
-            {!loadingProgress && viewingProgress?.has_beats && (
-              <div className="hh-subpanel p-4">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm font-semibold text-content">整体进度</p>
-                  <span className="text-lg font-semibold text-brand tabular-nums">{((viewingProgress.total_progress || 0) * 100).toFixed(1)}%</span>
-                </div>
-                <div className="hh-progress mt-3">
-                  <div className="hh-progress-bar" style={{ width: `${Math.max(0, Math.min(100, (viewingProgress.total_progress || 0) * 100))}%` }} />
-                </div>
-                <p className="mt-2 text-xs text-content-secondary">已关联 {viewingProgress.linked_chapters_count} 个章纲 · 共 {viewingProgress.beats.length} 个节点</p>
-              </div>
-            )}
-
-            {/* 节点列表 */}
-            <div className="space-y-3">
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-sm font-semibold text-content">节点详情</p>
-                {loadingProgress && <Loader2 className="h-4 w-4 animate-spin text-content-secondary" />}
-              </div>
-
-              {loadingProgress ? (
-                <div className="flex items-center justify-center py-8">
-                  <div className="flex flex-col items-center gap-2">
-                    <Loader2 className="h-6 w-6 animate-spin text-brand" />
-                    <span className="text-xs text-content-secondary">加载节点进度中…</span>
-                  </div>
-                </div>
-              ) : viewingProgress?.has_beats ? (
-                <div className="grid max-h-[50vh] grid-cols-1 gap-3 overflow-y-auto pr-1">
-                  {viewingProgress.beats.map(beat => {
-                    const isCompleted = beat.status === 'completed'
-                    const isInProgress = beat.status === 'in_progress'
-                    const statusText = isCompleted ? '已完成' : isInProgress ? '进行中' : '未开始'
-                    const statusTag = isCompleted
-                      ? 'bg-emerald-50 text-emerald-600'
-                      : isInProgress
-                        ? 'bg-amber-50 text-amber-600'
-                        : 'bg-surface-hover text-content-secondary'
-
-                    return (
-                      <div key={`progress-${beat.index}`} className="hh-subpanel p-4">
-                        <div className="flex items-start gap-3">
-                          {/* 序号指示器 */}
-                          <span className="flex h-7 w-7 shrink-0 items-center justify-center bg-brand/10 text-xs font-semibold text-brand tabular-nums">{beat.index}</span>
-                          {/* 内容 */}
-                          <div className="min-w-0 flex-1 space-y-2">
-                            <div className="flex items-start justify-between gap-2">
-                              <div className="min-w-0">
-                                <p className="truncate text-sm font-semibold text-content">{beat.title}</p>
-                                {beat.description && <p className="mt-1 line-clamp-3 text-xs leading-5 text-content-secondary">{beat.description}</p>}
-                              </div>
-                              <span className={cn(STATUS_TAG, 'shrink-0', statusTag)}>{statusText}</span>
-                            </div>
-                            {/* 进度条 */}
-                            <div>
-                              <div className="mb-1 flex items-center justify-between text-[11px] text-content-secondary">
-                                <span>覆盖度</span>
-                                <span className="font-medium tabular-nums">{(beat.coverage * 100).toFixed(0)}%</span>
-                              </div>
-                              <div className="hh-progress h-1">
-                                <div className="hh-progress-bar" style={{ width: `${Math.max(0, Math.min(100, beat.coverage * 100))}%` }} />
-                              </div>
-                            </div>
-                            {/* 底部元信息 */}
-                            <div className="flex items-center gap-3 text-[11px] text-content-tertiary">
-                              <span>标识 {beat.key || `beat_${beat.index}`}</span>
-                              <span>·</span>
-                              <span>权重 {(beat.weight * 100).toFixed(0)}%</span>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              ) : (
-                <div className="flex flex-col items-center justify-center border border-dashed border-surface-border px-6 py-10 text-center">
-                  <span className="flex h-12 w-12 items-center justify-center bg-brand/10 text-brand">
-                    <GitBranch className="h-6 w-6" />
-                  </span>
-                  <p className="mt-3 text-sm text-content-secondary">{viewingProgress?.message || '暂无节点数据'}</p>
-                  <p className="mt-1 text-xs text-content-tertiary">点击下方「编辑节点」可添加剧情节点</p>
-                </div>
-              )}
-            </div>
-          </div>
-        </Modal>
-      )}
-    </section>
-  )
-}
 // ==================== Tab 4: 章纲 ====================
 const EMPTY_CHAPTER_OUTLINE_FORM = {
   chapter_number: 1, title: '', plot_points: '', scene: '', pov: '', target_word_count: 3000,
@@ -1366,20 +723,21 @@ const splitLines = (text: string) => text.split('\n').map((s) => s.trim()).filte
 
 /** 章纲状态徽标：AI 草拟待确认 / 上游已改 / 已确认 */
 function OutlineReviewBadge({ co }: { co: ChapterOutline }) {
-  if (co.upstream_stale) return <span className="lj-badge lj-badge--stale" title={co.upstream_reason || '桥段 / 剧情线 / 故事大纲改过'}>上游已改</span>
+  if (co.upstream_stale) return <span className="lj-badge lj-badge--stale" title={co.upstream_reason || '卷纲 / 总纲改过'}>上游已改</span>
   if (co.review_status === 'draft') return <span className="lj-badge lj-badge--draft" title="AI 草拟的章纲，确认后再写正文更稳">待确认</span>
   if (co.review_status === 'confirmed') return <span className="lj-badge lj-badge--ok">已确认</span>
   return null
 }
 
-function ChapterOutlinesView({ chapterOutlines, projectId, createChapterOutline, updateChapterOutline, deleteChapterOutline, batchCreateChapterOutlines, plotLines, onRefresh }: {
+function ChapterOutlinesView({ chapterOutlines, volumes, projectId, createChapterOutline, updateChapterOutline, deleteChapterOutline, batchCreateChapterOutlines, onOpenVolumes, onRefresh }: {
   chapterOutlines: ChapterOutline[]
+  volumes: Volume[]
   projectId?: string
   createChapterOutline: (data: ChapterOutlineCreate) => Promise<ChapterOutline>
   updateChapterOutline: (id: string, data: ChapterOutlineUpdate) => Promise<ChapterOutline>
   deleteChapterOutline: (id: string) => Promise<void>
   batchCreateChapterOutlines: (data: ChapterOutlineBatchCreateRequest) => Promise<ChapterOutline[]>
-  plotLines: PlotLine[]
+  onOpenVolumes: () => void
   onRefresh: () => Promise<unknown>
 }) {
   const [showModal, setShowModal] = useState(false)
@@ -1391,53 +749,13 @@ function ChapterOutlinesView({ chapterOutlines, projectId, createChapterOutline,
   const [batchCount, setBatchCount] = useState(5)
   const [batchCreating, setBatchCreating] = useState(false)
 
-  // 关联管理
-  const [expandedLinkId, setExpandedLinkId] = useState<string | null>(null)
-  const [linkedLines, setLinkedLines] = useState<Record<string, Array<{ id: string; title: string; line_type?: string }>>>({})
-  const [loadingLink, setLoadingLink] = useState<string | null>(null)
-  const [showLinkModal, setShowLinkModal] = useState<string | null>(null)
-  const [selectedLinkIds, setSelectedLinkIds] = useState<string[]>([])
-  const [linkSaving, setLinkSaving] = useState(false)
-
-  const toggleLinks = async (coId: string) => {
-    if (expandedLinkId === coId) { setExpandedLinkId(null); return }
-    setExpandedLinkId(coId)
-    if (linkedLines[coId]) return
-    setLoadingLink(coId)
-    try {
-      const lines = await chapterOutlineLinkApi.getPlotLines(coId)
-      setLinkedLines(prev => ({ ...prev, [coId]: lines.map(l => ({ id: l.id, title: l.title, line_type: l.line_type })) }))
-    } catch { /* ignore failed relation preview */ }
-    finally { setLoadingLink(null) }
-  }
-
-  const handleUnlink = async (coId: string, lineId: string) => {
-    try {
-      await chapterOutlineLinkApi.unlinkPlotLines(coId, [lineId])
-      setLinkedLines(prev => ({ ...prev, [coId]: (prev[coId] || []).filter(l => l.id !== lineId) }))
-      toast.success('已取消关联')
-    } catch { toast.error('取消关联失败') }
-  }
-
-  const openLinkModal = (coId: string) => {
-    setShowLinkModal(coId)
-    setSelectedLinkIds([])
-  }
-
-  const handleLink = async () => {
-    if (!showLinkModal || selectedLinkIds.length === 0) return
-    setLinkSaving(true)
-    try {
-      await chapterOutlineLinkApi.linkPlotLines(showLinkModal, { plot_line_ids: selectedLinkIds })
-      const lines = await chapterOutlineLinkApi.getPlotLines(showLinkModal)
-      setLinkedLines(prev => ({ ...prev, [showLinkModal!]: lines.map(l => ({ id: l.id, title: l.title, line_type: l.line_type })) }))
-      setShowLinkModal(null)
-      toast.success('关联成功')
-    } catch { toast.error('关联失败') }
-    finally { setLinkSaving(false) }
-  }
-
   const sorted = [...chapterOutlines].sort((a, b) => a.chapter_number - b.chapter_number)
+  const unitLabel = (co: ChapterOutline) => {
+    const volume = volumes.find((v) => v.id === co.volume_id)
+    if (!volume) return null
+    const unit = volume.units.find((u) => u.index === co.unit_index)
+    return `第${volume.volume_number}卷${unit ? ` · 单元 ${unit.index}《${unit.title}》` : ''}`
+  }
 
   const openCreate = () => {
     setEditing(null)
@@ -1573,9 +891,9 @@ function ChapterOutlinesView({ chapterOutlines, projectId, createChapterOutline,
           <button onClick={() => setShowBatchModal(true)} className="hh-btn-ghost">
             <Plus className="h-4 w-4" />批量创建
           </button>
-          <Link to={`/project/${projectId}/plot-bridges`} className="hh-btn-secondary">
-            <Sparkles className="h-4 w-4 text-brand" />去桥段规划生成章纲
-          </Link>
+          <button onClick={onOpenVolumes} className="hh-btn-secondary">
+            <Sparkles className="h-4 w-4 text-brand" />去卷纲生成章纲
+          </button>
           <button onClick={openCreate} className="hh-btn-primary">
             <Plus className="h-4 w-4" />新建章纲
           </button>
@@ -1586,7 +904,7 @@ function ChapterOutlinesView({ chapterOutlines, projectId, createChapterOutline,
         <EmptyBlock
           icon={BookOpen}
           title="还没有章纲"
-          hint="章纲由「桥段规划」展开生成（每桥段 4 章，章号由桥段序号决定）；也可点「新建章纲」手动添加或「批量创建」占位。"
+          hint="章纲由「卷纲」里的剧情单元展开生成（按事件分章，长短不一）；也可点「新建章纲」手动添加，或在智能助笔里让章节策划师生成。"
         />
       ) : (
         <div className="mt-6 space-y-3">
@@ -1612,7 +930,7 @@ function ChapterOutlinesView({ chapterOutlines, projectId, createChapterOutline,
                       {co.scene && <span>场景: {co.scene}</span>}
                       {co.pov && <span>视角: {co.pov}</span>}
                       <span>目标字数: {co.target_word_count}</span>
-                      {co.plot_line_count != null && <span>关联剧情线: {co.plot_line_count}</span>}
+                      {unitLabel(co) && <span>{unitLabel(co)}</span>}
                     </div>
                     {co.plot_points && <p className="mt-1.5 line-clamp-2 text-[13px] leading-6 text-content-secondary">{co.plot_points}</p>}
                     {co.key_events && co.key_events.length > 0 && (
@@ -1628,10 +946,6 @@ function ChapterOutlinesView({ chapterOutlines, projectId, createChapterOutline,
                         {(co.forbidden?.length ?? 0) > 0 && <span>禁止：{co.forbidden!.join('；')}</span>}
                       </div>
                     )}
-                    <button onClick={() => toggleLinks(co.id)} className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-brand hover:text-brand-600">
-                      <Link2 className="h-3 w-3" />关联剧情线
-                      {expandedLinkId === co.id ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-                    </button>
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
@@ -1645,31 +959,6 @@ function ChapterOutlinesView({ chapterOutlines, projectId, createChapterOutline,
                   <button onClick={() => handleDelete(co)} className="hh-icon-btn-plain h-8 w-8 hover:text-cinnabar" title="删除"><Trash2 className="h-3.5 w-3.5" /></button>
                 </div>
               </div>
-              {expandedLinkId === co.id && (
-                <div className="mt-3 border-t border-surface-border/80 pt-3">
-                  {loadingLink === co.id ? (
-                    <div className="flex items-center gap-2 text-xs text-content-secondary"><Loader2 className="h-3 w-3 animate-spin" />加载中...</div>
-                  ) : (
-                    <>
-                      {(linkedLines[co.id] || []).length > 0 ? (
-                        <div className="mb-2 flex flex-wrap gap-2">
-                          {(linkedLines[co.id] || []).map(pl => (
-                            <span key={pl.id} className="hh-tag">
-                              <GitBranch className="h-3 w-3" />{pl.title}
-                              <button onClick={() => handleUnlink(co.id, pl.id)} className="ml-1 text-brand/60 hover:text-red-500" title="取消关联">&times;</button>
-                            </span>
-                          ))}
-                        </div>
-                      ) : (
-                        <p className="mb-2 text-xs text-content-tertiary">暂无关联剧情线</p>
-                      )}
-                      <button onClick={() => openLinkModal(co.id)} className="inline-flex items-center gap-1 text-xs font-medium text-brand hover:text-brand-600">
-                        <Plus className="h-3 w-3" />添加关联
-                      </button>
-                    </>
-                  )}
-                </div>
-              )}
             </article>
           ))}
         </div>
@@ -1799,57 +1088,6 @@ function ChapterOutlinesView({ chapterOutlines, projectId, createChapterOutline,
         </Modal>
       )}
 
-      {/* 关联剧情线选择弹窗 */}
-      {showLinkModal && (
-        <Modal
-          title="关联剧情线"
-          onClose={() => setShowLinkModal(null)}
-          size="lg"
-          closeOnMaskClick={false}
-          footer={(
-            <>
-              <button onClick={() => setShowLinkModal(null)} className="hh-btn-ghost">取消</button>
-              <button onClick={handleLink} disabled={linkSaving || selectedLinkIds.length === 0} className="hh-btn-primary">
-                {linkSaving && <Loader2 className="h-4 w-4 animate-spin" />}
-                确定关联 ({selectedLinkIds.length})
-              </button>
-            </>
-          )}
-        >
-          <div className="max-h-60 space-y-1.5 overflow-y-auto">
-            {plotLines.length === 0 ? (
-              <p className="text-sm text-content-secondary">暂无可选剧情线，请先创建剧情线</p>
-            ) : (
-              plotLines.map(pl => {
-                const alreadyLinked = (linkedLines[showLinkModal] || []).some(l => l.id === pl.id)
-                const selected = selectedLinkIds.includes(pl.id)
-                return (
-                  <label key={pl.id} className={cn(
-                    'flex items-center gap-2.5 border px-3 py-2.5 text-sm text-content transition-colors',
-                    alreadyLinked ? 'cursor-not-allowed border-transparent bg-surface-hover opacity-50' : selected ? 'cursor-pointer border-brand bg-brand/10' : 'cursor-pointer border-transparent hover:bg-surface-hover'
-                  )}>
-                    <input
-                      type="checkbox"
-                      checked={selected || alreadyLinked}
-                      disabled={alreadyLinked}
-                      onChange={() => {
-                        if (alreadyLinked) return
-                        setSelectedLinkIds(prev => prev.includes(pl.id) ? prev.filter(id => id !== pl.id) : [...prev, pl.id])
-                      }}
-                      className="h-4 w-4"
-                    />
-                    <GitBranch className="h-3.5 w-3.5 shrink-0 text-brand" />
-                    <span className="truncate">{pl.title}</span>
-                    <span className="shrink-0 text-xs text-content-tertiary">{getPlotLineTypeLabel(pl.line_type)}</span>
-                    {alreadyLinked && <span className="ml-auto text-xs text-content-tertiary">已关联</span>}
-                  </label>
-                )
-              })
-            )}
-          </div>
-        </Modal>
-      )}
-
       {viewingChapterOutline && (
         <Modal
           title={`章纲详情：第${viewingChapterOutline.chapter_number}章`}
@@ -1868,7 +1106,7 @@ function ChapterOutlinesView({ chapterOutlines, projectId, createChapterOutline,
               {viewingChapterOutline.scene && <span>场景：{viewingChapterOutline.scene}</span>}
               {viewingChapterOutline.pov && <span>视角：{viewingChapterOutline.pov}</span>}
               <span>目标字数：{viewingChapterOutline.target_word_count}</span>
-              <span>关联剧情线：{viewingChapterOutline.plot_line_count ?? 0}</span>
+              {unitLabel(viewingChapterOutline) && <span>{unitLabel(viewingChapterOutline)}</span>}
             </div>
             <div className="hh-subpanel p-4">
               <p className="text-xs font-medium text-content-tertiary">标题</p>
@@ -1940,143 +1178,6 @@ function NarrativeTasksPanel({ tasks, chapterNumber }: { tasks: NarrativeTasks; 
           </li>
         ))}
       </ul>
-    </div>
-  )
-}
-// ==================== Tab 5: 关联总览 ====================
-function OverviewPanel({ plotCards, plotLines, chapterOutlines }: {
-  plotCards: PlotCard[]
-  plotLines: PlotLine[]
-  chapterOutlines: ChapterOutline[]
-}) {
-  const totalCardLinks = plotCards.reduce((sum, c) => sum + (c.plot_line_count ?? 0) + (c.chapter_outline_count ?? 0), 0)
-  const totalLineLinks = plotLines.reduce((sum, l) => sum + (l.chapter_outline_count ?? 0) + (l.plot_card_count ?? 0), 0)
-  const totalRelations = totalCardLinks + totalLineLinks
-
-  const stats = [
-    { label: '剧情卡片', value: plotCards.length },
-    { label: '剧情线', value: plotLines.length },
-    { label: '章纲', value: chapterOutlines.length },
-    { label: '关联关系', value: totalRelations },
-  ]
-
-  // 简易关联网络图：节点 = 剧情线 + 章纲，用 SVG 绘制
-  const sortedCO = [...chapterOutlines].sort((a, b) => a.chapter_number - b.chapter_number)
-  const nodeCount = plotLines.length + sortedCO.length
-  const svgW = 700, svgH = Math.max(300, nodeCount * 18)
-  const lineX = 120, coX = svgW - 120
-  const lineNodes = plotLines.map((l, i) => ({
-    id: l.id, label: l.title, type: 'line' as const,
-    x: lineX, y: 40 + i * (svgH - 80) / Math.max(plotLines.length - 1, 1),
-    linkCount: l.chapter_outline_count ?? 0,
-  }))
-  const coNodes = sortedCO.map((co, i) => ({
-    id: co.id, label: `#${co.chapter_number} ${co.title}`, type: 'co' as const,
-    x: coX, y: 40 + i * (svgH - 80) / Math.max(sortedCO.length - 1, 1),
-    linkCount: co.plot_line_count ?? 0,
-  }))
-
-  return (
-    <div className="space-y-6">
-      <section className="hh-panel grid grid-cols-2 divide-surface-border/80 md:grid-cols-4 md:divide-x">
-        {stats.map(s => (
-          <div key={s.label} className="px-5 py-4 md:px-6">
-            <p className="text-xs text-content-tertiary">{s.label}</p>
-            <p className="mt-1 text-2xl font-semibold tracking-tight text-content tabular-nums">{s.value}</p>
-          </div>
-        ))}
-      </section>
-
-      {plotLines.length === 0 && chapterOutlines.length === 0 && (
-        <section className="hh-panel flex flex-col items-center px-6 py-14 text-center">
-          <span className="flex h-14 w-14 items-center justify-center bg-brand/10 text-brand">
-            <BarChart3 className="h-7 w-7" />
-          </span>
-          <h2 className="mt-5 text-xl font-semibold tracking-tight text-content">还没有可分析的关联</h2>
-          <p className="mt-2 max-w-md text-sm leading-6 text-content-secondary">
-            先在「剧情线」和「章纲」里创建内容并建立关联，这里会汇总关联网络与章纲覆盖情况。
-          </p>
-        </section>
-      )}
-
-      {/* 关联网络图 */}
-      {plotLines.length > 0 && sortedCO.length > 0 && (
-        <section className="hh-panel p-6">
-          <h3 className="text-lg font-semibold tracking-tight text-content">关联网络图</h3>
-          <p className="mt-1 text-sm leading-6 text-content-secondary">左侧为剧情线，右侧为章纲，圆点大小代表关联数量。</p>
-          <div className="mt-5 overflow-x-auto">
-            <svg width={svgW} height={svgH} className="mx-auto">
-              {/* 连线占位：根据关联数量画虚线 */}
-              {lineNodes.map(ln => coNodes.filter(cn => cn.linkCount > 0 || ln.linkCount > 0).slice(0, ln.linkCount || 1).map((cn, ci) => (
-                <line key={`${ln.id}-${cn.id}-${ci}`} x1={ln.x + 8} y1={ln.y} x2={cn.x - 8} y2={cn.y}
-                  stroke="#b9d7ff" strokeWidth={1} strokeDasharray="4,3" opacity={0.8} />
-              )))}
-              {/* 剧情线节点 */}
-              {lineNodes.map(n => (
-                <g key={n.id}>
-                  <circle cx={n.x} cy={n.y} r={Math.max(6, Math.min(14, 6 + n.linkCount * 2))} fill="#285b4d" opacity={0.85} />
-                  <text x={n.x - 14} y={n.y + 4} textAnchor="end" fontSize={11} fill="#46534b" className="select-none">{n.label}</text>
-                </g>
-              ))}
-              {/* 章纲节点 */}
-              {coNodes.map(n => (
-                <g key={n.id}>
-                  <circle cx={n.x} cy={n.y} r={Math.max(6, Math.min(14, 6 + n.linkCount * 2))} fill="#46534b" opacity={0.85} />
-                  <text x={n.x + 14} y={n.y + 4} textAnchor="start" fontSize={11} fill="#46534b" className="select-none">{n.label}</text>
-                </g>
-              ))}
-              {/* 图例 */}
-              <circle cx={20} cy={svgH - 20} r={6} fill="#285b4d" />
-              <text x={32} y={svgH - 16} fontSize={10} fill="#46534b">剧情线</text>
-              <circle cx={90} cy={svgH - 20} r={6} fill="#46534b" />
-              <text x={102} y={svgH - 16} fontSize={10} fill="#46534b">章纲</text>
-            </svg>
-          </div>
-        </section>
-      )}
-
-      {/* 剧情线概览 */}
-      {plotLines.length > 0 && (
-        <section className="hh-panel p-6">
-          <h3 className="text-lg font-semibold tracking-tight text-content">剧情线分布</h3>
-          <div className="mt-4 divide-y divide-surface-border/80">
-            {plotLines.map(l => (
-              <div key={l.id} className="flex items-center justify-between gap-3 py-3 text-sm">
-                <div className="flex min-w-0 items-center gap-2.5">
-                  <span className="flex h-8 w-8 shrink-0 items-center justify-center bg-brand/10 text-brand">
-                    <GitBranch className="h-4 w-4" />
-                  </span>
-                  <span className="truncate text-content">{l.title}</span>
-                  <span className={cn(STATUS_TAG, 'shrink-0', getPlotLineTypeColor(l.line_type))}>{getPlotLineTypeLabel(l.line_type)}</span>
-                </div>
-                <div className="flex shrink-0 items-center gap-3 text-xs text-content-secondary tabular-nums">
-                  <span>卡片 {l.plot_card_count ?? 0}</span>
-                  <span>章纲 {l.chapter_outline_count ?? 0}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
-
-      {/* 章纲覆盖 */}
-      {chapterOutlines.length > 0 && (
-        <section className="hh-panel p-6">
-          <h3 className="text-lg font-semibold tracking-tight text-content">章纲覆盖</h3>
-          <p className="mt-1 text-sm leading-6 text-content-secondary">已关联剧情线的章纲会高亮显示。</p>
-          <div className="mt-4 flex flex-wrap gap-1.5">
-            {sortedCO.map(co => (
-              <span key={co.id} className={cn(
-                'px-2 py-1 text-xs',
-                (co.plot_line_count ?? 0) > 0 ? 'bg-emerald-50 text-emerald-600' : 'bg-surface-hover text-content-secondary'
-              )}>
-                #{co.chapter_number} {co.title}
-                {(co.plot_line_count ?? 0) > 0 && <span className="ml-1 opacity-60">({co.plot_line_count}线)</span>}
-              </span>
-            ))}
-          </div>
-        </section>
-      )}
     </div>
   )
 }

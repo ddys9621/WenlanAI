@@ -36,11 +36,11 @@ const POLL_INTERVAL_MS = 3000
 const DISSECT_JOB_KINDS = ['book_dissect']
 
 const STAGE_LABELS: Record<string, string> = {
-  // V5 流水线阶段
+  // 流水线阶段
   splitting: '章节切分',
   cards: '逐章拆书卡',
-  arcs: '划分情节单元',
-  skeleton: '全书骨架 / 写法手册 / 人物功能谱',
+  arcs: '划分剧情单元',
+  skeleton: '分卷 / 全书骨架 / 写法手册 / 人物功能谱',
   style: '文风指纹',
   pack: '生成参考包',
   // 通用

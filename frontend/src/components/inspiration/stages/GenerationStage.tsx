@@ -40,7 +40,7 @@ export function GenerationStage({
         <StageHeader
           eyebrow="创建完成"
           title={`${title}创建完成`}
-          description="世界观、角色、大纲与剧情线均已生成。下一步进入桥段规划：按主线节点搭桥段骨架，AI 填充后再展开为章纲。"
+          description="世界观、角色、总纲与卷纲均已生成。下一步进入卷纲：逐个剧情单元生成章纲，确认后就能开写；也可以在智能助笔里让主编带着团队推进。"
           action={<CheckCircle2 className="h-8 w-8 text-emerald-500" />}
         />
       ) : (
@@ -145,7 +145,7 @@ export function GenerationStage({
               </button>
               {state.projectId && (
                 <button type="button" onClick={onEnterProject} className="hh-btn-primary">
-                  进入桥段规划
+                  进入卷纲规划
                   <ArrowRight className="h-4 w-4" />
                 </button>
               )}
