@@ -66,6 +66,16 @@ async def lifespan(app: FastAPI):
         _startup_state["database_ready"] = True
         _startup_state["database_error"] = None
         logger.info("✅ 数据库表结构初始化成功")
+
+        # 2.0.x 的项目挂载参考包 → 对标书（只迁没设对标书的项目；失败只记日志，不影响启动）
+        try:
+            from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+            from app.services.knowledge.kb_links import migrate_reference_pack_links
+
+            async with async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)() as session:
+                await migrate_reference_pack_links(session)
+        except Exception as e:
+            logger.warning(f"⚠️ 旧参考包挂载迁成对标书失败（可在项目「仿写参考」页手动选）: {e}")
     except Exception as e:
         _startup_state["database_ready"] = False
         _startup_state["database_error"] = str(e)
