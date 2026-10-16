@@ -1,23 +1,30 @@
 """Embedding 模型首启引导（桌面版启动器调用）
 
-背景：打包 exe 不再内置 470MB 的 embedding 模型（体积减半）。
-首次启动时由 start_app.py 调用本模块：
+背景：打包 exe 不内置 embedding 模型。首次启动时由 start_app.py 调用本模块：
 1. 检查本地 embedding 目录是否已有模型
-2. 缺失则经 hf-mirror（可用 HF_ENDPOINT 覆盖）自动下载
-3. 下载失败 → 返回 False，应用以「无向量记忆」降级模式继续运行
-   （memory_service 已支持降级；用户也可手动放置模型后重启）
+2. 缺失则经 hf-mirror（可用 HF_ENDPOINT 覆盖）自动下载中文模型 bge-small-zh-v1.5（约 95MB）
+3. 下载失败 → 返回 False，应用以「无向量检索」降级模式继续运行（召回只用人物 / 关键词匹配）
+
+升级：旧版下载的是多语 MiniLM（约 470MB，只吃 128 token）。只有旧模型时应用照常能用（model_present 为真），
+启动器会顺带尝试下载中文模型；下载失败继续用旧模型，一天内不再重试（has_recent_failure）。
+作者在「设置 → 记忆检索」里明确选过的模型优先（preferred_model）：选了旧模型就不再自动升级。
 
 注意：必须在 import sentence_transformers / memory_service 之前调用，
 否则 HF_HUB_OFFLINE 常量固化后无法联网下载。
 """
 from __future__ import annotations
 
-import glob
 import os
+import time
 from typing import Callable
 
-MODEL_REPO = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-DEFAULT_HF_MIRROR = "https://hf-mirror.com"
+from app.services import embedding_models
+
+MODEL_REPO = "BAAI/bge-small-zh-v1.5"
+LEGACY_MODEL_REPO = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+MODEL_SIZE_LABEL = "约 95MB"
+FAILURE_MARKER = ".bge_download_failed"
+RETRY_AFTER_SECONDS = 24 * 3600
 
 # 与 memory_service 保持一致：源码/容器 = backend/embedding；exe = {app}\embedding（不放 _internal，升级会被整目录替换）
 from app.utils.runtime_paths import embedding_dir, runtime_base_dir
@@ -25,85 +32,116 @@ from app.utils.runtime_paths import embedding_dir, runtime_base_dir
 BASE_DIR = runtime_base_dir()
 EMBEDDING_PATH = embedding_dir()
 
-_WEIGHT_PATTERNS = ("model.safetensors", "pytorch_model.bin")
+
+def _repo_present(repo: str) -> bool:
+    return embedding_models.repo_present(repo)
+
+
+def preferred_model() -> str:
+    """应用会先用的模型：环境变量 / .env 指定的 → 设置页选的 → 默认中文模型。"""
+    return embedding_models.env_override() or embedding_models.load_selection() or MODEL_REPO
+
+
+def primary_model_present() -> bool:
+    """首选模型已就绪（默认是中文 bge；作者在设置页选过别的就看那个）。"""
+    return _repo_present(preferred_model())
 
 
 def model_present() -> bool:
-    """检查本地是否已有可用模型权重（HF cache 结构 snapshots/<hash>/ 下）。"""
-    repo_dir = os.path.join(
-        EMBEDDING_PATH, "models--" + MODEL_REPO.replace("/", "--"), "snapshots"
-    )
-    for name in _WEIGHT_PATTERNS:
-        if glob.glob(os.path.join(repo_dir, "*", name)):
-            return True
-    return False
+    """embedding 目录里有任何一个能用的模型：应用可以直接启动。"""
+    return bool(embedding_models.installed_models())
+
+
+def _marker_path() -> str:
+    return os.path.join(EMBEDDING_PATH, FAILURE_MARKER)
+
+
+def has_recent_failure(now: float | None = None) -> bool:
+    """上次自动升级下载失败还不到一天：别每次启动都卡在下载上。"""
+    try:
+        return (now or time.time()) - os.path.getmtime(_marker_path()) < RETRY_AFTER_SECONDS
+    except OSError:
+        return False
+
+
+def _mark_failure(failed: bool) -> None:
+    try:
+        if failed:
+            os.makedirs(EMBEDDING_PATH, exist_ok=True)
+            with open(_marker_path(), "w", encoding="utf-8") as fh:
+                fh.write(str(int(time.time())))
+        elif os.path.exists(_marker_path()):
+            os.remove(_marker_path())
+    except OSError:
+        pass
+
+
+def _download_target() -> str:
+    """要下载的模型：首选模型是预设就下它；环境变量指定的自定义模型不在线下载（来源不明），退回默认中文模型。"""
+    wanted = preferred_model()
+    return wanted if embedding_models.preset(wanted) else MODEL_REPO
+
+
+def download_repo(repo: str, log: Callable[[str, str], None]) -> bool:
+    """逐文件下载一个模型（只拉推理需要的文件、一份权重）；每个文件依次换源。成功 = 权重已就绪。"""
+    try:
+        endpoint, files = embedding_models.remote_files(repo)
+    except Exception as e:  # noqa: BLE001 - 所有源都拿不到清单
+        log("WARNING", f"⚠️ {str(e)[:200]}")
+        return False
+    total = sum(size for _, size in files)
+    log("INFO", f"⏬ 从 {endpoint} 下载 {len(files)} 个文件（共 {embedding_models.human_size(total)}，视网络约 1-3 分钟）…")
+    for name, size in files:
+        try:
+            embedding_models.download_file(repo, name, endpoint)
+        except Exception as e:  # noqa: BLE001
+            log("WARNING", f"⚠️ {str(e)[:200]}")
+            return False
+        if size >= 5 * 1024 * 1024:
+            log("INFO", f"  ✓ {name}（{embedding_models.human_size(size)}）")
+    return _repo_present(repo)
 
 
 def ensure_embedding_model(log: Callable[[str, str], None]) -> bool:
-    """确保 embedding 模型就绪；缺失则按镜像列表依次尝试下载。
+    """确保首选的 embedding 模型就绪；缺失则逐文件下载。
 
-    镜像顺序：HF_ENDPOINT 环境变量（若设）→ hf-mirror → 官方 huggingface.co。
-    单个源失败（如镜像超时）自动切换下一个，避免在一个坏源上重试到天荒地老。
-
-    Args:
-        log: 日志回调 (level, message)，由启动面板提供
+    下载源顺序：HF_ENDPOINT 环境变量（若设）→ hf-mirror → 官方 huggingface.co；单个文件失败自动换源。
 
     Returns:
-        True = 模型可用；False = 所有源均失败（应用将降级运行）
+        True = 首选模型可用；False = 下载失败（有别的模型就继续用，否则降级运行）
     """
-    if model_present():
+    if primary_model_present():
         log("INFO", "✅ Embedding 模型已就绪")
         return True
 
-    # 下载阶段必须允许联网；memory_service 稍后 import 时才会强制 OFFLINE。
-    # 收紧 HEAD 探测超时（默认 10s×5 重试，坏源上等待过久）
-    os.environ.pop("HF_HUB_OFFLINE", None)
-    os.environ.pop("TRANSFORMERS_OFFLINE", None)
-    os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "15")
-
-    endpoints: list[str] = []
-    for ep in (os.environ.get("HF_ENDPOINT"), DEFAULT_HF_MIRROR, "https://huggingface.co"):
-        if ep and ep not in endpoints:
-            endpoints.append(ep)
-
-    log("WARNING", "📥 首次运行：本地缺少 AI 记忆模型（约 470MB）")
-
-    from huggingface_hub import snapshot_download
-
+    repo = _download_target()
+    item = embedding_models.preset(repo)
+    label = item.label if item else repo
+    size = item.size_label if item else MODEL_SIZE_LABEL
+    log("WARNING", f"📥 下载 AI 记忆模型 {label}（{size}）")
     os.makedirs(EMBEDDING_PATH, exist_ok=True)
-    for i, ep in enumerate(endpoints, 1):
-        log("INFO", f"⏬ [{i}/{len(endpoints)}] 从 {ep} 下载（视网络约 2-10 分钟）…")
-        try:
-            # 用 endpoint 参数而非环境变量：hub 的 ENDPOINT 常量在 import 时已固化，
-            # 循环中改环境变量不会生效
-            snapshot_download(
-                MODEL_REPO,
-                cache_dir=EMBEDDING_PATH,
-                endpoint=ep,
-                ignore_patterns=[
-                    "*.onnx", "*openvino*", "*.h5", "*.tflite", "*tf_model*", "*.msgpack",
-                ],
-            )
-        except Exception as e:
-            log("WARNING", f"⚠️ 该源失败（{type(e).__name__}: {str(e)[:160]}），尝试下一个…")
-            continue
-        if model_present():
-            log("INFO", "✅ Embedding 模型下载完成")
-            return True
+    if download_repo(repo, log):
+        _mark_failure(False)
+        log("INFO", "✅ Embedding 模型下载完成")
+        return True
 
+    _mark_failure(True)
     log("ERROR", "❌ 所有下载源均失败")
-    log("WARNING", "⚠️ 可改选「导入本地模型包」或「跳过」（跳过后语义检索/伏笔追踪不可用，其余功能正常）")
-    log("INFO", f"💡 手动修复：把模型文件夹放入 {EMBEDDING_PATH} 后重启；目录结构为 "
-                f"models--sentence-transformers--paraphrase-multilingual-MiniLM-L12-v2/snapshots/<hash>/")
+    if model_present():
+        log("WARNING", "⚠️ 本次继续使用已有的记忆模型，明天启动时会再试")
+    else:
+        log("WARNING", "⚠️ 可改选「导入本地模型包」或「跳过」（跳过后语义检索不可用，其余功能正常）")
+    log("INFO", f"💡 也可以进入应用后在「设置 → 记忆检索」里重新下载；或把模型文件夹放入 {EMBEDDING_PATH} 后重启"
+                f"（目录结构为 models--BAAI--bge-small-zh-v1.5/snapshots/<hash>/）")
     return False
 
 
 def import_model_zip(zip_path: str, log: Callable[[str, str], None]) -> bool:
     """从本地 zip 导入模型（离线分发场景：模型包随群文件/网盘单独提供）。
 
-    支持两种压缩包结构：
+    支持两种压缩包结构（中文 bge 或旧版 MiniLM 都认）：
     1. 顶层为 embedding/models--…（官方离线包结构）→ 解压到 backend 根
-    2. 顶层直接是 models--sentence-transformers--…      → 解压到 embedding/
+    2. 顶层直接是 models--…                         → 解压到 embedding/
 
     Returns:
         True = 导入成功且校验通过
@@ -115,6 +153,7 @@ def import_model_zip(zip_path: str, log: Callable[[str, str], None]) -> bool:
         return False
 
     log("INFO", f"📦 正在导入模型包：{os.path.basename(zip_path)} …")
+    prefixes = tuple("models--" + repo.replace("/", "--") for repo in (MODEL_REPO, LEGACY_MODEL_REPO))
     try:
         with zipfile.ZipFile(zip_path) as zf:
             names = zf.namelist()
@@ -124,14 +163,13 @@ def import_model_zip(zip_path: str, log: Callable[[str, str], None]) -> bool:
                     log("ERROR", f"❌ 压缩包含非法路径，已拒绝导入：{n}")
                     return False
 
-            model_prefix = "models--" + MODEL_REPO.replace("/", "--")
             if any(n.replace("\\", "/").startswith("embedding/") for n in names):
                 dest = BASE_DIR          # 结构1：包内自带 embedding/ 层
-            elif any(n.replace("\\", "/").startswith(model_prefix) for n in names):
+            elif any(n.replace("\\", "/").startswith(prefixes) for n in names):
                 dest = EMBEDDING_PATH    # 结构2：包内直接是 models--… 层
             else:
                 log("ERROR", "❌ 压缩包结构不符：应包含 embedding/ 或 "
-                             f"{model_prefix}/ 目录")
+                             f"{prefixes[0]}/ 目录")
                 return False
 
             os.makedirs(dest, exist_ok=True)

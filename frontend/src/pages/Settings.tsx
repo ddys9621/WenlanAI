@@ -1,8 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { settingsApi } from '@/services/api'
-import type { Settings as SettingsType, SettingsUpdate, ReasoningEffort } from '@/types'
+import type { AIModelOption, Settings as SettingsType, SettingsUpdate, ReasoningEffort } from '@/types'
 import { UpdatePanel } from '@/components/settings/UpdatePanel'
 import { ALL_EFFORTS, EFFORT_LEVELS, autoBudget } from '@/components/settings/aiParams'
+import { EmbeddingModelPanel } from '@/components/settings/EmbeddingModelPanel'
+import { OptionalModelField } from '@/components/settings/OptionalModelField'
+import { ModelListPicker } from '@/components/ai-model/ModelListPicker'
 import { Switch } from '@/components/ui/Switch'
 import { toast } from 'sonner'
 import {
@@ -14,10 +17,10 @@ import {
   RotateCcw,
   Save,
   Wifi,
-  RefreshCw,
   Plug,
   Cpu,
   Brain,
+  Database,
   SlidersHorizontal,
   Info,
   ChevronDown,
@@ -41,6 +44,7 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
 const SECTIONS = [
   { id: 'api', label: 'API 配置', icon: Plug },
   { id: 'model', label: '模型配置', icon: Cpu },
+  { id: 'memory', label: '记忆检索', icon: Database },
   { id: 'reasoning', label: '思考强度', icon: Brain },
   { id: 'preferences', label: '偏好设置', icon: SlidersHorizontal },
   { id: 'about', label: '关于与更新', icon: Info },
@@ -53,7 +57,7 @@ export default function Settings() {
   const [testResult, setTestResult] = useState<'success' | 'error' | null>(null)
   const [testMessage, setTestMessage] = useState('')
   const [settings, setSettings] = useState<SettingsType | null>(null)
-  const [models, setModels] = useState<Array<{ value: string; label: string; description: string }>>([])
+  const [models, setModels] = useState<AIModelOption[]>([])
   const [loadingModels, setLoadingModels] = useState(false)
   const [showApiKey, setShowApiKey] = useState(false)
   const [activeSection, setActiveSection] = useState<string>('api')
@@ -163,10 +167,10 @@ export default function Settings() {
     setTestResult(null)
   }, [])
 
-  // 获取可用模型
-  const fetchModels = useCallback(async () => {
+  // 获取可用模型（silent：打开设置页时自动拉一次，不弹提示）
+  const fetchModels = useCallback(async (silent = false) => {
     if (!form.api_key || !form.api_base_url || !form.api_provider) {
-      toast.error('请先填写 API 提供商、Base URL 和 API Key')
+      if (!silent) toast.error('请先填写 API 提供商、Base URL 和 API Key')
       return
     }
     setLoadingModels(true)
@@ -177,17 +181,26 @@ export default function Settings() {
         provider: form.api_provider,
       })
       setModels(res.models || [])
+      if (silent) return
       if (res.models?.length) {
         toast.success(`获取到 ${res.models.length} 个可用模型`)
       } else {
         toast.warning('未获取到可用模型')
       }
     } catch {
-      toast.error('获取模型列表失败')
+      if (!silent) toast.error('获取模型列表失败')
     } finally {
       setLoadingModels(false)
     }
   }, [form.api_key, form.api_base_url, form.api_provider])
+
+  // 设置读进来后自动拉一次模型列表：LLM / 分析 / 补全模型都能直接从列表里选
+  const autoFetched = useRef(false)
+  useEffect(() => {
+    if (loading || autoFetched.current || !form.api_key || !form.api_base_url) return
+    autoFetched.current = true
+    void fetchModels(true)
+  }, [loading, form.api_key, form.api_base_url, fetchModels])
 
   // 测试连接
   const handleTestConnection = useCallback(async () => {
@@ -443,40 +456,16 @@ export default function Settings() {
           <section id="model" className={cardClass}>
             <h2 className="text-lg font-semibold text-content mb-4">模型配置</h2>
             <div className="space-y-4">
-              {/* LLM 模型 */}
+              {/* LLM 模型：从接口拉取的列表里直接选（带搜索），也可手动输入 */}
               <div>
                 <label className={labelClass}>LLM 模型</label>
-                <div className="flex gap-2">
-                  <select
-                    className={selectClass + ' flex-1'}
-                    value={form.llm_model}
-                    onChange={e => updateField('llm_model', e.target.value)}
-                  >
-                    <option value="">请选择模型</option>
-                    {models.map(m => (
-                      <option key={m.value} value={m.value}>
-                        {m.label}
-                      </option>
-                    ))}
-                    {/* 如果当前值不在列表中，也显示 */}
-                    {form.llm_model && !models.find(m => m.value === form.llm_model) && (
-                      <option value={form.llm_model}>{form.llm_model}</option>
-                    )}
-                  </select>
-                  <button
-                    type="button"
-                    className="inline-flex items-center gap-1.5 px-3 py-2 text-sm rounded-btn border border-surface-border hover:bg-surface-hover transition-colors disabled:opacity-50"
-                    onClick={fetchModels}
-                    disabled={loadingModels}
-                    title="刷新模型列表"
-                  >
-                    {loadingModels ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <RefreshCw className="w-4 h-4" />
-                    )}
-                  </button>
-                </div>
+                <ModelListPicker
+                  value={form.llm_model ?? ''}
+                  onChange={v => updateField('llm_model', v)}
+                  models={models}
+                  loading={loadingModels}
+                  onRefresh={() => void fetchModels()}
+                />
                 {form.llm_model && models.find(m => m.value === form.llm_model)?.description && (
                   <p className="text-xs text-content-tertiary mt-1">
                     {models.find(m => m.value === form.llm_model)?.description}
@@ -485,50 +474,28 @@ export default function Settings() {
               </div>
 
               {/* 分析模型：章节分析 / 实体抽取 / 剧情摘要占每章约一半调用量，可用同一接口下更便宜的模型 */}
-              <div>
-                <label className={labelClass}>
-                  分析模型
-                  <span className="ml-2 text-content-tertiary font-normal">可选，留空 = 跟随上面的 LLM 模型</span>
-                </label>
-                <input
-                  className={selectClass + ' w-full'}
-                  list="analysis-model-options"
-                  value={form.analysis_model ?? ''}
-                  placeholder="如 deepseek-chat / gpt-4o-mini"
-                  onChange={e => updateField('analysis_model', e.target.value)}
-                />
-                <datalist id="analysis-model-options">
-                  {models.map(m => (
-                    <option key={m.value} value={m.value}>{m.label}</option>
-                  ))}
-                </datalist>
-                <p className="text-xs text-content-tertiary mt-1">
-                  章节分析、实体抽取、剧情单元 / 卷摘要会用这个模型（同一个接口和 Key）。长篇每章都要分析，换成便宜快的模型能省一半左右的费用。
-                </p>
-              </div>
+              <OptionalModelField
+                label="分析模型"
+                followText={`跟随 LLM 模型${form.llm_model ? `（${form.llm_model}）` : ''}`}
+                value={form.analysis_model ?? ''}
+                onChange={v => updateField('analysis_model', v)}
+                models={models}
+                loading={loadingModels}
+                onRefresh={() => void fetchModels()}
+                hint="章节分析、实体抽取、剧情单元 / 卷摘要会用这个模型（同一个接口和 Key，分析时不开思考）。长篇每章都要分析，换成便宜快的模型能省一半左右的费用；输出要能稳定写完 JSON。"
+              />
 
               {/* 补全模型：码字时的 AI 行内补全每次停笔都会调用，要的是快；不填则跟随项目模型 */}
-              <div>
-                <label className={labelClass}>
-                  补全模型
-                  <span className="ml-2 text-content-tertiary font-normal">可选，留空 = 跟随项目当前模型</span>
-                </label>
-                <input
-                  className={selectClass + ' w-full'}
-                  list="completion-model-options"
-                  value={form.completion_model ?? ''}
-                  placeholder="如 deepseek-chat / qwen-turbo / gpt-4o-mini"
-                  onChange={e => updateField('completion_model', e.target.value)}
-                />
-                <datalist id="completion-model-options">
-                  {models.map(m => (
-                    <option key={m.value} value={m.value}>{m.label}</option>
-                  ))}
-                </datalist>
-                <p className="text-xs text-content-tertiary mt-1">
-                  章节写作页打开「AI 补全」后，每次停笔都会用这个模型续写一小段灰色建议（同一个接口和 Key，补全时一律不开思考）。选响应快、价格低的模型体验最好。
-                </p>
-              </div>
+              <OptionalModelField
+                label="补全模型"
+                followText="跟随项目当前模型"
+                value={form.completion_model ?? ''}
+                onChange={v => updateField('completion_model', v)}
+                models={models}
+                loading={loadingModels}
+                onRefresh={() => void fetchModels()}
+                hint="章节写作页打开「AI 补全」后，每次停笔都会用这个模型续写一小段灰色建议（同一个接口和 Key，补全时一律不开思考）。选响应快、价格低的模型体验最好。"
+              />
 
               {/* Temperature */}
               <div>
@@ -662,6 +629,13 @@ export default function Settings() {
               </div>
               </>)}
             </div>
+          </section>
+
+          {/* 记忆检索区：向量模型（故事账本的语义召回、世界规则检索），即时生效 */}
+          <section id="memory" className={cardClass}>
+            <h2 className="text-lg font-semibold text-content mb-1">记忆检索模型</h2>
+            <p className="mb-4 text-sm text-content-secondary">写正文时从故事账本里找「相关旧事」、检索世界规则用的向量模型，在本机运行，不花模型调用费。</p>
+            <EmbeddingModelPanel />
           </section>
 
           {/* 思考强度区 */}

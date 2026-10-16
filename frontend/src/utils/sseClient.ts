@@ -10,6 +10,8 @@ export interface SSEMessage {
     | 'tool' | 'content_reset' | 'candidate' | 'chapter_candidate' | 'navigate' | 'question'
     // 共创室：本轮发言成员 / 主编交给成员 / 成员回复 / 规划草案卡片 / 启动的后台任务
     | 'speaker' | 'member_start' | 'member_message' | 'plan' | 'job'
+    // 共创室上下文：这一步的用量 / 把较早的对话压成前情摘要（phase: running / done / failed）
+    | 'context' | 'compact'
     // 编辑器行内补全：截至目前的完整建议
     | 'suggestion';
   message?: string;

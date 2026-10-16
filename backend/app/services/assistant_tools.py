@@ -20,9 +20,8 @@ from app.models.chapter import Chapter
 from app.models.chapter_candidate import ChapterCandidate
 from app.models.chapter_outline import ChapterOutline
 from app.models.character import Character
+from app.models.knowledge import KbSource
 from app.models.project import Project
-from app.models.project_reference_pack import ProjectReferencePack
-from app.models.reference_pack import ReferencePack
 from app.models.story_outline import StoryOutline
 from app.models.world_map import WorldMapLocation
 from app.models.volume import Volume
@@ -32,15 +31,16 @@ from app.services import cocreation_team as team
 from app.services import volume_service as volumes
 from app.services.assistant_checks_service import project_checks
 from app.services.assistant_persistence import PersistError, write_verified
+from app.services.knowledge import kb_query
+from app.services.knowledge.entry_types import ENTRY_TYPES, entry_label
 from app.services.planning_context import clip
-from app.services.reference_pack.dimension_compressor import compress_dimension
 from app.services.story_progress import progress_snapshot
 from app.services.writing_assistant_service import SELECTION_SKILLS, SKILL_LABELS, execute_skill
 
 PAGES = {
     "world-setting": "世界设定", "world-rules": "世界规则", "world-map": "世界地图", "characters": "角色与组织",
     "relationships": "关系管理", "outline": "谋篇（总纲 / 卷纲 / 章纲）", "chapter-analysis": "章节写作",
-    "writing-styles": "写作风格", "memories": "记忆系统",
+    "writing-styles": "写作风格", "memories": "故事账本",
 }
 
 TOOLS: dict[str, tuple[str, str, str]] = {
@@ -60,10 +60,13 @@ TOOLS: dict[str, tuple[str, str, str]] = {
                    '{"questions": [{"id": "q1", "prompt": "问题", "mode": "single|multiple|text", '
                    '"options": [{"id": "a", "label": "选项", "recommended": true}]}]}'),
     "story_progress": ("查看创作进度", "总纲 / 卷纲 / 章纲 / 正文各到哪一步，以及建议的下一步", "{}"),
-    "read_reference": ("查看拆书参考", "读本书挂载的拆书参考：原书的全书骨架 / 剧情单元 / 写法手册 / 结构统计 / 人物功能谱 / 文风"
-                                     "（只学结构、节奏和写法，不照搬人物、设定与情节）",
-                       '{"dimension": "synopsis|bridges|methodology|structure|character_archive|style", '
-                       '"detail": "可选 light|medium|deep，默认 medium"}'),
+    "kb_search": ("查知识库", "在作者的知识库（拆过的书）里按关键词找条目：多个词用空格分开、都要命中；可按类型筛选"
+                             "（chapter 章卡 / arc 剧情单元 / volume 分卷 / synopsis 全书骨架 / characters 人物功能谱 / "
+                             "methodology 写法手册 / structure 结构统计 / style 文风 / excerpt 片段）",
+                  '{"query": "关键词", "type": "可选，条目类型"}'),
+    "kb_read": ("读知识库条目", "读一条知识库条目（先 kb_search 拿到 entry_id）：默认去名版（人名换成功能位，适合学结构）；"
+                             "view=named 看原名版。只学结构、节奏和写法，不照搬人物、设定与情节",
+                '{"entry_id": "...", "view": "denamed|named"}'),
     "plan_volumes": ("按总纲分卷", "按总纲把全书（已写章纲之后的部分）分卷，产出卷纲草稿（已有章纲的卷保留）",
                      '{"chapter_count": 可选全书章数, "volume_count": 可选卷数, "instruction": "可选，作者对分卷的要求"}'),
     "detail_volume": ("细化卷纲", "把某一卷拆成剧情单元并编排线索，产出草稿（本卷已有章纲时不能重拆）",
@@ -357,36 +360,47 @@ async def _story_progress(ctx: ToolContext, _args: dict) -> ToolOutcome:
     return ToolOutcome(True, f"下一步：{snapshot['next_step']['label']}", snapshot["text"])
 
 
-REFERENCE_DIMENSIONS = {
-    "synopsis": "全书骨架", "bridges": "剧情单元", "methodology": "写法手册",
-    "structure": "结构统计", "character_archive": "人物功能谱", "style": "文风",
-}
+KB_SEARCH_LIMIT = 8
+KB_BOUNDARY = "（知识库里是拆过的书：只学结构、节奏和写法，不照搬人物、设定与情节）"
 
 
-async def _read_reference(ctx: ToolContext, args: dict) -> ToolOutcome:
-    dim = str(args.get("dimension") or "synopsis").strip()
-    if dim not in REFERENCE_DIMENSIONS:
-        raise ToolError("dimension 只能是 " + " / ".join(REFERENCE_DIMENSIONS))
-    label = REFERENCE_DIMENSIONS[dim]
-    level = str(args.get("detail") or "medium").strip()
-    level = level if level in ReferencePack.STRENGTH_LEVELS else "medium"
-    packs = (await ctx.db.execute(
-        select(ReferencePack)
-        .join(ProjectReferencePack, ProjectReferencePack.pack_id == ReferencePack.id)
-        .where(ProjectReferencePack.project_id == ctx.project_id, ReferencePack.status.in_(("ready", "partial")))
-    )).scalars().all()
-    if not packs:
-        return ToolOutcome(True, "本书没有挂载拆书参考",
-                           "本书没有挂载可用的拆书参考包；作者可以在「参考库」把拆好的书挂到这个项目上。")
-    parts = []
-    for pack in packs:
-        text = pack.get_precompressed(dim, level) or compress_dimension(getattr(pack, f"{dim}_json", None), dim, level)
-        if text:
-            parts.append(f"《{pack.source_book_title}》\n{text}")
-    if not parts:
-        return ToolOutcome(True, f"参考包里没有「{label}」", f"挂载的参考包都没有生成「{label}」这一项。")
-    body = "（以下是原书的拆解：只学它的结构、节奏和写法，不要照搬人物、设定和情节）\n\n" + "\n\n".join(parts)
-    return ToolOutcome(True, f"读了 {len(parts)} 本参考书的「{label}」", clip(body, DATA_LIMIT))
+async def _kb_user(ctx: ToolContext) -> str:
+    if ctx.user_id:
+        return ctx.user_id
+    project = await ctx.db.get(Project, ctx.project_id)
+    if project is None:
+        raise ToolError("找不到本书")
+    return project.user_id
+
+
+async def _kb_search(ctx: ToolContext, args: dict) -> ToolOutcome:
+    query = _text(args, "query", 200)
+    entry_type = str(args.get("type") or "").strip() or None
+    if entry_type is not None and entry_type not in ENTRY_TYPES:
+        raise ToolError("type 只能是 " + " / ".join(ENTRY_TYPES))
+    user_id = await _kb_user(ctx)
+    rows, total = await kb_query.search_entries(ctx.db, user_id, query, entry_type=entry_type, limit=KB_SEARCH_LIMIT)
+    if not rows:
+        return ToolOutcome(True, "知识库里没有找到", f"知识库里没有找到同时包含「{query}」的条目；可以换个说法或少用几个词。")
+    titles = {s.id: s.title for s in await kb_query.list_sources(ctx.db, user_id)}
+    lines = [f"- [{e.id}] 《{titles.get(e.source_id, '')}》{e.title}（{entry_label(e.entry_type)}）：{clip(e.summary, 80)}"
+             for e in rows]
+    more = f"\n（共 {total} 条，只列前 {len(rows)} 条；要看全文用 kb_read）" if total > len(rows) else "\n（要看全文用 kb_read）"
+    return ToolOutcome(True, f"知识库里找到 {total} 条", "\n".join(lines) + more)
+
+
+async def _kb_read(ctx: ToolContext, args: dict) -> ToolOutcome:
+    entry_id = _text(args, "entry_id", 64)
+    named = str(args.get("view") or "denamed").strip() == "named"
+    entry = await kb_query.get_entry(ctx.db, await _kb_user(ctx), entry_id)
+    if entry is None:
+        raise ToolError("知识库里没有这条：先用 kb_search 查到 entry_id")
+    source = await ctx.db.get(KbSource, entry.source_id)
+    ctx.read_targets.add(f"kb:{entry.id}:{entry.revision or 1}")
+    head = (f"《{source.title if source else ''}》{entry.title}｜{entry_label(entry.entry_type)}｜修订 {entry.revision or 1}｜"
+            f"{'原名版' if named else '去名版'}")
+    body = (entry.body if named else entry.denamed_body) or entry.body or ""
+    return ToolOutcome(True, f"读了《{entry.title}》", clip(f"{head}\n{KB_BOUNDARY}\n\n{body}", DATA_LIMIT))
 
 
 async def _plan_volumes(ctx: ToolContext, args: dict) -> ToolOutcome:
@@ -454,7 +468,7 @@ HANDLERS = {
     "search_project": _search_project, "list_fields": _list_fields, "read_field": _read_field,
     "propose_edit": _propose_edit, "manuscript": _manuscript, "open_page": _open_page,
     "project_status": _project_status, "ask_author": _ask_author, "story_progress": _story_progress,
-    "read_reference": _read_reference,
+    "kb_search": _kb_search, "kb_read": _kb_read,
     "plan_volumes": _plan_volumes, "detail_volume": _detail_volume, "plan_chapters": _plan_chapters,
     "write_chapters": _write_chapters,
 }

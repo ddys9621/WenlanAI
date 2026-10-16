@@ -32,6 +32,8 @@ from app.services.planning_context import (
     story_core_lines,
     written_upto,
 )
+from app.services.knowledge import kb_refs
+from app.services.knowledge.kb_context import traced_kb_context
 from app.services.platform_presets import default_chapter_words
 from app.services.reference_pack import AssemblyContext, PromptAssembler
 from app.utils.story_outline_fields import parse_story_outline_fields
@@ -181,17 +183,21 @@ async def generate_skeleton(
         total_chapters=total, start_chapter=start, volume_count=volume_count or vp.suggest_volume_count(total - start + 1),
         fixed_text=fixed,
     )
+    kb = await traced_kb_context(db, project_id, "volume_skeleton")
     content = await _collect(
         ai, prompt=_join(prompt.user_prompt, "\n".join(story_core_lines(await story_fields(db, project_id))), progress,
-                         _instruction(instruction), task),
+                         kb.text, _instruction(instruction), task, kb.ref_instruction),
         system_prompt=prompt.system_prompt, model=model, what="分卷",
     )
     rows = vp.parse_skeleton(content, start_chapter=start, end_chapter=total, first_number=len(kept) + 1)
+    refs = [row.pop("ref", "") for row in rows]
     for v in replaced:
         await db.delete(v)
     await db.flush()
     created = [Volume(project_id=project_id, review_status=DRAFT, **row) for row in rows]
     db.add_all(created)
+    await db.flush()
+    await kb_refs.save_citations(db, project_id, kb.refs, kb.scene, "volume", [(v.id, ref) for v, ref in zip(created, refs)])
     await db.commit()
     for v in created:
         await db.refresh(v)
@@ -223,6 +229,7 @@ async def detail_volume(
     prev, nxt = await _neighbour(db, volume, -1), await _neighbour(db, volume, 1)
     promises, _ids, _items = await open_promises_block(db, volume.project_id, before_chapter=volume.chapter_start, limit=10)
     prompt = await _assemble(db, volume.project_id, VOLUME_SCENE, _model(ai, model))
+    kb = await traced_kb_context(db, volume.project_id, "volume_detail", volume=volume)
     content = await _collect(
         ai, prompt=_join(
             prompt.user_prompt,
@@ -231,9 +238,10 @@ async def detail_volume(
             _volume_block(volume, "【📍 本卷】"),
             _volume_block(nxt, "【➡ 下一卷（本卷结尾要把局面交给它）】", full=False) if nxt else "",
             await actual_progress_block(db, volume.project_id, before_chapter=volume.chapter_start),
-            promises, _instruction(instruction),
+            promises, kb.text, _instruction(instruction),
             vp.render_detail_task({"volume_number": volume.volume_number, "title": volume.title,
                                    "chapter_start": volume.chapter_start, "chapter_end": volume.chapter_end}),
+            kb.ref_instruction,
         ),
         system_prompt=prompt.system_prompt, model=model, what=f"细化第{volume.volume_number}卷",
     )
@@ -243,6 +251,9 @@ async def detail_volume(
     if detail["summary"]:
         volume.summary = detail["summary"]
     volume.review_status = DRAFT
+    await kb_refs.clear_citations(db, volume.project_id, "unit", prefix=f"{volume.id}:")
+    await kb_refs.save_citations(db, volume.project_id, kb.refs, kb.scene, "unit",
+                                 [(f"{volume.id}:{u['index']}", ref) for u, ref in zip(detail["units"], detail["refs"])])
     await db.commit()
     await db.refresh(volume)
     logger.info("[卷纲] 第%d卷细化为 %d 个剧情单元", volume.volume_number, len(detail["units"]))
@@ -332,6 +343,7 @@ async def generate_unit_outlines(
     prompt = await _assemble(db, volume.project_id, OUTLINE_SCENE, _model(ai, model))
     words = default_chapter_words(getattr(project, "platform_preset", None))
     next_volume = await _neighbour(db, volume, 1)
+    kb = await traced_kb_context(db, volume.project_id, "unit_outline", volume=volume, unit=unit)
     created: list[ChapterOutline] = []
     for batch in _batches(missing):
         b_start, b_end = batch[0], batch[-1]
@@ -346,11 +358,13 @@ async def generate_unit_outlines(
                 _unit_block(unit, units, next_volume),
                 await _previous_chapter_block(db, volume.project_id, b_start),
                 await actual_progress_block(db, volume.project_id, before_chapter=b_start),
-                promise_text, _instruction(instruction),
+                promise_text, kb.text, _instruction(instruction),
                 vp.render_chapters_task(unit, b_start, b_end, pov_line(project.narrative_perspective), words),
+                kb.ref_instruction,
             ),
             system_prompt=prompt.system_prompt, model=model, what=f"第 {b_start}-{b_end} 章章纲",
         )
+        batch_refs: list[tuple[ChapterOutline, str]] = []
         for row in vp.parse_chapter_outlines(content, b_start, b_end):
             tasks = normalize_narrative_tasks(_map_task_ids(row["narrative_tasks"], promise_ids), open_promises)
             outline = ChapterOutline(
@@ -365,6 +379,10 @@ async def generate_unit_outlines(
             )
             db.add(outline)
             created.append(outline)
+            batch_refs.append((outline, row["ref"]))
+        await db.flush()
+        await kb_refs.save_citations(db, volume.project_id, kb.refs, kb.scene, "chapter_outline",
+                                     [(o.id, ref) for o, ref in batch_refs])
         await db.commit()
         if on_batch is not None:
             await on_batch(b_start, b_end)

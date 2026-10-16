@@ -268,16 +268,16 @@ class MainAPI:
     # ---- 首启模型引导：三选一 ----
 
     def download_model(self):
-        """选项1：在线下载（多镜像依次尝试，约 470MB）。后台线程执行，不阻塞界面。"""
+        """选项1：在线下载（多镜像依次尝试，约 95MB）。后台线程执行，不阻塞界面。"""
         global _model_busy, _model_worker_running
         if not _model_required:
             return json.dumps({"ok": False})
         if _model_worker_running:
             # 已有任务在跑（可能被"返回选择"隐藏过）：只恢复忙碌显示
-            _model_busy = _model_busy or "正在在线下载模型（约 470MB）…"
+            _model_busy = _model_busy or "正在在线下载模型（约 95MB）…"
             return json.dumps({"ok": True})
         _model_worker_running = True
-        _model_busy = "正在在线下载模型（约 470MB）…"
+        _model_busy = "正在在线下载模型（约 95MB）…"
 
         def worker():
             global _model_busy, _model_required, _model_worker_running
@@ -483,13 +483,25 @@ def _bootstrap():
     global _model_required
     if _startup_error:
         return
-    # 首启引导：embedding 模型不再内置于安装包（体积 -470MB）。
-    # 缺失时不自动下载——启动画面给出三选一（在线下载 / 导入本地 zip / 跳过降级），
-    # 由用户决定后再启动服务
+    # 首启引导：embedding 模型不内置于安装包。
+    # 完全缺失时不自动下载——启动画面给出三选一（在线下载 / 导入本地 zip / 跳过降级），由用户决定后再启动服务。
+    # 首选模型（默认中文 bge-small-zh；设置页选过别的就是那个）没下载、但有别的模型时：顺带下载首选模型
+    # （失败照常用已有模型，一天内不再重试）。作者在设置页明确选了旧模型就不会再被「升级」。
     try:
-        from app.services.embedding_bootstrap import model_present
-        if model_present():
+        from app.services.embedding_bootstrap import (
+            ensure_embedding_model, has_recent_failure, model_present, primary_model_present,
+        )
+        if primary_model_present():
             _panel_log("INFO", "✅ AI 记忆模型已就绪")
+        elif model_present():
+            if has_recent_failure():
+                _panel_log("INFO", "✅ AI 记忆模型已就绪（首选模型稍后再试下载）")
+            else:
+                _panel_log("INFO", "📥 正在下载首选的 AI 记忆模型，下载失败会继续使用已有模型…")
+                try:
+                    ensure_embedding_model(_panel_log)
+                except Exception as e:
+                    _panel_log("WARNING", f"⚠️ 记忆模型下载异常，继续使用已有模型: {e}")
         else:
             _model_required = True
             _panel_log("WARNING", "首次运行：缺少 AI 记忆模型，请在启动画面选择获取方式（在线下载 / 导入本地模型包 / 跳过）")

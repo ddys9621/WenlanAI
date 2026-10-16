@@ -12,6 +12,9 @@ import {
   Trash2,
   Loader2,
   BookOpenText,
+  BookMarked,
+  SlidersHorizontal,
+  Sparkles,
   type LucideIcon,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -22,11 +25,8 @@ import { wizardStreamApi } from '@/services/api';
 import type { PlatformPreset, Project } from '@/types';
 import { mergeUntouched } from '@/utils/draftMerge';
 import { MCPSelector } from '@/components/MCPSelector';
-import {
-  ReferencePackSelector,
-  DEFAULT_SELECTOR_VALUE,
-  type ReferencePackSelectorValue,
-} from '@/components/ReferencePackSelector';
+import { KbReferenceHint } from '@/components/knowledge/KbReferenceHint';
+import { useProjectKbLink } from '@/hooks/useProjectKbLink';
 
 interface WorldBlock {
   key: 'world_time_period' | 'world_location' | 'world_atmosphere' | 'world_rules';
@@ -72,6 +72,8 @@ const formFromProject = (p: Project): WorldSettingForm => ({
   world_rules: p.world_rules || '',
 });
 
+const TEXTAREA = 'hh-textarea px-4 py-3 leading-7 [field-sizing:content]';
+
 const BLOCKS: WorldBlock[] = [
   {
     key: 'world_time_period',
@@ -113,8 +115,7 @@ export default function WorldSetting() {
   const [showRegenModal, setShowRegenModal] = useState(false);
   const [regenEnableMcp, setRegenEnableMcp] = useState(false);
   const [regenPlugins, setRegenPlugins] = useState<string[]>([]);
-  // R8：拆书参考包选择器
-  const [regenRefPack, setRegenRefPack] = useState<ReferencePackSelectorValue>(DEFAULT_SELECTOR_VALUE);
+  const kbLink = useProjectKbLink(currentProject?.id);
   const [form, setForm] = useState<WorldSettingForm>({
     title: '',
     theme: '',
@@ -137,6 +138,9 @@ export default function WorldSetting() {
     setForm((prev) => (base ? mergeUntouched(prev, base, next) : next));
   }, [currentProject]);
 
+  const setField = <K extends keyof WorldSettingForm>(key: K, value: WorldSettingForm[K]) =>
+    setForm((prev) => ({ ...prev, [key]: value }));
+
   const handleRegenerate = async () => {
     if (!currentProject) return;
     setRegenerating(true);
@@ -151,12 +155,6 @@ export default function WorldSetting() {
           theme: form.theme,
           genre: form.genre,
           generation_prompt: form.generation_prompt,
-          // R8：仅 enabled 时透传拆书参考包参数
-          ...(regenRefPack.enabled ? {
-            pack_ids: regenRefPack.packIds.length > 0 ? regenRefPack.packIds : undefined,
-            dimensions: regenRefPack.dimensions.length > 0 ? regenRefPack.dimensions : undefined,
-            strength: regenRefPack.strength,
-          } : {}),
         },
         {
           onProgress: (msg) => toast.info(msg, { id: 'regen-world' }),
@@ -226,6 +224,14 @@ export default function WorldSetting() {
   const totalChars = BLOCKS.reduce((sum, block) => sum + form[block.key].trim().length, 0);
   const promptChars = form.generation_prompt.trim().length;
   const hasContent = filledBlocks > 0;
+  const platform = PLATFORM_OPTIONS.find((opt) => opt.value === form.platform_preset) ?? PLATFORM_OPTIONS[0];
+  const status = editing
+    ? { value: '编辑中', hint: '修改后记得保存' }
+    : filledBlocks === BLOCKS.length
+      ? { value: '已成稿', hint: '可随时 AI 重生成' }
+      : hasContent
+        ? { value: '待完善', hint: `还有 ${BLOCKS.length - filledBlocks} 个模块待补充` }
+        : { value: '空白', hint: '手动填写或 AI 生成' };
 
   return (
     <div className="animate-fade-in space-y-6">
@@ -276,164 +282,158 @@ export default function WorldSetting() {
       <section className="hh-panel grid grid-cols-2 divide-surface-border/80 md:grid-cols-4 md:divide-x">
         <StatItem
           label="完成模块"
-          value={`${filledBlocks}/${BLOCKS.length}`}
+          value={filledBlocks}
+          unit={`/ ${BLOCKS.length}`}
           hint={filledBlocks === BLOCKS.length ? '结构完整' : '仍可补充'}
         />
-        <StatItem label="内容字数" value={totalChars} hint={totalChars > 0 ? '当前已录入' : '尚未填写'} />
-        <StatItem
-          label="当前状态"
-          value={editing ? '编辑中' : hasContent ? '已成稿' : '空白'}
-          hint={editing ? '可直接修改' : '支持 AI 重生成'}
-        />
-        <StatItem label="最终提示词" value={`${promptChars} 字`} hint={promptChars > 0 ? '已启用微调' : '未填写'} />
+        <StatItem label="设定字数" value={totalChars} unit="字" hint={totalChars > 0 ? '四个模块合计' : '尚未填写'} />
+        <StatItem label="当前状态" value={status.value} hint={status.hint} />
+        <StatItem label="最终提示词" value={promptChars} unit="字" hint={promptChars > 0 ? '已启用微调' : '未填写'} />
       </section>
 
       <section className="hh-panel p-6">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <h2 className="text-lg font-semibold tracking-tight text-content">项目信息与最终提示词</h2>
-            <p className="mt-1 text-sm leading-6 text-content-secondary">
-              这里会影响后续提交给 AI 的项目上下文。最终提示词会追加到章节、场景、剧情和世界观重生成的 prompt 末尾。
-            </p>
-          </div>
-          <span className="hh-tag shrink-0">项目级微调</span>
+        <CardHeader
+          icon={BookMarked}
+          title="项目信息"
+          description="生成世界观、角色、大纲与正文时，AI 都会参考这里的书名、类型与主题。"
+        />
+        <div className="mt-5 flex flex-wrap gap-x-4 gap-y-5">
+          <Field id="ws-title" label="书名" required={editing} className="flex-[1_1_190px]">
+            {editing ? (
+              <input
+                id="ws-title"
+                value={form.title}
+                onChange={(e) => setField('title', e.target.value)}
+                placeholder="输入书名"
+                className="hh-field"
+              />
+            ) : (
+              <ReadLine value={form.title} />
+            )}
+          </Field>
+          <Field id="ws-genre" label="类型" className="flex-[1_1_190px]">
+            {editing ? (
+              <input
+                id="ws-genre"
+                value={form.genre}
+                onChange={(e) => setField('genre', e.target.value)}
+                placeholder="如：都市、玄幻、悬疑"
+                className="hh-field"
+              />
+            ) : (
+              <ReadLine value={form.genre} />
+            )}
+          </Field>
+          <Field
+            id="ws-platform"
+            label="目标平台"
+            hint={`${platform.description}影响正文写法提示与新生成章纲的默认字数。`}
+            className="flex-[1_1_190px]"
+          >
+            {editing ? (
+              <select
+                id="ws-platform"
+                value={form.platform_preset}
+                onChange={(e) => setField('platform_preset', e.target.value as PlatformPreset | '')}
+                className="hh-field"
+              >
+                {PLATFORM_OPTIONS.map((opt) => (
+                  <option key={opt.value || 'generic'} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            ) : (
+              <ReadLine value={platform.label} />
+            )}
+          </Field>
         </div>
-
-        <div className="mt-5 grid gap-4 lg:grid-cols-3">
-          <ProjectField
-            label="书名"
-            value={form.title}
-            editing={editing}
-            placeholder="输入书名"
-            onChange={(value) => setForm((prev) => ({ ...prev, title: value }))}
-          />
-          <ProjectField
-            label="主题"
-            value={form.theme}
-            editing={editing}
-            placeholder="输入主题"
-            onChange={(value) => setForm((prev) => ({ ...prev, theme: value }))}
-          />
-          <ProjectField
-            label="类型"
-            value={form.genre}
-            editing={editing}
-            placeholder="如：都市、玄幻、悬疑"
-            onChange={(value) => setForm((prev) => ({ ...prev, genre: value }))}
-          />
-        </div>
-
-        <div className="mt-5">
-          <div className="mb-1.5 flex items-center justify-between gap-3">
-            <label className="text-[13px] font-medium text-content">最终提示词微调</label>
-            <span className="text-xs text-content-tertiary tabular-nums">{promptChars} 字</span>
-          </div>
+        <Field id="ws-theme" label="主题" className="mt-5">
           {editing ? (
             <textarea
-              value={form.generation_prompt}
-              onChange={(e) => setForm((prev) => ({ ...prev, generation_prompt: e.target.value }))}
-              placeholder="写会影响最终提交 prompt 的补充要求，例如：节奏更快、减少解释、对白更口语、每场戏必须有冲突。"
-              rows={6}
-              className="hh-textarea min-h-[160px] leading-7"
+              id="ws-theme"
+              value={form.theme}
+              onChange={(e) => setField('theme', e.target.value)}
+              placeholder="这本书想表达什么，如：成长、复仇、救赎，或写一段完整的题旨。"
+              rows={3}
+              className={cn(TEXTAREA, 'min-h-[110px]')}
             />
           ) : (
-            <div className="hh-subpanel min-h-[120px] p-4">
-              <p className={cn('whitespace-pre-wrap text-sm leading-7', form.generation_prompt.trim() ? 'text-content' : 'text-content-tertiary')}>
-                {form.generation_prompt.trim() || '未填写。'}
-              </p>
-            </div>
+            <ReadBlock value={form.theme} />
           )}
-        </div>
+        </Field>
+      </section>
 
-        <div className="mt-6 border-t border-surface-border pt-5">
-          <h3 className="text-[13px] font-semibold text-content">长篇写作设置</h3>
-          <div className="mt-3 grid gap-4 md:grid-cols-2">
-            <div>
-              <label className="mb-1.5 block text-[13px] font-medium text-content">目标平台</label>
-              {editing ? (
-                <select
-                  value={form.platform_preset}
-                  onChange={(e) => setForm((prev) => ({ ...prev, platform_preset: e.target.value as PlatformPreset | '' }))}
-                  className="hh-field"
-                >
-                  {PLATFORM_OPTIONS.map((opt) => (
-                    <option key={opt.value || 'generic'} value={opt.value}>{opt.label}</option>
-                  ))}
-                </select>
-              ) : (
-                <p className="text-sm leading-6 text-content">
-                  {PLATFORM_OPTIONS.find((opt) => opt.value === form.platform_preset)?.label}
-                </p>
-              )}
-              <p className="mt-1 text-xs leading-5 text-content-tertiary">
-                {PLATFORM_OPTIONS.find((opt) => opt.value === form.platform_preset)?.description}
-                影响正文写法提示与新生成章纲的默认字数。
-              </p>
-            </div>
-          </div>
-        </div>
+      <section className="hh-panel p-6">
+        <CardHeader
+          icon={SlidersHorizontal}
+          title="最终提示词"
+          badge={<FillBadge filled={promptChars > 0} on="已启用" off="未填写" />}
+          meta={`${promptChars} 字`}
+          description="作为作者补充要求，追加到世界观、总纲和正文生成的提示词末尾。"
+        />
+        {editing ? (
+          <textarea
+            aria-label="最终提示词"
+            value={form.generation_prompt}
+            onChange={(e) => setField('generation_prompt', e.target.value)}
+            placeholder="写会影响最终提交 prompt 的补充要求，例如：节奏更快、减少解释、对白更口语、每场戏必须有冲突。"
+            rows={4}
+            className={cn(TEXTAREA, 'mt-5 min-h-[138px]')}
+          />
+        ) : (
+          <ReadBlock
+            value={form.generation_prompt}
+            empty="未填写。可以写全书通用的写作要求，例如：节奏更快、减少解释、对白更口语、每场戏必须有冲突。"
+            className="mt-5"
+          />
+        )}
       </section>
 
       {!hasContent && !editing ? (
-        <section className="hh-panel flex flex-col items-center px-6 py-14 text-center">
+        <section className="hh-panel flex flex-col items-center px-6 py-12 text-center">
           <span className="flex h-14 w-14 items-center justify-center bg-brand/10 text-brand">
             <BookOpenText className="h-7 w-7" />
           </span>
-          <h2 className="mt-5 text-xl font-semibold tracking-tight text-content">还没有任何世界设定</h2>
+          <h2 className="mt-5 text-lg font-semibold tracking-tight text-content">还没有任何世界设定</h2>
           <p className="mt-2 max-w-md text-sm leading-6 text-content-secondary">
-            点击右上角「编辑内容」手动填写，或用「重新生成」让 AI 根据项目资料生成初稿，再回来细修。
+            时代背景、地点设定、氛围基调、世界规则四个模块，可以手动填写，也可以让 AI 根据项目资料生成初稿，再回来细修。
           </p>
+          <div className="mt-6 flex flex-wrap justify-center gap-2.5">
+            <button onClick={() => setEditing(true)} className="hh-btn-secondary">
+              <Pencil className="h-4 w-4" />
+              手动填写
+            </button>
+            <button onClick={() => setShowRegenModal(true)} disabled={regenerating} className="hh-btn-primary">
+              {regenerating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+              AI 生成初稿
+            </button>
+          </div>
         </section>
       ) : (
-        <section className="grid gap-4 xl:grid-cols-2">
+        <section className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,460px),1fr))] gap-4">
           {BLOCKS.map((block) => {
-            const Icon = block.icon;
             const value = form[block.key];
-            const filled = value.trim().length > 0;
-            const wordCount = value.trim().length;
-
+            const chars = value.trim().length;
             return (
               <article key={block.key} className="hh-panel flex flex-col p-6">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex items-start gap-3">
-                    <span className="flex h-11 w-11 shrink-0 items-center justify-center bg-brand/10 text-brand">
-                      <Icon className="h-5 w-5" />
-                    </span>
-                    <div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <h3 className="text-base font-semibold text-content">{block.label}</h3>
-                        <span
-                          className={cn(
-                            'px-2 py-0.5 text-[11px] font-medium',
-                            filled ? 'bg-emerald-50 text-emerald-600' : 'bg-surface-hover text-content-secondary',
-                          )}
-                        >
-                          {filled ? '已设定' : '待补充'}
-                        </span>
-                      </div>
-                      <p className="mt-1 text-[13px] leading-6 text-content-secondary">{block.description}</p>
-                    </div>
-                  </div>
-                  <span className="shrink-0 text-xs text-content-tertiary tabular-nums">{wordCount} 字</span>
-                </div>
-
-                <div className="mt-5 flex-1">
-                  {editing ? (
-                    <textarea
-                      value={value}
-                      onChange={(e) => setForm((prev) => ({ ...prev, [block.key]: e.target.value }))}
-                      placeholder={block.placeholder}
-                      rows={8}
-                      className="hh-textarea min-h-[220px] leading-7"
-                    />
-                  ) : (
-                    <div className="hh-subpanel min-h-[220px] p-4">
-                      <p className={cn('whitespace-pre-wrap text-[15px] leading-8', filled ? 'text-content' : 'text-content-tertiary')}>
-                        {filled ? value : '暂未设定'}
-                      </p>
-                    </div>
-                  )}
-                </div>
+                <CardHeader
+                  icon={block.icon}
+                  title={block.label}
+                  badge={<FillBadge filled={chars > 0} on="已设定" off="待补充" />}
+                  meta={`${chars} 字`}
+                  description={block.description}
+                />
+                {editing ? (
+                  <textarea
+                    aria-label={block.label}
+                    value={value}
+                    onChange={(e) => setField(block.key, e.target.value)}
+                    placeholder={block.placeholder}
+                    rows={8}
+                    className={cn(TEXTAREA, 'mt-5 min-h-[180px] flex-1 text-[15px] leading-7')}
+                  />
+                ) : (
+                  <ReadBlock value={value} empty="暂未设定" className="mt-5 min-h-[180px] flex-1 text-[15px] leading-7" />
+                )}
               </article>
             );
           })}
@@ -465,13 +465,7 @@ export default function WorldSetting() {
                 }}
               />
               {currentProject?.id && (
-                <ReferencePackSelector
-                  projectId={currentProject.id}
-                  value={regenRefPack}
-                  onChange={setRegenRefPack}
-                  hint="让本次重生成参考拆书的世界观建模手法"
-                  disabledTitle="使用拆书参考包作为对标"
-                />
+                <KbReferenceHint projectId={currentProject.id} link={kbLink} />
               )}
             </div>
 
@@ -492,39 +486,102 @@ export default function WorldSetting() {
   );
 }
 
-function StatItem({ label, value, hint }: { label: string; value: ReactNode; hint: string }) {
+function StatItem({ label, value, unit, hint }: { label: string; value: ReactNode; unit?: string; hint: string }) {
   return (
     <div className="px-5 py-4 md:px-6">
       <p className="text-xs text-content-tertiary">{label}</p>
-      <p className="mt-1 text-2xl font-semibold tracking-tight text-content tabular-nums">{value}</p>
+      <p className="mt-1 text-2xl font-semibold tracking-tight text-content tabular-nums">
+        {value}
+        {unit && <span className="ml-1 text-sm font-medium tracking-normal text-content-tertiary">{unit}</span>}
+      </p>
       <p className="mt-0.5 text-xs text-content-tertiary">{hint}</p>
     </div>
   );
 }
 
-function ProjectField({
-  label,
-  value,
-  editing,
-  placeholder,
-  onChange,
+function CardHeader({
+  icon: Icon,
+  title,
+  badge,
+  meta,
+  description,
 }: {
-  label: string;
-  value: string;
-  editing: boolean;
-  placeholder: string;
-  onChange: (value: string) => void;
+  icon: LucideIcon;
+  title: string;
+  badge?: ReactNode;
+  meta?: string;
+  description: string;
 }) {
   return (
-    <div>
-      <label className="hh-label">{label}</label>
-      {editing ? (
-        <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} className="hh-field" />
-      ) : (
-        <div className={cn('hh-subpanel flex min-h-11 items-center px-4 text-sm', value.trim() ? 'text-content' : 'text-content-tertiary')}>
-          {value.trim() || '未填写'}
+    <div className="flex items-start gap-3">
+      <span className="flex h-11 w-11 shrink-0 items-center justify-center bg-brand/10 text-brand">
+        <Icon className="h-5 w-5" />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-2">
+            <h2 className="truncate text-base font-semibold text-content">{title}</h2>
+            {badge}
+          </div>
+          {meta && <span className="shrink-0 text-xs text-content-tertiary tabular-nums">{meta}</span>}
         </div>
+        <p className="mt-0.5 text-[13px] leading-6 text-content-secondary">{description}</p>
+      </div>
+    </div>
+  );
+}
+
+function FillBadge({ filled, on, off }: { filled: boolean; on: string; off: string }) {
+  return <span className={cn('lj-badge', filled ? 'lj-badge--ok' : 'lj-badge--muted')}>{filled ? on : off}</span>;
+}
+
+function Field({
+  id,
+  label,
+  required,
+  hint,
+  className,
+  children,
+}: {
+  id: string;
+  label: string;
+  required?: boolean;
+  hint?: string;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className={cn('min-w-0', className)}>
+      <label htmlFor={id} className="hh-label">
+        {label}
+        {required && <span className="ml-0.5 text-red-500">*</span>}
+      </label>
+      {children}
+      {hint && <p className="mt-1.5 text-xs leading-5 text-content-tertiary">{hint}</p>}
+    </div>
+  );
+}
+
+function ReadLine({ value }: { value: string }) {
+  const text = value.trim();
+  return (
+    <div className={cn('hh-subpanel flex h-10 items-center px-3 text-sm', text ? 'text-content' : 'text-content-tertiary')}>
+      <span className="truncate" title={text || undefined}>{text || '未填写'}</span>
+    </div>
+  );
+}
+
+function ReadBlock({ value, empty = '未填写', className }: { value: string; empty?: string; className?: string }) {
+  const text = value.trim();
+  return (
+    <div
+      className={cn(
+        'whitespace-pre-wrap break-words rounded border px-4 py-3 text-sm leading-7',
+        text ? 'border-surface-border-light bg-surface-paper text-content' : 'border-dashed border-surface-border text-content-tertiary',
+        className,
       )}
+    >
+      {text || empty}
     </div>
   );
 }

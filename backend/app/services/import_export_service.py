@@ -32,6 +32,7 @@ from app.schemas.import_export import (
     ImportResult
 )
 from app.logger import get_logger
+from app.services.ledger_transfer import export_ledger, import_ledger, ledger_statistics
 from app.services.volume_planning import loads_threads, loads_units
 
 logger = get_logger(__name__)
@@ -48,7 +49,9 @@ def _json_list(raw: Optional[str]) -> Optional[List[str]]:
 class ImportExportService:
     """导入导出服务类"""
 
-    SUPPORTED_VERSION = "2.0.0"
+    # 2.1.0：多了故事账本段（ledger）；2.0.x 的文件照样能导入（没有账本，导入后按需重新分析）
+    SUPPORTED_VERSION = "2.1.0"
+    COMPATIBLE_VERSIONS = ("2.0.0", "2.0.1", "2.1.0")
     
     @staticmethod
     async def export_project(
@@ -147,6 +150,9 @@ class ImportExportService:
         chapter_outlines = await ImportExportService._export_chapter_outlines(project_id, db)
         logger.info(f"导出章节大纲数: {len(chapter_outlines)}")
 
+        ledger = await export_ledger(db, project_id)
+        logger.info(f"导出故事账本: {ledger_statistics(ledger)}")
+
         export_data = ProjectExportData(
             version=ImportExportService.SUPPORTED_VERSION,
             export_time=datetime.utcnow().isoformat(),
@@ -162,6 +168,7 @@ class ImportExportService:
             world_rules=world_rules,
             volumes=volumes,
             chapter_outlines=chapter_outlines,
+            ledger=ledger,
         )
 
         logger.info(f"项目导出完成: {project_id}")
@@ -515,8 +522,10 @@ class ImportExportService:
         version = data.get("version", "")
         if not version:
             errors.append("缺少版本信息")
-        elif version != ImportExportService.SUPPORTED_VERSION:
-            errors.append(f"不支持的导出文件版本 {version}：当前只支持 {ImportExportService.SUPPORTED_VERSION}")
+        elif version not in ImportExportService.COMPATIBLE_VERSIONS:
+            errors.append(
+                f"不支持的导出文件版本 {version}：当前支持 {' / '.join(ImportExportService.COMPATIBLE_VERSIONS)}"
+            )
         
         # 检查必需字段
         if "project" not in data:
@@ -539,7 +548,10 @@ class ImportExportService:
             "world_rules": len(data.get("world_rules", [])),
             "volumes": len(data.get("volumes") or []),
             "chapter_outlines": len(data.get("chapter_outlines", [])),
+            **ledger_statistics(data.get("ledger")),
         }
+        if version and version != ImportExportService.SUPPORTED_VERSION and not data.get("ledger"):
+            warnings.append("这个文件没有故事账本（旧版导出）：导入后可在「故事账本」里按章序批量分析补齐")
         
         # 检查数据完整性
         if statistics["chapters"] == 0:
@@ -691,6 +703,10 @@ class ImportExportService:
             )
             statistics["chapters"] = chapters_count
             logger.info(f"导入章节数: {chapters_count}")
+
+            # 导入故事账本（章节 / 角色 / 卷 / 章纲都已建好；没有账本段时只清掉章纲里指向旧伏笔的编号）
+            await db.flush()
+            statistics.update(await import_ledger(db, new_project.id, data.get("ledger")))
 
             # 提交事务
             await db.commit()

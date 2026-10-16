@@ -38,7 +38,7 @@ export function NoDataHint({ label, hint }: { label: string; hint?: string }) {
   return (
     <div className="rounded-2xl border border-dashed border-surface-border bg-surface px-6 py-12 text-center text-content-secondary">
       <AlertTriangle className="mx-auto h-6 w-6 text-content-tertiary" />
-      <p className="mt-2 text-sm">该参考包未生成「{label}」</p>
+      <p className="mt-2 text-sm">未生成「{label}」</p>
       <p className="mt-1 text-xs text-content-tertiary">{hint ?? '可能是 LLM 调用失败或抽取尚未完成，可重新抽取本书'}</p>
     </div>
   )

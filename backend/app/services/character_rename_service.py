@@ -1,7 +1,7 @@
 """角色改名级联。
 
 Character.name 在若干表里以「名字快照」形式存在：组织成员名单 JSON、章纲视角/涉及角色、
-连续性信号、一致性问题、章节分析的角色状态。这些字段都是整值比对的结构化名字，
+连续性信号、一致性问题、作者的人物状态修正、章节分析的角色状态。这些字段都是整值比对的结构化名字，
 改名时做精确等值替换是安全的；自由文本（章节正文、剧情要点等）不在此处理。
 """
 from __future__ import annotations
@@ -17,6 +17,7 @@ from app.models.chapter_consistency_issue import ChapterConsistencyIssue
 from app.models.chapter_continuity_signal import ChapterContinuitySignal
 from app.models.chapter_outline import ChapterOutline
 from app.models.character import Character
+from app.models.ledger_override import AuthorStateSignal
 from app.models.memory import PlotAnalysis
 
 logger = get_logger(__name__)
@@ -113,10 +114,11 @@ async def propagate_character_rename(
             outline.characters_involved = updated
             _hit("chapter_outline_characters_involved")
 
-    # 4. 连续性信号 / 一致性问题（按名字串链的硬规则审计）
+    # 4. 连续性信号 / 一致性问题（按名字串链的硬规则审计）/ 作者的人物状态修正（同样按名字回放）
     for model, key in (
         (ChapterContinuitySignal, "continuity_signals"),
         (ChapterConsistencyIssue, "consistency_issues"),
+        (AuthorStateSignal, "author_state_signals"),
     ):
         result = await db.execute(
             update(model)

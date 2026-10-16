@@ -188,18 +188,18 @@ describe('ChapterCardDetail', () => {
 })
 
 describe('BookDissectV5View', () => {
-  it('参考包缺失：tab 栏全在，维度 tab 标 (无)，骨架 tab 给占位', () => {
+  it('拆书结果缺失：tab 栏全在，维度 tab 标 (无)，骨架 tab 给占位', () => {
     const html = renderToStaticMarkup(h(BookDissectV5View, { taskId: 't1', pack: null }))
     for (const s of ['全书骨架', '剧情单元', '逐章拆书表', '文风指纹', '人物功能谱']) expect(html).toContain(s)
     expect(html).not.toContain('桥段')
     expect(html).toContain('(无)')
-    expect(html).toContain('未生成「参考包」')
+    expect(html).toContain('未生成「拆书结果」')
   })
 
-  it('参考包加载中不标 (无)', () => {
+  it('拆书结果加载中不标 (无)', () => {
     const html = renderToStaticMarkup(h(BookDissectV5View, { taskId: 't1', pack: null, packLoading: true }))
     expect(html).not.toContain('(无)')
-    expect(html).toContain('正在加载参考包')
+    expect(html).toContain('正在加载拆书结果')
   })
 
   it('initialTab=cards 首屏渲染拆书表（SSR 无 effect，显示加载态）', () => {

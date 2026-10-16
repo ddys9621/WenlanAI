@@ -9,6 +9,8 @@
 - user：作品设定 → 前情脉络（层级摘要）→ 近期剧情 → 相关旧事 → 出场角色与状态 → 地图与方位 → 叙事账本 → 参考资料 →
   上一章正文 → 本段章纲 → 本章任务（章纲 / 叙事任务 / 结构要求 / 字数 / 用户微调）→ 收尾
 - 全部上下文过预算器（context_budget），本章任务与收尾永不裁剪
+- 「视角人物知道什么」是写作优先级第 1 条的硬约束：放进「出场角色与状态」，不跟叙事账本一起被截掉；
+  账本按 伏笔清单 → 因果 → 时间轴 → 关系 → 归属 的顺序（排在后面的先被裁）
 """
 from __future__ import annotations
 
@@ -36,6 +38,8 @@ PRIORITY_RULES = """## 写作优先级（冲突时按这个顺序取舍，只在
 前情只用来保持连贯：不要复述上一章已经写过的内容，开头直接接着上一章结尾往下写。"""
 
 CLOSING_HEAD = "落笔前再看一眼：段落短、对话多、叙述用主角的口气、环境两句带过、书面词换成嘴上的词、"
+IMITATION_CLOSING_HEAD = "落笔前再看一眼：句式、段落和对话比例按参考文风来，人名、地名和设定都用本书的，不照抄参考里的句子、"
+IMITATION_STYLE_TITLE = "## 参考文风（仿写参考开启：文风以这里为准，下面「网文大白话」里和它冲突的条目以参考文风为准）"
 CLOSING_TAILS = {
     "hook": "结尾停在钩子上。",
     "none": "结尾收在一个具体的收束场景上，不留钩子、不预告后事。",
@@ -43,8 +47,7 @@ CLOSING_TAILS = {
 }
 
 LEDGER_ORDER: tuple[str, ...] = (
-    "narrative_promises", "causal_chains", "relationship_dynamics", "timeline_events",
-    "pov_known_info", "affiliation_dynamics", "character_states", "plot_points", "relevant_memories",
+    "narrative_promises", "causal_chains", "timeline_events", "relationship_dynamics", "affiliation_dynamics",
 )
 
 
@@ -70,12 +73,15 @@ class ChapterPromptInput:
     relevant_history: str = ""
     recent_full: str = ""
     character_cards: str = ""
+    pov_knowledge: str = ""
     absent_characters: str = ""
     organizations: str = ""
     story_time: str = ""
     world_map: str = ""
     ledger_blocks: dict[str, str] = field(default_factory=dict)
     references: str = ""
+    imitation: str = ""
+    imitation_style: str = ""
     style_content: str = ""
     platform_block: str = ""
     generation_prompt: str = ""
@@ -93,9 +99,10 @@ class ChapterPrompt:
     report: dict[str, Any]
 
 
-def build_chapter_closing(hook_policy: str) -> str:
+def build_chapter_closing(hook_policy: str, imitation_style: bool = False) -> str:
     tail = CLOSING_TAILS.get(hook_policy or "hook", CLOSING_TAILS["hook"])
-    return f"{CLOSING_HEAD}{tail}\n\n{CHAPTER_OUTPUT_INSTRUCTION}"
+    head = IMITATION_CLOSING_HEAD if imitation_style else CLOSING_HEAD
+    return f"{head}{tail}\n\n{CHAPTER_OUTPUT_INSTRUCTION}"
 
 
 def _system_prompt(inp: ChapterPromptInput) -> str:
@@ -106,10 +113,12 @@ def _system_prompt(inp: ChapterPromptInput) -> str:
     )
     # 首行原文是"（重点，和章纲同等重要）"——与写作优先级冲突，system 里换成干净的标题
     style_body = style_rules.strip().split("\n", 1)[1] if "\n" in style_rules.strip() else ""
+    imitation_style = (inp.imitation_style or "").strip()
     parts = [
         SYSTEM_PERSONA,
         PromptService._resolve_perspective_guide(perspective).strip(),
         PromptService._resolve_genre_guide(inp.genre or "").strip(),
+        f"{IMITATION_STYLE_TITLE}\n{imitation_style}" if imitation_style else "",
         "## 叙事与文风要求：网文大白话\n" + style_body,
         inp.platform_block.strip(),
         inp.style_content.strip(),
@@ -137,6 +146,9 @@ def _characters_text(inp: ChapterPromptInput) -> str:
         parts.append(f"故事时间：上一章结束于 {inp.story_time.strip()}")
     if inp.character_cards.strip():
         parts.append(inp.character_cards.strip())
+    pov = (inp.pov_knowledge or "").strip()
+    if pov and "暂无" not in pov.splitlines()[-1] and "未指定 POV" not in pov:
+        parts.append("视角信息边界：" + pov.removeprefix("【视角信息边界】").strip())
     if inp.organizations.strip():
         parts.append("相关势力：\n" + inp.organizations.strip())
     if inp.absent_characters.strip():
@@ -170,23 +182,28 @@ def _task_text(inp: ChapterPromptInput, closing: str) -> str:
     return "\n\n".join(parts)
 
 
+QUOTED_SECTIONS = {"references": "参考资料", "imitation": "仿写参考"}
+
+
 def _quote_reference_section(sections: list[ContextSection]) -> list[ContextSection]:
-    """参考资料过完预算器再包起止标记：裁剪不会把结束标记裁掉，区块总是闭合的。"""
-    return [replace(s, text=quote_untrusted(s.text, "参考资料")) if s.key == "references" else s for s in sections]
+    """参考资料 / 仿写参考过完预算器再包起止标记：裁剪不会把结束标记裁掉，区块总是闭合的。"""
+    return [replace(s, text=quote_untrusted(s.text, QUOTED_SECTIONS[s.key])) if s.key in QUOTED_SECTIONS else s
+            for s in sections]
 
 
 def build_chapter_prompt(inp: ChapterPromptInput) -> ChapterPrompt:
-    closing = build_chapter_closing(inp.hook_policy)
+    closing = build_chapter_closing(inp.hook_policy, imitation_style=bool((inp.imitation_style or "").strip()))
     task = _task_text(inp, closing)
     budget = max(inp.budget_chars - len(task), 4_000)
     sections = fit_sections([
         ContextSection("setting", "作品设定", _setting_text(inp), priority=8, max_chars=3_500, min_chars=600),
         ContextSection("story_so_far", "前情脉络", inp.story_so_far, priority=6, max_chars=4_500, min_chars=800, keep="tail"),
         ContextSection("recent_summaries", "近期剧情", inp.recent_summaries, priority=7, max_chars=3_500, min_chars=600, keep="tail"),
-        ContextSection("relevant_history", "相关旧事", inp.relevant_history, priority=2, max_chars=2_000),
-        ContextSection("characters", "出场角色与状态", _characters_text(inp), priority=9, max_chars=4_000, min_chars=1_200),
+        ContextSection("relevant_history", "相关旧事", inp.relevant_history, priority=4, max_chars=2_500, min_chars=500),
+        ContextSection("characters", "出场角色与状态", _characters_text(inp), priority=9, max_chars=5_000, min_chars=1_500),
         ContextSection("world_map", "地图与方位", inp.world_map, priority=4, max_chars=1_200, min_chars=300),
         ContextSection("ledger", "叙事账本", _ledger_text(inp), priority=5, max_chars=3_500, min_chars=800),
+        ContextSection("imitation", "仿写参考", inp.imitation, priority=3, max_chars=2_600, min_chars=600),
         ContextSection("references", "参考资料", inp.references, priority=1, max_chars=3_000),
         ContextSection("recent_full", "上一章正文", inp.recent_full, priority=8, max_chars=7_000, min_chars=1_500, keep="tail"),
         ContextSection("outline_window", "本段章纲", inp.outline_window, priority=7, max_chars=2_000, min_chars=400),

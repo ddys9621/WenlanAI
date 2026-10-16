@@ -2,41 +2,43 @@ import { createElement as h } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import type { MemoryAnnotation } from '@/utils/annotationSegments'
-import { normalizeAnalysisData } from '@/utils/chapterAnalysis'
+import { describeStateChange, normalizeAnalysisData } from '@/utils/chapterAnalysis'
 import AnnotatedText from './AnnotatedText'
 import MemorySidebar from './MemorySidebar'
+import { ChapterArchivePanel } from './chapters/ChapterArchivePanel'
+import { AnalysisStatusDot } from './chapters/AnalysisStatusDot'
 import { NarrativeStatePanel } from './chapters/NarrativeStatePanel'
 
-/** 去 antd 后的三块分析面板：服务端渲染冒烟（无 jsdom，只验证不抛错 + 关键内容在场） */
+/** 章节分析面板：服务端渲染冒烟（无 jsdom，只验证不抛错 + 关键内容在场） */
 
 const CONTENT = '他推开门，屋里没人。桌上留着一封信，信封上是她的字。'
 const ann = (over: Partial<MemoryAnnotation>): MemoryAnnotation => ({
   id: 'a1', type: 'hook', title: '一封信', content: '桌上的信是谁留下的', importance: 0.8, position: 10, length: 8,
-  tags: ['悬念'], metadata: {}, ...over,
+  tags: ['悬念'], metadata: { quote: '桌上留着一封信' }, ...over,
 })
 
 describe('MemorySidebar', () => {
   it('空标注给提示', () => {
-    expect(renderToStaticMarkup(h(MemorySidebar, { annotations: [] }))).toContain('暂无分析数据')
+    expect(renderToStaticMarkup(h(MemorySidebar, { annotations: [] }))).toContain('暂无标注')
   })
 
-  it('按类型分组、概览计数、伏笔状态标签、选中态', () => {
+  it('按类型分组、概览计数、引句、找不到的标注提示、选中态', () => {
     const html = renderToStaticMarkup(h(MemorySidebar, {
       annotations: [
         ann({}),
-        ann({ id: 'a2', type: 'foreshadow', title: '字迹', metadata: { foreshadowType: 'planted', strength: 7 } }),
-        ann({ id: 'a3', type: 'character_event', title: '她离开' }),
+        ann({ id: 'a2', type: 'foreshadow', title: '字迹', metadata: { quote: '信封上是她的字' } }),
+        ann({ id: 'a3', type: 'plot_point', title: '改过的段落', position: -1, length: 0 }),
       ],
       activeAnnotationId: 'a2',
     }))
-    expect(html).toContain('分析概览')
+    expect(html).toContain('标注概览')
     expect(html).toContain('一封信')
-    expect(html).toContain('已埋下')
-    expect(html).toContain('强度: 7/10')
+    expect(html).toContain('「信封上是她的字」')
+    expect(html).toContain('原文已改')
+    expect(html).toContain('关键转折')
     expect(html).toContain('ring-brand/30') // 选中卡片
-    // 角色事件分组默认收起，其它默认展开（原生 details）
-    expect((html.match(/<details open=""/g) ?? []).length).toBe(2)
-    expect((html.match(/<details class="group"/g) ?? []).length).toBe(1)
+    expect((html.match(/<details open=""/g) ?? []).length).toBe(3)
+    expect(html).not.toContain('角色事件')
   })
 })
 
@@ -52,6 +54,12 @@ describe('AnnotatedText', () => {
     // 类型图标挂在标注片段末尾（绝对定位浮在片段上方），去掉标签后全文仍完整连续
     expect(html.replace(/<[^>]+>/g, '')).toBe('他推开门，屋里没人。桌上留着一封信🎣，信封上是她的字。')
     expect(html).not.toContain('role="tooltip"') // 未悬停时无浮层
+  })
+
+  it('引句找不到（position=-1）的标注不画进正文', () => {
+    const html = renderToStaticMarkup(h(AnnotatedText, { content: CONTENT, annotations: [ann({ position: -1, length: 0 })] }))
+    expect(html).not.toContain('data-annotation-id')
+    expect(html.replace(/<[^>]+>/g, '')).toBe(CONTENT)
   })
 })
 
@@ -85,5 +93,66 @@ describe('NarrativeStatePanel', () => {
     expect(html).toContain('严重 1')
     expect(html).toContain('同一天出现两次')
     expect((html.match(/<details open=""/g) ?? []).length).toBe(5)
+  })
+})
+
+const PAYLOAD = {
+  chapter_id: 'c1', analyzed: true, is_stale: false,
+  analysis: { id: 'x', chapter_id: 'c1', annotations: [], character_states: [{ character_name: '林尘', state_after: '决意下山' }], locations: ['青峰山'] },
+  digest: { chapter_id: 'c1', summary: '林尘拿到玉佩', end_state: '林尘在山脚', source: 'author', suggestion: { summary: 'AI 的新摘要', end_state: '' }, stale: false },
+  state_changes: [
+    { signal_type: 'life_state', label: '生死', character_name: '林长老', signal_value: 'dead', evidence: '气绝' },
+    { signal_type: 'realm', label: '境界', character_name: '林尘', signal_key: '炼气五层', signal_value: 'current' },
+  ],
+  task: { status: 'completed', message: null },
+}
+
+describe('ChapterArchivePanel', () => {
+  const base = { chapterId: 'c1', loading: false, hasContent: true, analyzing: false, onAnalyze: () => undefined, onChanged: () => undefined }
+
+  it('没分析过：提示并给分析按钮', () => {
+    const html = renderToStaticMarkup(h(ChapterArchivePanel, { ...base, data: null }))
+    expect(html).toContain('本章还没分析')
+    expect(html).toContain('分析本章')
+  })
+
+  it('档案 / 作者版本 / AI 建议 / 状态变化 / 出场人物', () => {
+    const html = renderToStaticMarkup(h(ChapterArchivePanel, { ...base, data: normalizeAnalysisData(PAYLOAD) }))
+    expect(html).toContain('林尘拿到玉佩')
+    expect(html).toContain('林尘在山脚')
+    expect(html).toContain('作者版本')
+    expect(html).toContain('AI 重新分析的结果')
+    expect(html).toContain('林长老 · 生死：死亡')
+    expect(html).toContain('林尘 · 境界：炼气五层')
+    expect(html).toContain('决意下山')
+    expect(html).toContain('青峰山')
+  })
+
+  it('失败 / 过期给醒目提示和重新分析', () => {
+    const failed = renderToStaticMarkup(h(ChapterArchivePanel, {
+      ...base, data: normalizeAnalysisData({ ...PAYLOAD, task: { status: 'failed', message: '输出被 Max Tokens 截断' } }),
+    }))
+    expect(failed).toContain('最近一次分析失败')
+    expect(failed).toContain('输出被 Max Tokens 截断')
+    expect(failed).toContain('之前的分析结果仍在用')
+    expect(failed).toContain('重新分析')
+    const stale = renderToStaticMarkup(h(ChapterArchivePanel, { ...base, data: normalizeAnalysisData({ ...PAYLOAD, is_stale: true }) }))
+    expect(stale).toContain('正文在分析之后改过')
+  })
+})
+
+describe('分析状态点', () => {
+  it('各状态有说明文字', () => {
+    expect(renderToStaticMarkup(h(AnalysisStatusDot, { status: 'ok' }))).toContain('已分析')
+    expect(renderToStaticMarkup(h(AnalysisStatusDot, { status: 'failed', message: '截断' }))).toContain('最近一次分析失败：截断')
+    expect(renderToStaticMarkup(h(AnalysisStatusDot, { status: 'missing' }))).toContain('还没分析')
+    expect(renderToStaticMarkup(h(AnalysisStatusDot, { status: 'running' }))).toContain('animate-spin')
+  })
+
+  it('状态变化的说明', () => {
+    expect(describeStateChange({ signal_type: 'item', label: '物品', character_name: '林尘', signal_key: '玄铁剑', signal_value: 'gained' }))
+      .toBe('林尘 · 物品：获得 玄铁剑')
+    expect(describeStateChange({ signal_type: 'story_time', label: '故事时间', signal_key: '深秋', signal_value: 'current' }))
+      .toBe('故事时间：深秋')
   })
 })

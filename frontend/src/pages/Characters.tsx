@@ -9,11 +9,8 @@ import { useAIJobsStore, useRunningAIJobs } from '@/store/aiJobsStore';
 import { characterApi, organizationApi } from '@/services/api';
 import { AIJobBanner } from '@/components/ai-job/AIJobBanner';
 import { MCPSelector } from '@/components/MCPSelector';
-import {
-  ReferencePackSelector,
-  DEFAULT_SELECTOR_VALUE,
-  type ReferencePackSelectorValue,
-} from '@/components/ReferencePackSelector';
+import { KbReferenceHint } from '@/components/knowledge/KbReferenceHint';
+import { useProjectKbLink } from '@/hooks/useProjectKbLink';
 import type { Character, GenerateCharacterRequest } from '@/types';
 import { ROLE_OPTIONS, getRoleDisplayName, normalizeRoleType } from '@/utils/characterRole';
 
@@ -46,8 +43,7 @@ export default function Characters() {
   const [genForm, setGenForm] = useState({ name: '', role_type: 'supporting', background: '', requirements: '' });
   const [enableMcp, setEnableMcp] = useState(false);
   const [selectedPlugins, setSelectedPlugins] = useState<string[]>([]);
-  // R8：拆书参考包选择器
-  const [genRefPack, setGenRefPack] = useState<ReferencePackSelectorValue>(DEFAULT_SELECTOR_VALUE);
+  const kbLink = useProjectKbLink(currentProject?.id);
   const [filter, setFilter] = useState<'all' | 'character' | 'organization'>('all');
   const [orgMembers, setOrgMembers] = useState<Array<Record<string, unknown>>>([]);
   const [orgId, setOrgId] = useState<string | null>(null);
@@ -243,12 +239,6 @@ export default function Characters() {
       requirements: genForm.requirements.trim() || undefined,
       enable_mcp: enableMcp,
       selected_plugins: selectedPlugins,
-      // R8：仅 enabled 时透传拆书参考包参数
-      ...(genRefPack.enabled ? {
-        pack_ids: genRefPack.packIds.length > 0 ? genRefPack.packIds : undefined,
-        dimensions: genRefPack.dimensions.length > 0 ? genRefPack.dimensions : undefined,
-        strength: genRefPack.strength,
-      } : {}),
     };
     setShowGenModal(false);
     try {
@@ -463,13 +453,7 @@ export default function Characters() {
                 }}
               />
               {currentProject?.id && (
-                <ReferencePackSelector
-                  projectId={currentProject.id}
-                  value={genRefPack}
-                  onChange={setGenRefPack}
-                  hint="让本次角色生成参考拆书的角色塑造手法"
-                  disabledTitle="使用拆书参考包作为对标"
-                />
+                <KbReferenceHint projectId={currentProject.id} link={kbLink} />
               )}
             </div>
             <div className="hh-modal-foot">

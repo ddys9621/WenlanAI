@@ -8,9 +8,8 @@
 
 设计：
 - Slot：单个 prompt 槽位（含 max_tokens 硬上限）
-- BLUEPRINT_TEMPLATES：7 场景的"槽位顺序模板"（不含 max_tokens）
-- STRENGTH_BUDGET：strength 档位 → token 预算映射
-- BUSINESS_SLOT_TOKENS：业务槽位（非拆书）的固定 token 上限
+- SCENE_BUSINESS_TEMPLATES：7 场景的"槽位顺序模板"（不含 max_tokens）
+- BUSINESS_SLOT_TOKENS：业务槽位的固定 token 上限
 - PROMPT_BLUEPRINT：最终生成的 28 份装配单 dict[(scene, tier)] -> list[Slot]
 """
 from __future__ import annotations
@@ -18,11 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from app.services.reference_pack.policy_tables import (
-    POLICY_TABLE,
-    ModelTier,
-    Strength,
-)
+from app.services.reference_pack.policy_tables import ModelTier
 
 
 # ============================================================
@@ -52,15 +47,6 @@ class Slot:
 # ============================================================
 # 配置常量
 # ============================================================
-
-# strength → max_tokens 映射
-STRENGTH_BUDGET: dict[Strength, int] = {
-    "off": 0,
-    "light": 200,
-    "medium": 600,
-    "deep": 1500,
-}
-
 
 # 业务槽位（非拆书）的固定 token 上限（按档位）
 # 注：所有 4 档基础占用大致一致，XL 档放宽 project_skeleton 等
@@ -133,26 +119,10 @@ SAFETY_RATIO = 0.6
 
 
 # ============================================================
-# 拆书维度的 prompt 标签（K1 决策表）
-# ============================================================
-
-DISSECT_LABELS: dict[str, str] = {
-    "methodology":       "【📚 原书写法手册】",
-    "structure":         "【🏗️ 原书结构统计】",
-    "synopsis":          "【📖 原书全书骨架】",
-    "corpus":            "【💡 原书相关拆书卡】",
-    "bridges":           "【🌉 原书剧情单元（学一件事的长短与节奏，不照搬情节）】",
-    "character_archive": "【👥 原书人物功能谱】",
-    # style 走 system 段，标签由 builder 在 system 段内自行打印
-}
-
-
-# ============================================================
 # 场景定义：每个场景需要哪些"业务槽位"（按出现顺序）
 # ============================================================
 
-# 7 场景的业务槽位模板。拆书槽位由 POLICY_TABLE 动态决定。
-# 注：拆书槽位在 prompt 中的插入位置由本模块的 _compose_slots 决定（synopsis 靠前，corpus 末尾）
+# 7 场景的业务槽位模板（system 段在前、user 段在后，按出现顺序）。
 
 SCENE_BUSINESS_TEMPLATES: dict[str, list[str]] = {
     "chapter_content": [
@@ -237,121 +207,10 @@ def _make_business_slot(slot_name: str, tier: ModelTier) -> Slot:
     return Slot(slot_name, max_tokens, "user")
 
 
-def _make_dissect_slot(dim: str, strength: Strength) -> Slot:
-    """根据维度名 + strength 构造拆书槽位。"""
-    max_tokens = STRENGTH_BUDGET[strength]
-
-    if dim == "style":
-        # style 走 system 段（全局基调）
-        return Slot(f"dissect_{dim}", max_tokens, "system",
-                    label="**拆书参考文风**",
-                    cacheable=True, cache_tier="project")
-    if dim == "corpus":
-        # corpus 动态检索，不缓存
-        return Slot(f"dissect_{dim}", max_tokens, "user",
-                    label=DISSECT_LABELS.get(dim, ""),
-                    cacheable=False, cache_tier="chapter")
-    if dim in ("bridges", "character_archive"):
-        # 剧情单元范本和人物功能谱：均设为 chapter 不缓存
-        return Slot(f"dissect_{dim}", max_tokens, "user",
-                    label=DISSECT_LABELS.get(dim, ""),
-                    cacheable=False, cache_tier="chapter")
-
-    # methodology / structure / synopsis = 项目级缓存
-    return Slot(f"dissect_{dim}", max_tokens, "user",
-                label=DISSECT_LABELS.get(dim, ""),
-                cacheable=True, cache_tier="project")
-
-
-# 拆书槽位在 prompt 中的优先级（user 段内的插入顺序）
-# 注：style 会被 _make_dissect_slot 放到 system 段，但仍需列在这里才会被 _compose_blueprint 处理
-DISSECT_SLOT_ORDER = (
-    "style",             # 文风指令 - 由 _make_dissect_slot 放到 system 段
-    "synopsis",          # 全书骨架 - 靠前
-    "methodology",
-    "structure",
-    "bridges",
-    "character_archive",
-    "corpus",            # 拆书卡片段 - 末尾
-)
-
-
 def _compose_blueprint(scene: str, tier: ModelTier) -> list[Slot]:
-    """启动期：根据 SCENE_BUSINESS_TEMPLATES + POLICY_TABLE 组合一份装配单。
-
-    顺序规则：
-    1. system 段：system_role → system_base_style → dissect_style（如启用）
-    2. user 段：project_skeleton → [synopsis 靠前] → chapter_outline
-                → 其他拆书维度 → history → memory → [corpus 末尾] → output_spec
-    """
-    business_slots = [
-        _make_business_slot(name, tier)
-        for name in SCENE_BUSINESS_TEMPLATES.get(scene, [])
-    ]
-
-    # 取出该场景的拆书策略
-    policy = POLICY_TABLE.get((scene, tier), {})
-    dissect_slots = [
-        _make_dissect_slot(dim, strength)
-        for dim in DISSECT_SLOT_ORDER
-        for strength in [policy.get(dim, "off")]
-        if strength != "off"
-    ]
-
-    # ---- 按区域组合 ----
-    system_business = [s for s in business_slots if s.section == "system"]
-    user_business = [s for s in business_slots if s.section == "user"]
-    system_dissect = [s for s in dissect_slots if s.section == "system"]
-    user_dissect = [s for s in dissect_slots if s.section == "user"]
-
-    # 在 user_business 中找各关键槽位的位置
-    def find_idx(slots: list[Slot], name: str) -> int | None:
-        for i, s in enumerate(slots):
-            if s.name == name:
-                return i
-        return None
-
-    # 把 synopsis 插在 project_skeleton 之后（如启用）
-    user_combined = list(user_business)
-    synopsis_slot = next(
-        (s for s in user_dissect if s.name == "dissect_synopsis"), None
-    )
-    if synopsis_slot:
-        idx = find_idx(user_combined, "project_skeleton")
-        if idx is not None:
-            user_combined.insert(idx + 1, synopsis_slot)
-        else:
-            user_combined.insert(0, synopsis_slot)
-
-    # 其他拆书维度插在 chapter_outline 之后
-    other_dissect = [s for s in user_dissect
-                     if s.name not in ("dissect_synopsis", "dissect_corpus")]
-    if other_dissect:
-        anchor = find_idx(user_combined, "chapter_outline")
-        if anchor is None:
-            anchor = find_idx(user_combined, "project_skeleton")
-        if anchor is None:
-            anchor = 0
-        for offset, s in enumerate(other_dissect):
-            user_combined.insert(anchor + 1 + offset, s)
-
-    # corpus 插在 memory_topk 之前（最末尾位置）
-    corpus_slot = next(
-        (s for s in user_dissect if s.name == "dissect_corpus"), None
-    )
-    if corpus_slot:
-        anchor = find_idx(user_combined, "memory_topk")
-        if anchor is None:
-            anchor = find_idx(user_combined, "history_brief")
-        if anchor is None:
-            anchor = find_idx(user_combined, "output_spec")
-        if anchor is not None:
-            user_combined.insert(anchor, corpus_slot)
-        else:
-            user_combined.append(corpus_slot)
-
-    # 最终：system_business + system_dissect + user_combined
-    return system_business + system_dissect + user_combined
+    """启动期：按 SCENE_BUSINESS_TEMPLATES 组合一份装配单（system 段在前、user 段在后）。"""
+    slots = [_make_business_slot(name, tier) for name in SCENE_BUSINESS_TEMPLATES.get(scene, [])]
+    return [s for s in slots if s.section == "system"] + [s for s in slots if s.section == "user"]
 
 
 # 启动期一次性生成 28 份装配单（4 档 × 7 场景）

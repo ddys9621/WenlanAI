@@ -48,6 +48,7 @@ async def lifespan(app: FastAPI):
     # 在应用启动时初始化数据库表结构
     try:
         from app.database import get_engine, Base
+        from app.services.chapter_digest_service import migrate_legacy_summaries
         from app.utils.legacy_db import legacy_schema_reason
 
         # 使用全局引擎创建所有表（结构完全由模型决定，不迁移旧库；发现 1.x 的库就停下，不在旧库上建表）
@@ -57,6 +58,10 @@ async def lifespan(app: FastAPI):
             if legacy:
                 raise RuntimeError(legacy)
             await conn.run_sync(Base.metadata.create_all)
+            # 2.0.x 的章节摘要存在 story_memories 里：拷进章节档案（只拷一次，已有档案的章跳过）
+            migrated = await conn.run_sync(migrate_legacy_summaries)
+            if migrated:
+                logger.info(f"📚 已把 {migrated} 章旧摘要迁入章节档案")
 
         _startup_state["database_ready"] = True
         _startup_state["database_error"] = None
@@ -230,11 +235,14 @@ from app.api import (
     mcp_plugins, mcp_marketplace, admin, inspiration,
     chapter_outlines, story_outlines, volumes,
     world_rules, book_dissect,
-    reference_pack, imitation, announcement
+    announcement
 )
 
 app.include_router(auth.router, prefix="/api")
 app.include_router(settings.router, prefix="/api")
+# 设置页「记忆检索」：查看 / 下载 / 切换向量模型（全站共用，仅管理员可改）
+from app.api import embedding_settings as _embedding_settings
+app.include_router(_embedding_settings.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 app.include_router(announcement.router, prefix="/api")  # 登录后公告弹窗（管理员在用户管理页配置）
 
@@ -269,12 +277,10 @@ app.include_router(world_rules.router, prefix="/api")
 # 拆书参考 API（上传参考书反向拆解为创作素材）
 app.include_router(book_dissect.router, prefix="/api")
 
-# V3 仿写：参考包（独立资料库）+ 项目挂载关联
-app.include_router(reference_pack.router, prefix="/api")
-app.include_router(reference_pack.project_router, prefix="/api")
-
-# V3 仿写 R5：项目内章节编辑器的一键仿写（preview / SSE 流式）
-app.include_router(imitation.router, prefix="/api")
+# 知识库（拆书产物的条目）+ 项目的仿写参考（对标书 / 预览 / 引用）
+from app.api import knowledge as _knowledge
+app.include_router(_knowledge.router, prefix="/api")
+app.include_router(_knowledge.project_router, prefix="/api")
 
 # 项目级 AI 偏好：复用设置页接口，按项目覆盖模型 / 参数（生效点：get_user_ai_service 读 X-Project-Id）
 from app.api import project_ai_preference as _project_ai_preference

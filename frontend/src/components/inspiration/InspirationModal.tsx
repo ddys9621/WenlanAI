@@ -3,11 +3,9 @@ import { createPortal } from 'react-dom';
 import { Check, ChevronDown, History, RotateCcw, SlidersHorizontal, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { MCPSelector } from '@/components/MCPSelector';
-import {
-  ReferencePackSelector,
-  DEFAULT_SELECTOR_VALUE as DEFAULT_REF_PACK_VALUE,
-  type ReferencePackSelectorValue,
-} from '@/components/ReferencePackSelector';
+import { KbSourcePicker } from '@/components/knowledge/KbSourcePicker';
+import type { KbSourceChoice } from '@/types/knowledge';
+import { NO_KB_CHOICE } from '@/utils/knowledge';
 import { useInspirationMachine } from '@/components/inspiration/useInspirationMachine';
 import { type GenerationNodeKey, useProjectGeneration } from '@/components/inspiration/useProjectGeneration';
 import {
@@ -66,14 +64,13 @@ export default function InspirationModal({
   const [historyOpen, setHistoryOpen] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [mcpSettings, setMcpSettings] = useState<MCPSelectorValue>({ enable: false, selected: [] });
-  // V3.2-B：拆书参考包选择（项目创建前选包、创建后后端自动挂载）
-  const [refPackSettings, setRefPackSettings] = useState<ReferencePackSelectorValue>(DEFAULT_REF_PACK_VALUE);
+  const [kbChoice, setKbChoice] = useState<KbSourceChoice>(NO_KB_CHOICE);
   const announcedProjectIdRef = useRef('');
   const dialogRef = useRef<HTMLElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
 
   const { artifacts, runningNode, startGeneration, regenerateFrom, cancelGeneration, resetArtifacts } =
-    useProjectGeneration({ dispatch, mcpSettings, refPackSettings });
+    useProjectGeneration({ dispatch, mcpSettings, kbChoice });
 
   const wizardData = state.wizardData as Partial<WizardData>;
   const flowStep = getFlowStep(state.currentStep);
@@ -147,13 +144,9 @@ export default function InspirationModal({
       : mcpSettings.selected.length > 0
         ? `MCP ${mcpSettings.selected.length} 个插件`
         : 'MCP 已开启未选插件';
-    const pack = !refPackSettings.enabled
-      ? '未启用拆书参考'
-      : refPackSettings.packIds.length > 0
-        ? `拆书参考 ${refPackSettings.packIds.length} 本 · ${refPackSettings.strength}`
-        : `拆书参考 全部 · ${refPackSettings.strength}`;
-    return `${pack} · ${mcp}`;
-  }, [mcpSettings, refPackSettings]);
+    const kb = kbChoice.sourceId ? '已选对标书' : '未选对标书';
+    return `${kb} · ${mcp}`;
+  }, [mcpSettings, kbChoice]);
 
   useEffect(() => {
     if (!open) return;
@@ -265,7 +258,7 @@ export default function InspirationModal({
     setQuickFilling(false);
     setHistoryOpen(false);
     setAdvancedOpen(false);
-    setRefPackSettings(DEFAULT_REF_PACK_VALUE);
+    setKbChoice(NO_KB_CHOICE);
     resetArtifacts();
     reset();
   };
@@ -424,12 +417,11 @@ export default function InspirationModal({
 
             {advancedOpen && (
               <div className="hh-subpanel animate-slide-down space-y-3 p-4">
-                {/* V3.2-B：拆书参考包选择 - 项目未创建前为无 projectId 模式 */}
-                <ReferencePackSelector
-                  value={refPackSettings}
-                  onChange={setRefPackSettings}
-                  disabledTitle="拆书参考包"
-                  hint={state.projectId ? '项目已创建后不再重新挂载' : '项目创建后会自动挂载到项目'}
+                <KbSourcePicker
+                  value={kbChoice}
+                  onChange={setKbChoice}
+                  disabled={Boolean(state.projectId)}
+                  hint={state.projectId ? '项目已创建：到项目的「仿写参考」页调整对标书' : '项目建好后会关联它，之后各步按它注入仿写参考'}
                 />
                 <MCPSelector value={mcpSettings} onChange={setMcpSettings} />
               </div>

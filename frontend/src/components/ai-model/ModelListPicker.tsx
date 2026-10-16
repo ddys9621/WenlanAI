@@ -98,7 +98,7 @@ export function ModelListPicker({
       >
         <span>
           {loading && models.length === 0
-            ? '正在从已保存接口拉取模型列表…'
+            ? '正在拉取模型列表…'
             : models.length === 0
               ? '接口未返回模型列表，请直接在上方输入模型名'
               : `从已拉取的 ${models.length} 个模型中选择`}

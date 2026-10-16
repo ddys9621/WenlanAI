@@ -268,6 +268,7 @@ def parse_skeleton(raw: str, *, start_chapter: int, end_chapter: int, first_numb
             "goal": _text(row.get("goal"), 1500),
             "climax": _text(row.get("climax"), 1500),
             "ending_hook": _text(row.get("ending_hook"), 1500),
+            "ref": _text(row.get("ref"), 20),
         })
     return out
 
@@ -280,10 +281,12 @@ def parse_detail(raw: str, volume: dict) -> dict[str, Any]:
     if not units:
         raise ValueError("卷纲细化结果里没有剧情单元，请重试")
     threads = [_text(t, 300) for t in (data.get("threads") or []) if _text(t, 300)][:12]
+    normalized = normalize_units(units, int(volume["chapter_start"]), int(volume["chapter_end"]))
     return {
-        "units": normalize_units(units, int(volume["chapter_start"]), int(volume["chapter_end"])),
+        "units": normalized,
         "threads": threads,
         "summary": _text(data.get("summary"), 5000),
+        "refs": [_text(u.get("ref"), 20) for u in units][: len(normalized)],
     }
 
 
@@ -327,5 +330,6 @@ def parse_chapter_outlines(raw: str, start: int, end: int) -> list[dict]:
             "characters_involved": _list(row.get("characters_involved"), 60, 20),
             "target_word_count": _words(row.get("target_word_count")),
             "narrative_tasks": tasks if isinstance(tasks, dict) else None,
+            "ref": _text(row.get("ref"), 20),
         })
     return out

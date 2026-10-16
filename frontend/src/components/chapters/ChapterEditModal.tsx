@@ -1,4 +1,4 @@
-/** 新建章节弹窗：只填标题与序号；正文、改标题、一键仿写都在稿纸里直接做 */
+/** 新建章节弹窗：只填标题与序号；正文、改标题都在稿纸里直接做 */
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Loader2, X } from 'lucide-react';

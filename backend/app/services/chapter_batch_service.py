@@ -106,7 +106,7 @@ def _default_adopt(session_factory: Callable[[], Any]) -> Adopt:
 
 
 def _default_analyze() -> Analyze:
-    from app.api.chapters import analyze_chapter_background
+    from app.api.chapters import analyze_chapter_background  # 经 api 模块取（测试在那里打桩）
 
     return analyze_chapter_background
 

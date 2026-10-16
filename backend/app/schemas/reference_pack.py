@@ -1,10 +1,9 @@
-"""参考包 API Schema
+"""拆书结果（reference_packs 表）的 Schema：拆书页 GET /book-dissect/{task_id}/result 读它。
 
 设计要点：
 - 列表项 (ReferencePackSummary) 不返回维度 JSON 字段，避免列表加载过重
 - 详情 (ReferencePackDetail) 一次返回全部维度内容
 - 维度内部结构使用 Dict[str, Any]，便于 prompt 演进时灵活扩展
-- 项目挂载关联使用独立的 schema，包含默认引用配置
 
 维度集合：synopsis（全书骨架 ≈ 总纲）/ bridges（剧情单元库）/ style / character_archive / methodology / structure / corpus。
 """
@@ -94,68 +93,3 @@ class ReferencePackDetail(BaseModel):
     attached_project_count: int = 0
     created_at: datetime
     updated_at: Optional[datetime] = None
-
-
-# ============================================================
-# 项目挂载关联
-# ============================================================
-
-
-# 7 个引用维度：6 个参考包 JSON 维度 + corpus（拆书卡检索）
-# 注意：必须与前端 @/frontend/src/types/reference_pack.ts 的 ReferenceDimension 保持一致，
-# 否则 deep 档挂载会 422（请求校验）/500（响应校验）。
-ReferenceDimension = Literal[
-    "synopsis", "bridges", "style", "character_archive", "methodology", "structure",
-    "corpus",
-]
-ReferenceStrength = Literal["light", "medium", "deep"]
-
-
-class AttachReferencePackRequest(BaseModel):
-    """挂载参考包到项目的请求 body"""
-
-    pack_id: str = Field(..., description="要挂载的参考包 ID")
-    default_dimensions: Optional[List[ReferenceDimension]] = Field(
-        default=None,
-        description="默认引用维度（一键仿写弹板的初始勾选状态）；省略则按 strength 推断",
-    )
-    default_strength: ReferenceStrength = Field(
-        default="medium",
-        description="默认参考强度：light(仅文风) / medium(文风+方法论) / deep(全维度)",
-    )
-
-
-class UpdateAttachmentRequest(BaseModel):
-    """更新已挂载参考包的默认配置（PATCH）"""
-
-    default_dimensions: Optional[List[ReferenceDimension]] = None
-    default_strength: Optional[ReferenceStrength] = None
-
-
-class ProjectReferencePackResponse(BaseModel):
-    """项目已挂载参考包列表项（含来源参考包元信息）"""
-
-    id: str = Field(..., description="挂载关联表主键")
-    project_id: str
-    pack_id: str
-    pack_summary: ReferencePackSummary = Field(..., description="冗存参考包元信息便于前端展示")
-    default_dimensions: List[ReferenceDimension] = Field(default_factory=list)
-    default_strength: ReferenceStrength = "medium"
-    attached_at: datetime
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-# ============================================================
-# 操作响应
-# ============================================================
-
-
-class AttachReferencePackResponse(BaseModel):
-    """挂载成功响应"""
-
-    attachment_id: str
-    project_id: str
-    pack_id: str
-    default_dimensions: List[ReferenceDimension]
-    default_strength: ReferenceStrength

@@ -5,11 +5,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable, Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.analysis_task import AnalysisTask
 from app.models.chapter import Chapter
 from app.models.memory import PlotAnalysis
 from app.services.chapter_version_service import content_hash
@@ -59,6 +60,65 @@ async def previous_chapter_issues(db: AsyncSession, chapter: Chapter) -> Previou
         elif analysis_is_stale(analysis, c):
             issues.stale.append(c)
     return issues
+
+
+async def analysis_statuses(
+    db: AsyncSession, project_id: str, is_running: Optional[Callable[[str], bool]] = None,
+    chapters: Optional[list] = None,
+) -> dict[str, dict[str, Any]]:
+    """章节目录用：每章分析状态 missing / ok / stale / failed / running，附失败原因或降级说明。
+
+    不拉全部正文：只有「分析之后又改过」（updated_at 晚于分析时间）的章才取正文算指纹。
+    failed = 最近一次分析失败（之前的结果若有仍保留在用）。chapters：调用方已查好的章节行（有 id / word_count / updated_at）。
+    """
+    if chapters is None:
+        chapters = (await db.execute(
+            select(Chapter.id, Chapter.word_count, Chapter.updated_at).where(Chapter.project_id == project_id)
+        )).all()
+    analyses = {row.chapter_id: row for row in (await db.execute(
+        select(PlotAnalysis.chapter_id, PlotAnalysis.content_hash, PlotAnalysis.created_at)
+        .where(PlotAnalysis.project_id == project_id)
+    )).all()}
+    latest: dict[str, Any] = {}
+    for row in (await db.execute(
+        select(AnalysisTask.chapter_id, AnalysisTask.status, AnalysisTask.error_message, AnalysisTask.created_at)
+        .where(AnalysisTask.project_id == project_id).order_by(AnalysisTask.created_at)
+    )).all():
+        latest[row.chapter_id] = row
+    # 分析记录的时间 = 读取正文的时刻；同一秒内改过的也算可疑（CURRENT_TIMESTAMP 只到秒）
+    suspects = [
+        c.id for c in chapters
+        if c.id in analyses and (
+            not c.updated_at or not analyses[c.id].created_at or c.updated_at >= analyses[c.id].created_at
+        )
+    ]
+    contents = dict((await db.execute(
+        select(Chapter.id, Chapter.content).where(Chapter.id.in_(suspects))
+    )).all()) if suspects else {}
+
+    out: dict[str, dict[str, Any]] = {}
+    for chapter in chapters:
+        if not (chapter.word_count or 0):
+            continue
+        task, analysis = latest.get(chapter.id), analyses.get(chapter.id)
+        if is_running is not None and is_running(chapter.id):
+            out[chapter.id] = {"status": "running", "message": None}
+            continue
+        if analysis is None:
+            failed = task is not None and task.status == "failed"
+            out[chapter.id] = {"status": "failed" if failed else "missing", "message": task.error_message if failed else None}
+            continue
+        stale = False
+        if chapter.id in contents:
+            stale = (analysis.content_hash != content_hash(contents[chapter.id])) if analysis.content_hash else True
+        status, message = ("stale" if stale else "ok"), None
+        if task is not None and task.status == "failed" and task.created_at and analysis.created_at \
+                and task.created_at >= analysis.created_at:
+            status, message = "failed", task.error_message
+        elif task is not None and task.status == "completed" and task.error_message:
+            message = task.error_message  # 完成但有降级说明（如人物与标注没抽出来）
+        out[chapter.id] = {"status": status, "message": message}
+    return out
 
 
 def chapter_brief(chapter: Chapter) -> dict:

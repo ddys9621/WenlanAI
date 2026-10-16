@@ -69,6 +69,45 @@ export interface AssistantMember {
   responsibility: string
   /** 该成员用的模型；null = 跟随项目模型 */
   model: string | null
+  /** 该成员调用模型时的上下文上限（token；自动时按它用的模型查） */
+  context_window?: number
+}
+
+/** 上下文上限从哪来：manual 作者设的 / auto 按模型查到 / fallback 没查到模型，按默认值 */
+export type AssistantContextSource = 'manual' | 'auto' | 'fallback'
+
+/** 一次调用模型的上下文用量（估算 token） */
+export interface AssistantContextUsage {
+  used: number
+  limit: number
+  /** 给回复预留的部分（max_tokens + 估算余量），装填时不占用 */
+  reserve: number
+  percent: number
+  source: AssistantContextSource
+  model: string
+  parts: { system: number; book: number; summary: number; goal: number; history: number; steps: number }
+  /** 带入的近期对话条数 / 本轮之前共几条 / 其中几条已压成前情摘要 */
+  history: { included: number; total: number; summarized: number }
+  /** 本轮有几步工具结果为省上下文压成了一句 */
+  compressed_steps: number
+  /** 发送时会先把较早的几条对话压成前情摘要（只在核对 / 用量估算里出现） */
+  will_compact: number
+}
+
+/** 共创室的上下文设置（按项目） */
+export interface AssistantContextSettings {
+  /** 作者设的上限；null = 自动 */
+  setting: number | null
+  /** 主编现在用的上限 */
+  window: number
+  source: AssistantContextSource
+  model: string
+  /** 「自动」时主编会用的上限 */
+  auto: number
+  auto_source: AssistantContextSource
+  presets: number[]
+  min: number
+  max: number
 }
 
 export interface AssistantStarter {
@@ -81,6 +120,7 @@ export interface AssistantStarter {
 export interface AssistantTeam {
   members: AssistantMember[]
   starters: AssistantStarter[]
+  context: AssistantContextSettings
 }
 
 /** 规划工具产出的草案卡片：作者在卡片上确认才算定稿 */
@@ -194,6 +234,7 @@ export interface AssistantPreview {
   history_count: number
   sections: { label: string; content: string }[]
   rules: string
+  context: AssistantContextUsage
 }
 
 export interface AssistantCheckItem {

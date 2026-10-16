@@ -71,8 +71,16 @@ class ChapterListItem(BaseModel):
     outline_review_status: Optional[str] = None  # 关联章纲：draft = AI 草拟待确认
     outline_upstream_stale: bool = False  # 关联章纲的上游（桥段 / 剧情线 / 故事大纲）已改
     pending_candidates: int = 0  # 待采用的候选稿数
+    analysis_status: Optional[str] = None  # missing / ok / stale / failed / running；无正文为 None
+    analysis_message: Optional[str] = None  # 失败原因 / 降级说明
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ChapterDigestUpdate(BaseModel):
+    """作者改章节档案：不传的项不改。"""
+    summary: Optional[str] = Field(None, max_length=1000)
+    end_state: Optional[str] = Field(None, max_length=500)
 
 
 class ChapterListResponse(BaseModel):
@@ -96,10 +104,7 @@ class ChapterGenerateRequest(BaseModel):
         None,
         description="本次章节生成选择使用的MCP插件列表"
     )
-    # R8 拆书参考包显式参数（任一为空则走 injector 默认）
-    pack_ids: Optional[List[str]] = Field(None, description="显式选中的拆书参考包 ID 列表")
-    dimensions: Optional[List[str]] = Field(None, description="显式选中的参考维度")
-    strength: Optional[str] = Field(None, description="参考强度：light/medium/deep")
+    kb_chapter: Optional[int] = Field(None, ge=1, description="仿写参考：本次对标原书第几章（留空按章纲引用 / 位置自动对位）")
 
 
 class ChapterBatchRequest(BaseModel):

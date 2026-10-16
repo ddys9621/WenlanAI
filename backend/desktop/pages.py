@@ -128,8 +128,8 @@ button:disabled { cursor:not-allowed; opacity:.6; }
 
   <section class="state" id="model">
     <div class="notice">
-      <b>首次运行：需要 AI 记忆模型（约 470MB）</b>
-      <p>语义检索、伏笔追踪等记忆功能依赖它。跳过也能正常写作，下次启动时还会询问。</p>
+      <b>首次运行：需要 AI 记忆模型（中文 bge-small-zh，约 95MB）</b>
+      <p>写正文时按语义找回相关旧事要用它。跳过也能正常写作（只按人物 / 关键词召回），下次启动时还会询问。</p>
     </div>
     <div class="actions">
       <button class="btn btn-primary" onclick="call('download_model')"><svg class="i"><use href="#ic-download"/></svg>在线下载</button>

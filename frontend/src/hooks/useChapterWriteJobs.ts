@@ -419,9 +419,12 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
         connect: (options) => chapterApi.analyzeChapterStream(chapter.id, options),
         onSettled: (job) => {
           if (job.status === 'done') {
-            toast.success(`「${chapter.title}」分析完成`);
-            void refreshChapters().then(() => onWrittenRef.current?.(chapter.id));
+            const warning = (job.result as { warning?: string | null } | null)?.warning;
+            if (warning) toast.warning(`「${chapter.title}」分析完成，但${warning}`);
+            else toast.success(`「${chapter.title}」分析完成`);
           }
+          // 失败也刷新：目录里的分析状态点要变成「分析失败」，侧栏显示原因（之前的结果仍保留）
+          void refreshChapters().then(() => onWrittenRef.current?.(chapter.id));
         },
       });
     } catch (err) {

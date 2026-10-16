@@ -1,11 +1,13 @@
-/** 首次生成正文的配置弹窗：风格 / 目标字数 / MCP / 拆书参考包 + 本次会参考的内容预览 */
+/** 首次生成正文的配置弹窗：风格 / 目标字数 / MCP / 仿写参考（可指定对标原书第几章）+ 本次会参考的内容预览 */
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { X, Zap } from 'lucide-react';
 import { writingStyleApi } from '@/services/api';
 import { MCPSelector } from '@/components/MCPSelector';
-import { ReferencePackSelector, DEFAULT_SELECTOR_VALUE, type ReferencePackSelectorValue } from '@/components/ReferencePackSelector';
+import { KbReferenceHint } from '@/components/knowledge/KbReferenceHint';
+import { useProjectKbLink } from '@/hooks/useProjectKbLink';
 import type { Chapter, ChapterCanGenerateResponse, ChapterGenerateRequest, WritingStyle } from '@/types';
+import { kbHintText } from '@/utils/knowledge';
 
 interface ChapterGenerateModalProps {
   open: boolean;
@@ -30,8 +32,9 @@ const DEFAULT_CONFIG: GenConfig = {
 
 export function ChapterGenerateModal({ open, projectId, chapter, genCheck, onClose, onConfirm }: ChapterGenerateModalProps) {
   const [genConfig, setGenConfig] = useState<GenConfig>(DEFAULT_CONFIG);
-  // R8：拆书参考包选择器状态
-  const [genRefPack, setGenRefPack] = useState<ReferencePackSelectorValue>(DEFAULT_SELECTOR_VALUE);
+  const [kbChapter, setKbChapter] = useState('');
+  const kbLink = useProjectKbLink(projectId, open);
+  const kbActive = !!kbLink && (kbLink.mode === 'follow' || kbLink.mode === 'borrow');
   const [styles, setStyles] = useState<WritingStyle[]>([]);
 
   useEffect(() => {
@@ -49,12 +52,7 @@ export function ChapterGenerateModal({ open, projectId, chapter, genCheck, onClo
     enable_mcp: genConfig.enable_mcp,
     adherence_review: genConfig.adherence_review,
     selected_plugins: genConfig.enable_mcp && genConfig.selected_plugins.length > 0 ? genConfig.selected_plugins : undefined,
-    // R8：仅 enabled 时透传拆书参考包参数
-    ...(genRefPack.enabled ? {
-      pack_ids: genRefPack.packIds.length > 0 ? genRefPack.packIds : undefined,
-      dimensions: genRefPack.dimensions.length > 0 ? genRefPack.dimensions : undefined,
-      strength: genRefPack.strength,
-    } : {}),
+    kb_chapter: kbActive && Number(kbChapter) > 0 ? Number(kbChapter) : undefined,
   });
 
   if (!open) return null;
@@ -132,13 +130,21 @@ export function ChapterGenerateModal({ open, projectId, chapter, genCheck, onClo
             value={{ enable: genConfig.enable_mcp, selected: genConfig.selected_plugins }}
             onChange={(val) => setGenConfig((prev) => ({ ...prev, enable_mcp: val.enable, selected_plugins: val.selected }))}
           />
-          <ReferencePackSelector
-            projectId={projectId}
-            value={genRefPack}
-            onChange={setGenRefPack}
-            hint="让本章正文参考拆书的笔法/方法论/语料"
-            disabledTitle="使用拆书参考包作为对标"
-          />
+          <KbReferenceHint projectId={projectId} link={kbLink}>
+            {kbActive && (
+              <label className="flex items-center gap-2">
+                <span>对标原书第</span>
+                <input
+                  value={kbChapter}
+                  onChange={(e) => setKbChapter(e.target.value.replace(/\D/g, ''))}
+                  placeholder="自动"
+                  className="hh-field w-20 py-1 text-xs"
+                  inputMode="numeric"
+                />
+                <span>章（留空按章纲的对标 / 本章在单元里的位置自动对位）</span>
+              </label>
+            )}
+          </KbReferenceHint>
 
           <div className="hh-subpanel space-y-3 p-4">
             <div>
@@ -163,6 +169,10 @@ export function ChapterGenerateModal({ open, projectId, chapter, genCheck, onClo
                   ))}
                 </div>
               )}
+              <div className="flex items-start justify-between gap-3">
+                <span className="font-medium text-content">仿写参考</span>
+                <span>{kbHintText(kbLink)}</span>
+              </div>
               <div className="flex items-start justify-between gap-3">
                 <span className="font-medium text-content">MCP 外部参考</span>
                 <span>

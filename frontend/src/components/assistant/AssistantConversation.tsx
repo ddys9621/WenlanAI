@@ -3,6 +3,7 @@
  * 一个输入框和一支创作团队：主编默认发言、可以把事交给成员，作者也能「@成员」直接找人；回复附「处理记录」；
  * 修改只给候选（内容修改候选 / 章节候选稿），规划给草案卡片（卷纲 / 剧情单元 / 章纲），确认后才写入；
  * 顶部的创作进度告诉作者下一步；需要作者决定时出提问卡；对话保存在服务端，刷新后可续接。
+ * 输入框旁的上下文用量表（参照写代码 agent）：上限在团队设置里按项目设，运行中每一步刷新，较早的对话装不下时自动压成前情摘要。
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import {
@@ -14,15 +15,16 @@ import { assistantApi } from '@/services/api';
 import { AIJobError, runAIJob, useAIJobsStore, waitForAIJob } from '@/store/aiJobsStore';
 import { emitAssistantData, pageContextOf, useAssistantStore, type AssistantDataChange } from '@/store/assistantStore';
 import type {
-  AssistantAnswer, AssistantChapterCandidateRef, AssistantFieldCandidate, AssistantMember, AssistantMessageView, AssistantPageContext,
-  AssistantPreview, AssistantProgress, AssistantRunResult, AssistantSessionView, AssistantTeam,
+  AssistantAnswer, AssistantChapterCandidateRef, AssistantContextUsage, AssistantFieldCandidate, AssistantMember, AssistantMessageView,
+  AssistantPageContext, AssistantPreview, AssistantProgress, AssistantRunResult, AssistantSessionView, AssistantTeam,
 } from '@/types/assistant';
-import { appendQuote, appendRequest, HISTORY_LIMIT } from '@/utils/assistantText';
+import { appendQuote, appendRequest } from '@/utils/assistantText';
 import { mentionMember, questionCardKey } from '@/utils/cocreation';
+import { formatTokens } from '@/utils/contextUsage';
 import type { SSEClientOptions, SSEMessage } from '@/utils/sseClient';
 import { AuthorQuestionCard } from './AuthorQuestionCard';
 import { FieldCandidateCard } from './FieldCandidateCard';
-import { MemberAvatar, PlanCard, ProgressStrip, TeamBar, TeamSettings } from './CocreationParts';
+import { ContextMeter, MemberAvatar, PlanCard, ProgressStrip, TeamBar, TeamSettings } from './CocreationParts';
 
 const MAX_CHARS = 4000;
 const REVIEW_KEY = 'assistant-review-before-send';
@@ -104,6 +106,9 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
   const [team, setTeam] = useState<AssistantTeam | null>(null);
   const [showTeam, setShowTeam] = useState(false);
   const [progress, setProgress] = useState<AssistantProgress | null>(null);
+  const [usage, setUsage] = useState<AssistantContextUsage | null>(null);
+  const [compacting, setCompacting] = useState(false);
+  const pageRef = useRef(page);
   const jobIdRef = useRef<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -132,12 +137,29 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
     } catch { /* 进度只是提示，读不到就不显示 */ }
   }, [projectId]);
 
+  /** 空闲时的用量：下一条要求开跑时大约占多少（运行中由 context 事件刷新） */
+  const loadUsage = useCallback(async () => {
+    try {
+      setUsage(await assistantApi.contextUsage(projectId, pageRef.current));
+    } catch { /* 用量只是提示，读不到就不显示 */ }
+  }, [projectId]);
+
   useEffect(() => {
     void assistantApi.team(projectId).then(setTeam).catch(() => setTeam(null));
     void loadProgress();
   }, [loadProgress, projectId]);
 
   useEffect(() => { sessionStorage.setItem(`assistant-draft:${projectId}`, draft); }, [draft, projectId]);
+
+  useEffect(() => { pageRef.current = page; }, [page]);
+
+  // 对话变了、换了上限或成员模型、一轮跑完：重新估一次下一条要求的用量
+  const messageCount = view?.messages.length ?? 0;
+  const sessionId = view?.session?.id;
+  const contextWindow = team?.context.window;
+  useEffect(() => {
+    if (!busy) void loadUsage();
+  }, [busy, contextWindow, loadUsage, messageCount, sessionId]);
 
   const handleEvent = useCallback((m: SSEMessage) => {
     if (m.type === 'content' && typeof m.content === 'string') {
@@ -185,6 +207,12 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
       const job = m.job as { title?: string };
       toast.success(`${job.title ?? '后台任务'}已开始，进度在右下角任务托盘`);
       void useAIJobsStore.getState().syncFromServer(projectId);
+    } else if (m.type === 'context' && m.context) {
+      setUsage(m.context as AssistantContextUsage);
+    } else if (m.type === 'compact') {
+      setCompacting(m.phase === 'running');
+      if (m.phase === 'done') setNotice(`较早的 ${String(m.count ?? '')} 条对话已压成前情摘要，之后接着带上`);
+      if (m.phase === 'failed') setNotice('压缩较早的对话没成功，这一轮先只带装得下的近期对话');
     }
   }, [projectId, scrollToEnd]);
 
@@ -210,6 +238,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
       jobIdRef.current = null;
       setBusy(false);
       setLive(null);
+      setCompacting(false);
       await reload();
       flushPending();
       void loadProgress();
@@ -268,6 +297,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
       await reload();
       setBusy(false);
       setLive(null);
+      setCompacting(false);
       flushPending();
       void loadProgress();
       scrollToEnd();
@@ -359,7 +389,6 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
 
   const messages = view?.messages ?? [];
   const waitingRun = view?.active_run?.status === 'waiting_input' ? view.active_run : null;
-  const historyCount = Math.min(messages.length, HISTORY_LIMIT);
   const members = team?.members ?? [];
   const mention = (member: AssistantMember) => {
     setDraft((prev) => mentionMember(prev, member.name));
@@ -487,6 +516,11 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
               <span className="text-xs font-semibold text-content">发送前核对</span>
               <span className="text-[11px] text-content-tertiary">{previewCurrent ? '核对后点「确认发送」' : '要求或页面变了，请更新核对'}</span>
             </header>
+            <p className="mb-1 text-[11px] text-content-tertiary">
+              本次上下文约 {formatTokens(preview.data.context.used)} / {formatTokens(preview.data.context.limit)}（{preview.data.context.percent}%）
+              · 带入 {preview.data.context.history.included} 条近期对话
+              {preview.data.context.will_compact > 0 && ` · 发送时会先把较早的 ${preview.data.context.will_compact} 条压成前情摘要`}
+            </p>
             <p className="mb-1 border-l-2 border-gold-300 bg-gold-50/50 px-2 py-1 text-xs leading-6">{preview.data.message}</p>
             {preview.data.sections.map((s) => (
               <details key={s.label} className="border-t border-surface-border-light py-1">
@@ -519,7 +553,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
         />
         <div className="mt-1.5 flex flex-wrap items-center gap-2">
           <span className="text-[10px] text-content-tertiary">{draft.length}/{MAX_CHARS}</span>
-          <span className="text-[10px] text-content-tertiary" title="每次带入最近的对话，超长消息保留首尾">带入 {historyCount} 条历史</span>
+          <ContextMeter usage={usage} compacting={compacting} />
           <label className="flex cursor-pointer items-center gap-1 text-[11px] text-content-secondary">
             <input type="checkbox" checked={reviewBeforeSend} onChange={(e) => { setReviewBeforeSend(e.target.checked); localStorage.setItem(REVIEW_KEY, String(e.target.checked)); setPreview(null); }} />
             发送前核对

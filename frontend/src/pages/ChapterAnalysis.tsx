@@ -29,6 +29,8 @@ import { useAssistantDataChange, useAssistantDetail } from '@/hooks/useAssistant
 import { useAssistantStore, type AssistantDataChange } from '@/store/assistantStore';
 import { BatchGenerateModal } from '@/components/chapters/BatchGenerateModal';
 import { CandidatePanel } from '@/components/chapters/CandidatePanel';
+import { ChapterArchivePanel } from '@/components/chapters/ChapterArchivePanel';
+import { AnalysisStatusDot } from '@/components/chapters/AnalysisStatusDot';
 import { ChapterEditModal } from '@/components/chapters/ChapterEditModal';
 import { ChapterGenerateModal } from '@/components/chapters/ChapterGenerateModal';
 import { ChapterStreamPanel } from '@/components/chapters/ChapterStreamPanel';
@@ -37,7 +39,7 @@ import { DeaiRewriteModal, type RewriteMode } from '@/components/chapters/DeaiRe
 import { NarrativeStatePanel } from '@/components/chapters/NarrativeStatePanel';
 import { VersionHistoryPanel } from '@/components/chapters/VersionHistoryPanel';
 
-type SidebarTab = 'memory' | 'narrative';
+type SidebarTab = 'archive' | 'memory' | 'narrative';
 type ReaderTab = 'content' | 'candidates' | 'versions';
 
 export default function ChapterAnalysis() {
@@ -54,7 +56,7 @@ export default function ChapterAnalysis() {
   const [narrativeLoading, setNarrativeLoading] = useState(false);
   const [contentLoading, setContentLoading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [sidebarTab, setSidebarTab] = useState<SidebarTab>('memory');
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>('archive');
   const [activeAnnotationId, setActiveAnnotationId] = useState<string>();
   const [scrollToContent, setScrollToContent] = useState<string>();
   const [scrollToSidebar, setScrollToSidebar] = useState<string>();
@@ -67,23 +69,27 @@ export default function ChapterAnalysis() {
   const paneRef = useRef<ChapterWritingPaneHandle>(null);
   const [searchParams, setSearchParams] = useSearchParams();
 
+  const loadAnalysis = useCallback((id: string) => {
+    setNarrativeLoading(true);
+    chapterApi.getAnalysis(id)
+      .then((d) => setNarrative(normalizeAnalysisData(d as unknown as Record<string, unknown>)))
+      .catch(() => setNarrative(null))
+      .finally(() => setNarrativeLoading(false));
+  }, []);
+
   const loadSelected = useCallback(async (id: string) => {
     setContentLoading(true);
     try {
       const [ch, ann] = await Promise.all([chapterApi.getChapter(id), chapterApi.getAnnotations(id).catch(() => null)]);
       setDetail(ch);
       setAnnotations(ann);
-      setNarrativeLoading(true);
-      chapterApi.getAnalysis(id)
-        .then((d) => setNarrative(normalizeAnalysisData(d as unknown as Record<string, unknown>)))
-        .catch(() => setNarrative(null))
-        .finally(() => setNarrativeLoading(false));
+      loadAnalysis(id);
     } catch {
       toast.error('加载章节内容失败');
     } finally {
       setContentLoading(false);
     }
-  }, []);
+  }, [loadAnalysis]);
 
   const selectChapter = useCallback((id: string) => {
     setSelectedId(id);
@@ -320,7 +326,7 @@ export default function ChapterAnalysis() {
         <button
           onClick={() => setSidebarOpen((v) => !v)}
           className={cn('lj-tool w-8 justify-center px-0', sidebarOpen && 'lj-tool--active')}
-          title={sidebarOpen ? '收起记忆标注 / 叙事状态' : '记忆标注 / 叙事状态'}
+          title={sidebarOpen ? '收起本章档案 / 标注 / 叙事状态' : '本章档案 / 标注 / 叙事状态'}
           aria-label="分析面板"
         >
           {sidebarOpen ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
@@ -335,8 +341,9 @@ export default function ChapterAnalysis() {
         只读标注视图 · 共 {annotations.summary.total_annotations} 个标注：
         {annotations.summary.hooks > 0 && ` 🎣${annotations.summary.hooks}个钩子`}
         {annotations.summary.foreshadows > 0 && ` 🌟${annotations.summary.foreshadows}个伏笔`}
-        {annotations.summary.plot_points > 0 && ` 💎${annotations.summary.plot_points}个情节点`}
-        {annotations.summary.character_events > 0 && ` 👤${annotations.summary.character_events}个角色事件`}
+        {annotations.summary.plot_points > 0 && ` 💎${annotations.summary.plot_points}个关键转折`}
+        {annotations.summary.located < annotations.summary.total_annotations
+          && `（${annotations.summary.total_annotations - annotations.summary.located} 个引句在改过的正文里找不到，只在侧栏列出）`}
       </p>
       <div ref={manuscriptRef} data-manuscript>
         <AnnotatedText
@@ -470,10 +477,17 @@ export default function ChapterAnalysis() {
                       <span className="shrink-0 text-[11px] text-content-tertiary tabular-nums">
                         {generating ? <Loader2 className="inline h-3 w-3 animate-spin text-brand" /> : c.word_count > 0 ? `${c.word_count.toLocaleString()}字` : '空'}
                       </span>
+                      {c.word_count > 0 && <AnalysisStatusDot status={analyzing ? 'running' : c.analysis_status} message={c.analysis_message} />}
                     </div>
-                    {(flagged || currentBatchChapter) && (
+                    {(flagged || currentBatchChapter || c.analysis_status === 'stale' || c.analysis_status === 'failed') && (
                       <div className="mt-1 flex flex-wrap gap-1">
                         {currentBatchChapter && <span className="lj-badge lj-badge--candidate">串行生成中</span>}
+                        {c.analysis_status === 'failed' && !analyzing && (
+                          <span className="lj-badge lj-badge--stale" title={c.analysis_message || '最近一次分析失败'}>分析失败</span>
+                        )}
+                        {c.analysis_status === 'stale' && !analyzing && (
+                          <span className="lj-badge lj-badge--stale" title="正文在分析之后改过，档案与人物状态可能过期">分析过期</span>
+                        )}
                         {(c.pending_candidates ?? 0) > 0 && <span className="lj-badge lj-badge--candidate">候选稿 {c.pending_candidates}</span>}
                         {c.outline_changed && <span className="lj-badge lj-badge--stale" title="正文写完后章纲又改过">章纲已改</span>}
                         {c.outline_upstream_stale && <span className="lj-badge lj-badge--stale" title="卷纲 / 总纲改过">上游已改</span>}
@@ -496,7 +510,7 @@ export default function ChapterAnalysis() {
                         </button>
                       )}
                       {c.word_count > 0 && (
-                        <button onClick={() => void jobs.handleAnalyze(c)} disabled={analyzing} className="hh-icon-btn-plain h-7 w-7 hover:text-brand" title="分析（提取记忆 / 叙事状态 / 一致性）" aria-label="分析">
+                        <button onClick={() => void jobs.handleAnalyze(c)} disabled={analyzing} className="hh-icon-btn-plain h-7 w-7 hover:text-brand" title="分析（章节档案 / 人物状态 / 伏笔 / 一致性）" aria-label="分析">
                           {analyzing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
                         </button>
                       )}
@@ -558,14 +572,25 @@ export default function ChapterAnalysis() {
                 {sidebarOpen && (
                   <aside className="flex w-[320px] shrink-0 flex-col border-l border-surface-border bg-white max-xl:hidden">
                     <div className="flex shrink-0 gap-1 border-b border-surface-border px-3 py-2.5">
-                      {([['memory', '记忆标注'], ['narrative', '叙事状态']] as const).map(([key, label]) => (
+                      {([['archive', '本章档案'], ['memory', '正文标注'], ['narrative', '叙事状态']] as const).map(([key, label]) => (
                         <button key={key} onClick={() => setSidebarTab(key)} className={cn('hh-chip px-3 py-1 text-xs', sidebarTab === key && 'hh-chip--active')}>
                           {label}
                         </button>
                       ))}
                     </div>
                     <div className="min-h-0 flex-1 overflow-y-auto p-3">
-                      {sidebarTab === 'memory' ? (
+                      {sidebarTab === 'archive' ? (
+                        <ChapterArchivePanel
+                          key={detail.id}
+                          chapterId={detail.id}
+                          data={narrative}
+                          loading={narrativeLoading}
+                          hasContent={Boolean(detail.content?.trim())}
+                          analyzing={jobs.analyzingChapterIds.has(detail.id)}
+                          onAnalyze={() => selectedSummary && void jobs.handleAnalyze(selectedSummary)}
+                          onChanged={() => loadAnalysis(detail.id)}
+                        />
+                      ) : sidebarTab === 'memory' ? (
                         hasAnnotations && annotations ? (
                           <MemorySidebar
                             annotations={annotations.annotations}
@@ -575,7 +600,7 @@ export default function ChapterAnalysis() {
                           />
                         ) : (
                           <p className="py-8 text-center text-xs leading-6 text-content-tertiary">
-                            暂无标注数据。点左侧 🔍 分析本章后，可在「标注」视图里高亮钩子 / 伏笔 / 情节点。
+                            暂无标注数据。点左侧 🔍 分析本章后，可在「标注」视图里高亮钩子 / 伏笔 / 关键转折。
                           </p>
                         )
                       ) : (

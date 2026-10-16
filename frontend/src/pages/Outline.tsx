@@ -11,11 +11,10 @@ import type { AssistantDataChange } from '@/store/assistantStore'
 import { wizardStreamApi, chapterOutlineApi } from '@/services/api'
 import { VolumesView } from '@/components/outline/VolumesView'
 import { MCPSelector } from '@/components/MCPSelector'
-import {
-  ReferencePackSelector,
-  DEFAULT_SELECTOR_VALUE,
-  type ReferencePackSelectorValue,
-} from '@/components/ReferencePackSelector'
+import { KbCitationChips } from '@/components/knowledge/KbCitationChips'
+import { KbReferenceHint } from '@/components/knowledge/KbReferenceHint'
+import { useKbCitations } from '@/hooks/useKbCitations'
+import { useProjectKbLink } from '@/hooks/useProjectKbLink'
 import { Modal as UiModal, type ModalSize } from '@/components/ui/Modal'
 import type {
   Outline, OutlineCreate, OutlineUpdate, Volume,
@@ -177,8 +176,7 @@ function OutlinesView({ outlines, projectId, createOutline, updateOutline, delet
   const [genForm, setGenForm] = useState({ narrative_perspective: '第三人称', chapter_count: 30, target_words: 100000, requirements: '' })
   const [genEnableMcp, setGenEnableMcp] = useState(false)
   const [genPlugins, setGenPlugins] = useState<string[]>([])
-  // R8：拆书参考包选择器状态（默认关；disabled 时不传任何 R8 字段走"自动模式"）
-  const [genRefPack, setGenRefPack] = useState<ReferencePackSelectorValue>(DEFAULT_SELECTOR_VALUE)
+  const kbLink = useProjectKbLink(projectId)
   const [viewingOutline, setViewingOutline] = useState<Outline | null>(null)
   const openCreate = () => { setEditing(null); setForm({ title: '', premise: '', main_plot: '', golden_finger: '', selling_points: '', power_system: '', main_tropes: '', ultimate_goal: '', opening_hook: '' }); setShowModal(true) }
   const openEdit = (o: Outline) => {
@@ -213,12 +211,6 @@ function OutlinesView({ outlines, projectId, createOutline, updateOutline, delet
           requirements: genForm.requirements.trim() || undefined,
           enable_mcp: genEnableMcp,
           selected_plugins: genPlugins,
-          // R8：仅 enabled 时传递拆书参考包参数（否则后端走默认自动模式）
-          ...(genRefPack.enabled ? {
-            pack_ids: genRefPack.packIds.length > 0 ? genRefPack.packIds : undefined,
-            dimensions: genRefPack.dimensions.length > 0 ? genRefPack.dimensions : undefined,
-            strength: genRefPack.strength,
-          } : {}),
         },
         {
           onProgress: (msg) => { toast.info(msg, { id: 'outline-gen' }) },
@@ -371,13 +363,7 @@ function OutlinesView({ outlines, projectId, createOutline, updateOutline, delet
             </div>
             <MCPSelector value={{ enable: genEnableMcp, selected: genPlugins }} onChange={({ enable, selected }) => { setGenEnableMcp(enable); setGenPlugins(selected) }} />
             {projectId && (
-              <ReferencePackSelector
-                projectId={projectId}
-                value={genRefPack}
-                onChange={setGenRefPack}
-                hint="让本次故事大纲参考拆书的方法论/结构/世界观"
-                disabledTitle="使用拆书参考包作为对标书"
-              />
+              <KbReferenceHint projectId={projectId} link={kbLink} />
             )}
           </div>
         </Modal>
@@ -534,6 +520,9 @@ function ChapterOutlinesView({ chapterOutlines, volumes, projectId, createChapte
   const [batchCreating, setBatchCreating] = useState(false)
 
   const sorted = [...chapterOutlines].sort((a, b) => a.chapter_number - b.chapter_number)
+  const outlineCitations = useKbCitations(
+    projectId, 'chapter_outline', sorted.map((co) => co.id), sorted.map((co) => co.updated_at ?? '').join(','),
+  )
   const unitLabel = (co: ChapterOutline) => {
     const volume = volumes.find((v) => v.id === co.volume_id)
     if (!volume) return null
@@ -717,6 +706,7 @@ function ChapterOutlinesView({ chapterOutlines, volumes, projectId, createChapte
                       {unitLabel(co) && <span>{unitLabel(co)}</span>}
                     </div>
                     {co.plot_points && <p className="mt-1.5 line-clamp-2 text-[13px] leading-6 text-content-secondary">{co.plot_points}</p>}
+                    <KbCitationChips citations={outlineCitations[co.id]} className="mt-1.5" />
                     {co.key_events && co.key_events.length > 0 && (
                       <div className="mt-2 flex flex-wrap gap-1.5">
                         {co.key_events.map((ev, i) => (

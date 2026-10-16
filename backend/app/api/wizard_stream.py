@@ -18,8 +18,8 @@ from app.services.relationship_matcher import match_relationship_type
 from app.models.world_rule import WorldRule
 from app.models.writing_style import WritingStyle
 from app.models.project_default_style import ProjectDefaultStyle
-from app.models.reference_pack import ReferencePack
-from app.models.project_reference_pack import ProjectReferencePack
+from app.services.knowledge.kb_context import traced_kb_context
+from app.services.knowledge.kb_links import set_project_link
 from app.services.ai_service import AIService
 from app.services.platform_presets import normalize_longform_settings
 from app.services.prompt_service import prompt_service
@@ -60,122 +60,6 @@ async def _start_wizard_job(request: Request, data: Dict[str, Any], *, kind: str
     except AIJobConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     return job_sse_response(job)
-
-
-# ============================================================
-# V3.2-B：项目创建后自动挂载用户在灵感模式入口选好的拆书参考包
-# 设计：在 world-building create 模式 project 提交成功后立即调用
-# 失败容错：任一 pack 挂载失败仅记 warn，不阻断主流程
-# ============================================================
-
-def _wizard_infer_default_dimensions(strength: str) -> list:
-    """与 reference_pack._infer_default_dimensions 保持一致的默认维度推断。
-
-    V4.1：
-    - light: 仅文风
-    - medium: + synopsis（Story Bible 全局引导）
-    - deep: + 模式三维度（entities/relations/events）+ 5 手法全开
-            + 剧情单元库(bridges) + 人物功能谱(character_archive)
-    """
-    if strength == "light":
-        return ["style"]
-    if strength == "deep":
-        return [
-            "synopsis",
-            "entities",
-            "relations",
-            "events",
-            "methodology",
-            "style",
-            "structure",
-            "archetypes",
-            "worldbuilding",
-            "bridges",            # V4.1
-            "character_archive",  # V4.1
-            "corpus",
-        ]
-    # medium
-    return ["synopsis", "methodology", "style", "corpus"]
-
-
-async def _auto_attach_packs_to_project(
-    db: AsyncSession,
-    user_id: str,
-    project_id: str,
-    pack_ids: list,
-    dimensions: list,
-    strength: str,
-) -> int:
-    """灵感模式入口选好的 pack 在项目创建后自动挂载。
-
-    Args:
-        pack_ids: 用户在 selector 选好的 pack 列表（必须非空）
-        dimensions: 用户选的维度（空数组则按 strength 推断）
-        strength: 用户选的强度（默认 medium）
-
-    Returns:
-        实际成功挂载的 pack 数量
-    """
-    if not pack_ids:
-        return 0
-    strength = strength if strength in ("light", "medium", "deep") else "medium"
-    explicit_dims = list(dimensions) if dimensions else None
-
-    # 一次查全部目标 pack（必须属于当前用户）
-    result = await db.execute(
-        select(ReferencePack).where(
-            ReferencePack.id.in_(pack_ids),
-            ReferencePack.user_id == user_id,
-        )
-    )
-    packs = list(result.scalars().all())
-    if not packs:
-        logger.warning(
-            "[V3.2-B] 灵感入口 pack_ids 全部不存在或无权访问 user=%s project=%s pack_ids=%s",
-            user_id, project_id, pack_ids,
-        )
-        return 0
-
-    attached = 0
-    for pack in packs:
-        # 仅 ready/partial 可挂载；其它状态跳过（用户体验降级）
-        if pack.status not in ("ready", "partial"):
-            logger.info("[V3.2-B] 跳过未就绪 pack id=%s status=%s", pack.id, pack.status)
-            continue
-
-        # 计算最终默认维度：显式 > strength 推断
-        dims = explicit_dims if explicit_dims is not None else _wizard_infer_default_dimensions(strength)
-        # 与 ReferencePack.generated_dimensions 求交集，避免引用空 tab
-        try:
-            gen_raw = pack.generated_dimensions or "[]"
-            generated = set(json.loads(gen_raw) if isinstance(gen_raw, str) else (gen_raw or []))
-        except Exception:
-            generated = set()
-        valid = generated | {"corpus"}
-        dims_filtered = [d for d in dims if d in valid] or ["corpus"]
-
-        link = ProjectReferencePack(
-            project_id=project_id,
-            pack_id=pack.id,
-            default_dimensions=json.dumps(dims_filtered, ensure_ascii=False),
-            default_strength=strength,
-        )
-        db.add(link)
-        attached += 1
-
-    if attached:
-        try:
-            await db.commit()
-        except Exception as e:  # 一般是 UNIQUE 冲突（不应发生因为 project 是刚创建的）
-            await db.rollback()
-            logger.warning("[V3.2-B] 自动挂载提交失败 project=%s err=%s", project_id, e)
-            return 0
-
-        logger.info(
-            "[V3.2-B] 灵感入口自动挂载完成 user=%s project=%s attached=%d strength=%s",
-            user_id, project_id, attached, strength,
-        )
-    return attached
 
 
 async def world_building_generator(
@@ -404,35 +288,15 @@ async def world_building_generator(
             final_prompt = base_prompt
             yield await SSEResponse.send_progress("正在调用AI生成...", 30)
 
-        # 拆书参考注入（R7-世界观）：仅 update 模式（项目已存在）才尝试，create 模式下项目还未创建无挂载关系
-        # 设计文档：@/agent-docs/features/dissect_to_creation_pipeline.md §A.2
-        if project_id:
-            try:
-                from app.services.reference_pack_injector import ReferencePackInjector
-                _injector = ReferencePackInjector()
-                _ref_block = await _injector.build_reference_block(
-                    db, project_id,
-                    scene="worldview_generation",
-                    fallback_dimensions=("worldbuilding",),
-                    pack_ids=data.get("pack_ids"),
-                    dimensions=data.get("dimensions"),
-                    strength=data.get("strength"),
-                    anchor_query=f"{theme or ''} {genre or ''}".strip() or "世界观",
-                )
-                if _ref_block.user_segment:
-                    final_prompt = (
-                        f"{final_prompt}\n\n{_ref_block.user_segment}\n\n"
-                        "请参考上述拆书中的世界观建模手法（仅作方法参考，"
-                        "不要复刻原书的具体地名/规则名），生成本项目的世界观。"
-                    )
-                    yield await SSEResponse.send_progress(
-                        f"📚 已注入拆书参考包（{','.join(_ref_block.used_dimensions)}）",
-                        32,
-                    )
-            except ValueError:
-                pass
-            except Exception as _e:  # pragma: no cover
-                logger.warning(f"[R7-世界观] 拆书参考注入失败（已跳过）: {_e}")
+        # 仿写参考：对标书的全书骨架（去名版）；建项目时还没有关联，用向导里选的对标书
+        _kb = await traced_kb_context(
+            db, project_id or "", "worldview",
+            source_id=None if project_id else data.get("kb_source_id"), mode=data.get("kb_mode"),
+            user_id=data.get("user_id"),
+        )
+        if _kb.text:
+            final_prompt = f"{final_prompt}\n\n{_kb.text}"
+            yield await SSEResponse.send_progress(f"📚 已注入仿写参考《{_kb.source_title}》", 32)
 
         final_prompt = prompt_service.apply_project_generation_prompt(
             final_prompt,
@@ -565,26 +429,16 @@ async def world_building_generator(
             except Exception as e:
                 logger.warning(f"设置默认写作风格失败: {e}，不影响项目创建")
 
-            # V3.2-B：项目创建成功后，立即把灵感模式入口选好的拆书 pack 挂上来
-            # 让后续 characters/outline 步骤的 ReferencePackInjector 能从挂载关系读到
-            try:
-                _wizard_pack_ids = data.get("pack_ids") or []
-                if _wizard_pack_ids:
-                    yield await SSEResponse.send_progress("📚 关联拆书参考包...", 83)
-                    _attached = await _auto_attach_packs_to_project(
-                        db,
-                        user_id=user_id,
-                        project_id=project.id,
-                        pack_ids=_wizard_pack_ids,
-                        dimensions=data.get("dimensions") or [],
-                        strength=data.get("strength") or "medium",
-                    )
-                    if _attached:
-                        yield await SSEResponse.send_progress(
-                            f"✅ 已挂载 {_attached} 个拆书参考包", 84
-                        )
-            except Exception as _attach_err:  # pragma: no cover
-                logger.warning(f"[V3.2-B] 自动挂载参考包失败（不影响项目创建）: {_attach_err}")
+            # 向导里选了对标书：项目建好后关联上，后续角色 / 总纲 / 卷纲 / 正文都按它注入仿写参考
+            if data.get("kb_source_id"):
+                try:
+                    _link = await set_project_link(db, user_id, project.id, data["kb_source_id"], mode=data.get("kb_mode"))
+                    if _link is not None:
+                        await db.commit()
+                        yield await SSEResponse.send_progress("📚 已关联对标书", 84)
+                except Exception as _link_err:  # pragma: no cover
+                    await db.rollback()
+                    logger.warning(f"关联对标书失败（不影响项目创建）: {_link_err}")
 
 
             # 【新增】世界观生成后,立即生成详细世界规则
@@ -933,31 +787,10 @@ async def characters_generator(
 
 请结合上述资料，设计符合历史/文化背景的角色。""")
 
-                    # 拆书参考注入（R6-向导批量角色）：注入 archetypes / corpus 维度
-                    # 设计文档：@/agent-docs/features/dissect_to_creation_pipeline.md §A.2
-                    try:
-                        from app.services.reference_pack_injector import ReferencePackInjector
-                        _injector = ReferencePackInjector()
-                        _ref_block = await _injector.build_reference_block(
-                            db, project_id,
-                            scene="character_batch_generation",
-                            fallback_dimensions=("archetypes", "corpus"),
-                            anchor_query=f"{theme or ''} {genre or ''} 角色塑造".strip(),
-                        )
-                        if _ref_block.user_segment:
-                            prompt_parts.append(
-                                f"{_ref_block.user_segment}\n\n"
-                                "请参考上述拆书中的角色塑造手法（仅作方法参考，"
-                                "不要复刻原书的具体人名与设定），生成本项目的角色。"
-                            )
-                            logger.info(
-                                f"📚 [R6-向导角色] 注入拆书参考包 {len(_ref_block.used_packs)} 个，"
-                                f"维度={_ref_block.used_dimensions}"
-                            )
-                    except ValueError:
-                        pass
-                    except Exception as _e:  # pragma: no cover
-                        logger.warning(f"[R6-向导角色] 拆书参考注入失败（已跳过）: {_e}")
+                    # 仿写参考：对标书的人物功能谱（去名版）
+                    _kb = await traced_kb_context(db, project_id, "characters")
+                    if _kb.text:
+                        prompt_parts.append(_kb.text)
 
                     prompt = "\n\n".join(prompt_parts)
                     
@@ -1491,10 +1324,6 @@ async def outline_generator(
         enable_mcp = data.get("enable_mcp", False)  # 默认禁用MCP，需要用户明确选择
         selected_plugins = data.get("selected_plugins", [])  # 选择的插件列表
         user_id = data.get("user_id")  # 从中间件注入
-        # R8 拆书参考包显式参数（任一缺省则该字段走 injector 默认）
-        explicit_pack_ids = data.get("pack_ids")
-        explicit_dimensions = data.get("dimensions")
-        explicit_strength = data.get("strength")
 
         # 获取项目信息
         yield await SSEResponse.send_progress("加载项目信息...", 10)
@@ -1636,37 +1465,11 @@ async def outline_generator(
         if enhanced_world_rules:
             final_world_rules = f"{final_world_rules}\n\n{enhanced_world_rules}"
 
-        # 拆书参考注入（R3）：把已挂载参考包的方法论/结构/世界观/角色塑造拼到 references
-        # 设计文档：@/agent-docs/features/dissect_to_creation_pipeline.md §A.2
-        ref_pack_block = ""
-        try:
-            from app.services.reference_pack_injector import ReferencePackInjector
-            injector = ReferencePackInjector()
-            block = await injector.build_reference_block(
-                db,
-                project_id,
-                scene="story_outline",
-                # R8：用户在前端 ReferencePackSelector 显式指定时优先使用
-                pack_ids=explicit_pack_ids,
-                dimensions=explicit_dimensions,
-                strength=explicit_strength,
-                anchor_query=(
-                    f"{project.theme or ''} {project.genre or ''} "
-                    f"{project.description or ''}"
-                ).strip() or "故事大纲",
-            )
-            if not block.is_empty:
-                ref_pack_block = block.user_segment
-                yield await SSEResponse.send_progress(
-                    f"📚 已注入拆书参考包 {len(block.used_packs)} 个"
-                    f"（{','.join(block.used_dimensions)}）",
-                    33,
-                )
-        except ValueError:
-            # 项目未挂载参考包 / 全部未就绪 → 优雅跳过，不影响主流程
-            pass
-        except Exception as e:  # pragma: no cover - 防御性兜底
-            logger.warning(f"[R3-故事大纲] 拆书参考注入失败（已跳过）: {e}")
+        # 仿写参考：对标书的全书骨架 / 写法手册 / 结构统计（去名版）
+        _kb = await traced_kb_context(db, project_id, "story_outline")
+        ref_pack_block = _kb.text
+        if _kb.text:
+            yield await SSEResponse.send_progress(f"📚 已注入仿写参考《{_kb.source_title}》", 33)
 
         # 合并 MCP 与拆书参考（保持 MCP 在前，拆书参考紧随其后）；整体当引用数据，其中的指令不执行
         combined_references = mcp_reference_materials or ""
@@ -1886,9 +1689,10 @@ async def cleanup_wizard_generator(
     user_id: str,
     db: AsyncSession
 ) -> AsyncGenerator[str, None]:
-    """清理向导数据生成器 - 删除项目的角色、大纲、章节和记忆"""
+    """清理向导数据生成器 - 删除项目的角色、大纲、章节和故事账本（分析记录 / 档案 / 伏笔 / 状态 / 时间轴）"""
+    from app.models.chapter_digest import ChapterDigest
+    from app.services.chapter_purge_service import purge_project_ledger
     from app.services.memory_service import memory_service
-    from app.models.memory import StoryMemory
     
     try:
         yield await SSEResponse.send_progress("开始清理向导数据...", 10)
@@ -1941,33 +1745,23 @@ async def cleanup_wizard_generator(
         chapters = chapters_result.scalars().all()
         chapters_count = len(chapters)
         
-        # 统计记忆
-        memories_result = await db.execute(
-            select(StoryMemory).where(StoryMemory.project_id == project_id)
-        )
-        memories = memories_result.scalars().all()
-        memories_count = len(memories)
+        # 统计章节档案（故事账本的地基）
+        memories_count = len((await db.execute(
+            select(ChapterDigest.id).where(ChapterDigest.project_id == project_id)
+        )).all())
         
         yield await SSEResponse.send_progress(
             f"找到 {characters_count} 个角色，{outlines_count} 个大纲，{volumes_count} 卷卷纲，{chapter_outlines_count} 个章纲，{chapters_count} 个章节，{memories_count} 条记忆",
             30
         )
         
-        # 1. 清理记忆数据（关系数据库）
-        if memories_count > 0:
-            yield await SSEResponse.send_progress("清理记忆数据...", 40)
-            for memory in memories:
-                await db.delete(memory)
-            
-            # 清理向量数据库
-            try:
-                await memory_service.delete_project_memories(
-                    user_id=user_id,
-                    project_id=project_id
-                )
-                logger.info(f"✅ 已清理项目{project_id[:8]}的{memories_count}条记忆向量")
-            except Exception as e:
-                logger.warning(f"⚠️ 向量记忆清理失败: {str(e)}")
+        # 1. 清理故事账本（关系库）与检索索引
+        yield await SSEResponse.send_progress("清理故事账本...", 40)
+        await purge_project_ledger(db, project_id)
+        try:
+            await memory_service.delete_project_memories(user_id=user_id, project_id=project_id)
+        except Exception as e:
+            logger.warning(f"⚠️ 检索索引清理失败: {str(e)}")
         
         # 2. 删除章节
         if chapters_count > 0:

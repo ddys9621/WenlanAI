@@ -19,7 +19,7 @@ export interface ManuscriptEditorHandle {
   setContent(text: string): void
   /** 一键排版等整篇改写：可撤销 */
   replaceAll(text: string): void
-  /** 一键仿写：接在末尾（可撤销） */
+  /** 接在末尾（可撤销） */
   appendText(text: string): void
   /** 全部替换：一次可撤销的批量替换 */
   replaceMatches(starts: number[], length: number, insert: string): void

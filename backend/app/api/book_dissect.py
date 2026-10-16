@@ -31,8 +31,8 @@ from app.logger import get_logger
 from app.models.book_dissect_chapter_fact import BookDissectChapterFact
 from app.models.book_dissect_story_arc import BookDissectStoryArc
 from app.models.book_dissect_task import BookDissectTask
-from app.models.project_reference_pack import ProjectReferencePack
 from app.models.reference_pack import ReferencePack
+from app.schemas.reference_pack import ReferencePackDetail
 from app.schemas.book_dissect import (
     BookDissectTaskResponse,
     BookDissectUploadResponse,
@@ -52,6 +52,7 @@ from app.services.book_dissect.extractor_v5 import (
     run_extraction_v5_background,
 )
 from app.services.book_dissect.run_lock import is_run_locked, try_acquire_run_lock
+from app.services.knowledge.kb_import import delete_dissect_source
 from app.user_manager import User
 from app.api.deps import require_login
 
@@ -683,20 +684,18 @@ async def delete_task(
             except OSError as e:
                 logger.warning("拆书：删除磁盘文件失败 path=%s err=%s", path, e)
 
-    # 1. 参考包及其项目挂载（pack 与 task 1:1）
+    # 1. 拆书结果（各维度产物，pack 与 task 1:1）
     pack_result = await db.execute(
         select(ReferencePack.id).where(ReferencePack.task_id == task_id)
     )
     pack_id = pack_result.scalar_one_or_none()
     if pack_id:
-        await db.execute(
-            delete(ProjectReferencePack).where(ProjectReferencePack.pack_id == pack_id)
-        )
         await db.execute(delete(ReferencePack).where(ReferencePack.id == pack_id))
 
     # 2. 抽取数据表：拆书卡 + 剧情单元
     await db.execute(delete(BookDissectChapterFact).where(BookDissectChapterFact.task_id == task_id))
     await db.execute(delete(BookDissectStoryArc).where(BookDissectStoryArc.task_id == task_id))
+    await delete_dissect_source(db, task_id)
 
     # 3. 任务本体
     await db.delete(task)
@@ -706,4 +705,36 @@ async def delete_task(
         user.user_id, task_id, pack_id or "-",
     )
     return {"message": "任务已删除", "task_id": task_id}
+
+
+def _loads_or(raw: Optional[str], default):
+    try:
+        return json.loads(raw) if raw else default
+    except (TypeError, ValueError):
+        return default
+
+
+@router.get("/{task_id}/result", response_model=Optional[ReferencePackDetail],
+            summary="拆书结果（全书骨架 / 文风 / 人物 / 写法 / 结构）；还没拆完返回 null")
+async def get_result(task_id: str, user: User = Depends(require_login), db: AsyncSession = Depends(get_db)):
+    task = (await db.execute(
+        select(BookDissectTask.id).where(BookDissectTask.id == task_id, BookDissectTask.user_id == user.user_id)
+    )).scalar_one_or_none()
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在或无权访问")
+    pack = (await db.execute(
+        select(ReferencePack).where(ReferencePack.task_id == task_id, ReferencePack.user_id == user.user_id)
+    )).scalar_one_or_none()
+    if pack is None:
+        return None
+    dims = _loads_or(pack.generated_dimensions, [])
+    return ReferencePackDetail(
+        id=pack.id, user_id=pack.user_id, task_id=pack.task_id, source_book_title=pack.source_book_title,
+        status=pack.status, generated_dimensions=dims if isinstance(dims, list) else [],
+        pipeline_version=pack.pipeline_version or 5, error_message=pack.error_message,
+        synopsis=_loads_or(pack.synopsis_json, None), bridges=_loads_or(pack.bridges_json, None),
+        style=_loads_or(pack.style_json, None), character_archive=_loads_or(pack.character_archive_json, None),
+        methodology=_loads_or(pack.methodology_json, None), structure=_loads_or(pack.structure_json, None),
+        created_at=pack.created_at, updated_at=pack.updated_at,
+    )
 

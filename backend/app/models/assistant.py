@@ -5,6 +5,8 @@
 - AssistantRun：处理一条作者要求的一次运行（可多步调用工具；需要作者决定时暂停等待回答）
 - AssistantFieldCandidate：对某一项内容的修改候选（记下修改前 / 修改后；作者应用才写入，可撤销）
 - AssistantTeamSetting：共创室成员的模型设置（每个项目每位成员一行；没有行 = 跟随项目模型）
+- AssistantContextSetting：共创室的上下文上限（每个项目一行；没有行 / 空 = 自动按模型查窗口）
+- AssistantSessionSummary：对话的前情摘要（装不下的较早对话由模型压成一段，覆盖到某条消息为止）
 """
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 
@@ -88,4 +90,23 @@ class AssistantTeamSetting(Base):
     project_id = Column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
     member_id = Column(String(40), nullable=False, comment="共创室成员 ID：editor / world / character / outline / chapter / writer / reviewer")
     model = Column(String(100), nullable=True, comment="该成员用的模型；空 = 跟随项目模型")
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class AssistantContextSetting(Base):
+    __tablename__ = "assistant_context_settings"
+
+    project_id = Column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
+    context_window = Column(Integer, nullable=True, comment="上下文上限（token）；空 = 自动按成员用的模型查窗口")
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class AssistantSessionSummary(Base):
+    __tablename__ = "assistant_session_summaries"
+
+    session_id = Column(String(36), ForeignKey("assistant_sessions.id", ondelete="CASCADE"), primary_key=True)
+    project_id = Column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    summary = Column(Text, nullable=False, default="")
+    covered_until_id = Column(String(36), nullable=False, comment="摘要覆盖到的最后一条消息")
+    covered_count = Column(Integer, nullable=False, default=0, comment="摘要覆盖了对话开头的多少条消息")
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)

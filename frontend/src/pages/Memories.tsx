@@ -1,387 +1,191 @@
-import { useEffect, useState, useCallback } from 'react'
-import {
-  Brain, Search, Loader2, Trash2, BookOpen, Eye,
-  BarChart3, Filter, RefreshCw,
-} from 'lucide-react'
+/**
+ * 故事账本（原「记忆系统」）：章节分析沉淀下来、写正文时按需召回的东西，作者都能看、能改。
+ * 伏笔 / 承诺 · 人物状态 · 章节档案 · 时间线 / 因果 · 召回预览；顶部是分析进度、伏笔提醒与检索索引状态。
+ */
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { BookMarked, Clock3, Database, Eye, Layers, Loader2, RefreshCw, Sparkles, UserRound } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 import { useStore } from '@/store/index'
-import { memoryApi } from '@/services/api'
+import { useChapterSync } from '@/store/hooks'
+import { useAIJobsStore } from '@/store/aiJobsStore'
+import { ledgerApi } from '@/services/api'
+import { PromisesTab } from '@/components/ledger/PromisesTab'
+import { CharactersTab } from '@/components/ledger/CharactersTab'
+import { DigestsTab } from '@/components/ledger/DigestsTab'
+import { TimelineTab } from '@/components/ledger/TimelineTab'
+import { RecallTab } from '@/components/ledger/RecallTab'
+import { BatchAnalyzeModal } from '@/components/ledger/BatchAnalyzeModal'
+import type { BatchAnalyzeRequest, BatchAnalyzeResult, LedgerOverview } from '@/types/ledger'
 
-type TabKey = 'memories' | 'foreshadows' | 'stats'
+type TabKey = 'promises' | 'characters' | 'digests' | 'timeline' | 'recall'
 
 const TABS: { key: TabKey; label: string; icon: React.ElementType }[] = [
-  { key: 'memories', label: '记忆列表', icon: Brain },
-  { key: 'foreshadows', label: '伏笔追踪', icon: Eye },
-  { key: 'stats', label: '统计总览', icon: BarChart3 },
+  { key: 'promises', label: '伏笔 / 承诺', icon: Sparkles },
+  { key: 'characters', label: '人物状态', icon: UserRound },
+  { key: 'digests', label: '章节档案', icon: BookMarked },
+  { key: 'timeline', label: '时间线 / 因果', icon: Clock3 },
+  { key: 'recall', label: '召回预览', icon: Eye },
 ]
 
-const MEMORY_TYPES = ['全部', 'hook', 'foreshadow', 'plot_point', 'character_state', 'scene', 'emotion']
-const STAT_LABELS: Record<string, string> = {
-  total_count: '记忆总数',
-  foreshadow_count: '伏笔数量',
-  foreshadow_resolved: '已回收伏笔',
-  by_type: '按类型统计',
-  by_chapter: '按章节统计',
-}
-const MEMORY_TYPE_LABELS: Record<string, string> = {
-  hook: '钩子',
-  foreshadow: '伏笔',
-  plot_point: '情节点',
-  character_state: '角色状态',
-  scene: '场景',
-  emotion: '情绪',
-  unknown: '未知类型',
+function Stat({ label, value, tone }: { label: string; value: number | string; tone?: 'red' | 'gold' | 'green' }) {
+  return (
+    <div className="min-w-[72px]">
+      <p className="text-[11px] text-content-tertiary">{label}</p>
+      <p className={cn('text-lg font-semibold tabular-nums text-content', tone === 'red' && 'text-red-600', tone === 'gold' && 'text-amber-600', tone === 'green' && 'text-emerald-600')}>{value}</p>
+    </div>
+  )
 }
 
 export default function MemoriesPage() {
-  const { currentProject, chapters } = useStore()
+  const { currentProject, characters } = useStore()
+  const { refreshChapters } = useChapterSync()
   const projectId = currentProject?.id
-  const [activeTab, setActiveTab] = useState<TabKey>('memories')
+  const [activeTab, setActiveTab] = useState<TabKey>('promises')
+  const [overview, setOverview] = useState<LedgerOverview | null>(null)
+  const [showBatch, setShowBatch] = useState(false)
+  const [version, setVersion] = useState(0)
+
+  const loadOverview = useCallback(async () => {
+    if (!projectId) return
+    try {
+      setOverview(await ledgerApi.overview(projectId))
+    } catch {
+      setOverview(null)
+    }
+  }, [projectId])
+
+  useEffect(() => { void loadOverview() }, [loadOverview])
+
+  const characterNames = useMemo(
+    () => characters.filter((c) => !c.is_organization).map((c) => c.name),
+    [characters],
+  )
 
   if (!projectId) return <div className="py-12 text-center text-sm text-content-secondary">请先选择项目</div>
 
+  const latest = overview?.latest_chapter ?? 0
+  const refreshAll = () => {
+    void loadOverview()
+    setVersion((v) => v + 1)
+  }
+
+  const startBatch = async (request: BatchAnalyzeRequest) => {
+    setShowBatch(false)
+    try {
+      await useAIJobsStore.getState().start<BatchAnalyzeResult>({
+        kind: 'chapter_analyze_batch',
+        title: `按章序分析第 ${request.from_chapter}-${request.to_chapter} 章`,
+        projectId,
+        meta: { ...request },
+        connect: (options) => ledgerApi.analyzeBatchStream(projectId, request, options),
+        onSettled: (job) => {
+          const result = job.result as BatchAnalyzeResult | null
+          if (job.status === 'done' && result) {
+            if (result.failed.length > 0) toast.warning(result.message)
+            else toast.success(result.message)
+          }
+          void refreshChapters()
+          refreshAll()
+        },
+      })
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '批量分析启动失败')
+    }
+  }
+
+  const rebuildIndex = async () => {
+    try {
+      await useAIJobsStore.getState().start<{ count: number }>({
+        kind: 'memory_index_rebuild',
+        title: '重建检索索引',
+        projectId,
+        connect: (options) => ledgerApi.rebuildIndexStream(projectId, options),
+        onSettled: (job) => {
+          if (job.status === 'done') toast.success(`检索索引已重建：${(job.result as { count?: number } | null)?.count ?? 0} 条`)
+          void loadOverview()
+        },
+      })
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '重建启动失败')
+    }
+  }
+
+  const chaptersStat = overview?.chapters
+  const promiseStat = overview?.promises
+  const index = overview?.index
+
   return (
-    <div className="animate-fade-in space-y-6">
+    <div className="animate-fade-in space-y-5">
       <section className="lj-page-header">
         <div className="min-w-0">
-          <h1 className="lj-page-title">记忆系统</h1>
-          <p className="mt-2 max-w-[560px] text-sm leading-6 text-content-secondary">
-            章节分析后自动沉淀的钩子、伏笔、情节点与角色状态，供后续生成时检索引用。
+          <h1 className="lj-page-title">故事账本</h1>
+          <p className="mt-2 max-w-[640px] text-sm leading-6 text-content-secondary">
+            章节分析记下的伏笔、人物状态、章节档案与时间线。写正文时按「这一章需要什么」召回；记错的地方在这里改，重新分析不会冲掉你的修改。
           </p>
         </div>
-        <div className="inline-flex shrink-0 border border-surface-border bg-white/60 p-1">
-          {TABS.map(tab => (
-            <button
-              key={tab.key}
-              onClick={() => setActiveTab(tab.key)}
-              className={cn(
-                'inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium transition-colors',
-                activeTab === tab.key
-                  ? 'bg-brand text-white'
-                  : 'text-content-secondary hover:text-content'
-              )}
-            >
-              <tab.icon className="h-3.5 w-3.5" />
-              {tab.label}
-            </button>
-          ))}
+        <div className="flex shrink-0 flex-wrap gap-2">
+          <button onClick={() => setShowBatch(true)} className="hh-btn-primary"><Layers className="h-4 w-4" />按章序分析</button>
+          <button onClick={() => void rebuildIndex()} disabled={!index?.available} className="hh-btn-secondary" title={index?.available ? '从账本重新编码写入向量库（不调用大模型）' : '向量模型没有加载'}>
+            <Database className="h-4 w-4" />重建检索索引
+          </button>
         </div>
       </section>
 
-      {activeTab === 'memories' && <MemoriesTab projectId={projectId} chapters={chapters} />}
-      {activeTab === 'foreshadows' && <ForeshadowsTab projectId={projectId} chapters={chapters} />}
-      {activeTab === 'stats' && <StatsTab projectId={projectId} />}
-    </div>
-  )
-}
+      <section className="hh-panel flex flex-wrap items-start gap-x-8 gap-y-3 px-4 py-3">
+        {!overview ? (
+          <span className="flex items-center gap-2 text-xs text-content-tertiary"><Loader2 className="h-4 w-4 animate-spin" />读取中…</span>
+        ) : (
+          <>
+            <div className="flex flex-wrap gap-4">
+              <Stat label="已写章节" value={chaptersStat?.written ?? 0} />
+              <Stat label="已分析" value={chaptersStat?.ok ?? 0} tone="green" />
+              <Stat label="分析过期" value={chaptersStat?.stale ?? 0} tone={chaptersStat?.stale ? 'gold' : undefined} />
+              <Stat label="未分析" value={chaptersStat?.missing ?? 0} tone={chaptersStat?.missing ? 'gold' : undefined} />
+              <Stat label="分析失败" value={chaptersStat?.failed ?? 0} tone={chaptersStat?.failed ? 'red' : undefined} />
+            </div>
+            <div className="flex flex-wrap gap-4">
+              <Stat label="未回收伏笔" value={promiseStat?.active ?? 0} />
+              <Stat label="已超期" value={promiseStat?.overdue ?? 0} tone={promiseStat?.overdue ? 'red' : undefined} />
+              <Stat label="久未提起" value={promiseStat?.dropout ?? 0} tone={promiseStat?.dropout ? 'gold' : undefined} />
+              <Stat label="已回收" value={promiseStat?.resolved ?? 0} tone="green" />
+            </div>
+            <div className="ml-auto text-xs leading-5 text-content-secondary">
+              <p className="flex items-center gap-1.5 font-medium text-content"><Database className="h-3.5 w-3.5" />检索索引</p>
+              {index?.available ? (
+                <>
+                  <p>{index.model ?? '向量模型'} · {index.count} 条</p>
+                  {index.rebuilding && <p className="flex items-center gap-1 text-brand"><RefreshCw className="h-3 w-3 animate-spin" />正在从账本重建…</p>}
+                </>
+              ) : (
+                <p className="text-amber-700">向量模型未加载：召回只按人物 / 关键词匹配</p>
+              )}
+            </div>
+          </>
+        )}
+      </section>
 
-function EmptyPanel({ icon: Icon, title, description }: { icon: React.ElementType; title: string; description?: string }) {
-  return (
-    <section className="hh-panel flex flex-col items-center px-6 py-14 text-center">
-      <span className="flex h-14 w-14 items-center justify-center bg-brand/10 text-brand">
-        <Icon className="h-7 w-7" />
-      </span>
-      <h2 className="mt-5 text-xl font-semibold tracking-tight text-content">{title}</h2>
-      {description && <p className="mt-2 max-w-md text-sm leading-6 text-content-secondary">{description}</p>}
-    </section>
-  )
-}
-
-function LoadingPanel() {
-  return (
-    <div className="hh-panel flex items-center justify-center gap-2 py-16 text-sm text-content-secondary">
-      <Loader2 className="h-5 w-5 animate-spin text-brand" />
-      加载中…
-    </div>
-  )
-}
-
-/* ─── Tab 1: 记忆列表 ─── */
-
-function MemoriesTab({ projectId, chapters }: { projectId: string; chapters: Array<{ id: string; title: string; chapter_number: number }> }) {
-  const [memories, setMemories] = useState<Array<Record<string, unknown>>>([])
-  const [total, setTotal] = useState(0)
-  const [loading, setLoading] = useState(false)
-  const [typeFilter, setTypeFilter] = useState('全部')
-  const [searchQuery, setSearchQuery] = useState('')
-  const [searching, setSearching] = useState(false)
-
-  const loadMemories = useCallback(async () => {
-    setLoading(true)
-    try {
-      const params: Record<string, unknown> = { limit: 100 }
-      if (typeFilter !== '全部') params.memory_type = typeFilter
-      const res = await memoryApi.getProjectMemories(projectId, params as { memory_type?: string; limit?: number })
-      setMemories(res.memories || [])
-      setTotal(res.total || 0)
-    } catch {
-      toast.error('加载记忆失败')
-    } finally {
-      setLoading(false)
-    }
-  }, [projectId, typeFilter])
-
-  useEffect(() => { loadMemories() }, [loadMemories])
-
-  const handleSearch = async () => {
-    if (!searchQuery.trim()) { loadMemories(); return }
-    setSearching(true)
-    try {
-      const res = await memoryApi.searchMemories(projectId, { query: searchQuery, limit: 50 })
-      setMemories(res.memories || [])
-      setTotal(res.total || 0)
-    } catch {
-      toast.error('搜索失败')
-    } finally {
-      setSearching(false)
-    }
-  }
-
-  const handleDeleteChapterMemories = async (chapterId: string) => {
-    if (!confirm('确定删除该章节的所有记忆？')) return
-    try {
-      await memoryApi.deleteChapterMemories(projectId, chapterId)
-      toast.success('已删除')
-      loadMemories()
-    } catch {
-      toast.error('删除失败')
-    }
-  }
-
-  return (
-    <div className="space-y-4">
-      {/* 搜索与筛选 */}
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="flex min-w-[240px] flex-1 gap-2">
-          <input
-            value={searchQuery}
-            onChange={e => setSearchQuery(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && handleSearch()}
-            placeholder="语义搜索记忆…"
-            className="hh-field flex-1"
-          />
-          <button onClick={handleSearch} disabled={searching} className="hh-btn-secondary shrink-0">
-            {searching ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
-            搜索
+      <div className="inline-flex flex-wrap border border-surface-border bg-white/60 p-1">
+        {TABS.map((tab) => (
+          <button
+            key={tab.key}
+            onClick={() => setActiveTab(tab.key)}
+            className={cn('inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium transition-colors',
+              activeTab === tab.key ? 'bg-brand text-white' : 'text-content-secondary hover:text-content')}
+          >
+            <tab.icon className="h-3.5 w-3.5" />
+            {tab.label}
           </button>
-        </div>
-        <div className="flex items-center gap-2">
-          <Filter className="h-4 w-4 text-content-tertiary" />
-          <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)} className="hh-field w-auto pr-8">
-            {MEMORY_TYPES.map(t => <option key={t} value={t}>{t === '全部' ? '全部类型' : (MEMORY_TYPE_LABELS[t] ?? t)}</option>)}
-          </select>
-        </div>
-        <button onClick={loadMemories} className="hh-icon-btn h-11 w-11" title="刷新" aria-label="刷新">
-          <RefreshCw className={cn('h-4 w-4', loading && 'animate-spin')} />
-        </button>
-        <span className="ml-auto text-xs text-content-tertiary tabular-nums">共 {total} 条记忆</span>
+        ))}
       </div>
 
-      {loading ? (
-        <LoadingPanel />
-      ) : memories.length === 0 ? (
-        <EmptyPanel icon={Brain} title="暂无记忆数据" description="先在「章节管理」中生成章节并执行分析，记忆会自动沉淀到这里。" />
-      ) : (
-        <section className="hh-panel divide-y divide-surface-border/80 overflow-hidden">
-          {memories.map((mem, i) => (
-            <div key={(mem.id as string) || i} className="px-5 py-4 transition-colors hover:bg-brand/[0.04]">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    {Boolean(mem.memory_type) && (
-                      <span className="hh-tag px-1.5 py-0.5 text-[11px]">{MEMORY_TYPE_LABELS[String(mem.memory_type)] ?? String(mem.memory_type)}</span>
-                    )}
-                    {Boolean(mem.title) && <h3 className="truncate text-sm font-semibold text-content">{String(mem.title)}</h3>}
-                    {mem.importance_score != null && <span className="text-xs text-content-tertiary tabular-nums">重要度 {String(mem.importance_score)}</span>}
-                  </div>
-                  {Boolean(mem.content) && <p className="mt-1.5 line-clamp-3 whitespace-pre-wrap text-[13px] leading-6 text-content-secondary">{String(mem.content)}</p>}
-                  <div className="mt-2 flex items-center gap-3 text-xs text-content-tertiary">
-                    {mem.story_timeline != null && <span>时间线：第 {String(mem.story_timeline)} 章</span>}
-                    {Boolean(mem.chapter_id) && (
-                      <span>章节：{chapters.find(c => c.id === mem.chapter_id)?.title || String(mem.chapter_id).slice(0, 8)}</span>
-                    )}
-                  </div>
-                </div>
-                {Boolean(mem.chapter_id) && (
-                  <button
-                    onClick={() => handleDeleteChapterMemories(mem.chapter_id as string)}
-                    title="删除该章节所有记忆"
-                    aria-label="删除该章节所有记忆"
-                    className="hh-icon-btn-plain h-8 w-8 shrink-0 hover:text-red-500"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                )}
-              </div>
-            </div>
-          ))}
-        </section>
-      )}
+      {activeTab === 'promises' && <PromisesTab key={version} projectId={projectId} latestChapter={latest} onChanged={() => void loadOverview()} />}
+      {activeTab === 'characters' && <CharactersTab key={`${version}-${latest}`} projectId={projectId} latestChapter={latest} />}
+      {activeTab === 'digests' && <DigestsTab projectId={projectId} version={version} />}
+      {activeTab === 'timeline' && <TimelineTab key={version} projectId={projectId} characterNames={characterNames} />}
+      {activeTab === 'recall' && <RecallTab key={latest} projectId={projectId} latestChapter={latest} />}
+
+      <BatchAnalyzeModal open={showBatch} latestChapter={latest} onClose={() => setShowBatch(false)} onStart={(r) => void startBatch(r)} />
     </div>
   )
-}
-
-/* ─── Tab 2: 伏笔追踪 ─── */
-
-function ForeshadowsTab({ projectId, chapters }: { projectId: string; chapters: Array<{ id: string; title: string; chapter_number: number }> }) {
-  const [foreshadows, setForeshadows] = useState<Array<Record<string, unknown>>>([])
-  const [loading, setLoading] = useState(false)
-  const [currentChapter, setCurrentChapter] = useState(() => {
-    const max = chapters.reduce((m, c) => Math.max(m, c.chapter_number), 0)
-    return max || 1
-  })
-
-  const loadForeshadows = useCallback(async () => {
-    setLoading(true)
-    try {
-      const res = await memoryApi.getForeshadows(projectId, currentChapter)
-      setForeshadows(res.foreshadows || [])
-    } catch {
-      toast.error('加载伏笔失败')
-    } finally {
-      setLoading(false)
-    }
-  }, [projectId, currentChapter])
-
-  useEffect(() => { loadForeshadows() }, [loadForeshadows])
-
-  return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-3">
-        <label className="text-sm text-content-secondary">截至章节</label>
-        <input
-          type="number"
-          min={1}
-          value={currentChapter}
-          onChange={e => setCurrentChapter(Number(e.target.value))}
-          className="hh-field w-28"
-        />
-        <button onClick={loadForeshadows} className="hh-btn-secondary">
-          <RefreshCw className={cn('h-4 w-4', loading && 'animate-spin')} />
-          查询
-        </button>
-        <span className="ml-auto text-xs text-content-tertiary tabular-nums">{foreshadows.length} 条未解决伏笔</span>
-      </div>
-
-      {loading ? (
-        <LoadingPanel />
-      ) : foreshadows.length === 0 ? (
-        <EmptyPanel icon={Eye} title={`截至第 ${currentChapter} 章，暂无未解决伏笔`} />
-      ) : (
-        <section className="hh-panel divide-y divide-surface-border/80 overflow-hidden">
-          {foreshadows.map((f, i) => (
-            <div key={i} className="flex items-start gap-3 px-5 py-4 transition-colors hover:bg-brand/[0.04]">
-              <span className="flex h-9 w-9 shrink-0 items-center justify-center bg-brand/10 text-brand">
-                <Eye className="h-4 w-4" />
-              </span>
-              <div className="min-w-0 flex-1">
-                {Boolean(f.title) && <h3 className="text-sm font-semibold text-content">{String(f.title)}</h3>}
-                {Boolean(f.content) && <p className="mt-1 whitespace-pre-wrap text-[13px] leading-6 text-content-secondary">{String(f.content)}</p>}
-                <div className="mt-2 flex items-center gap-3 text-xs text-content-tertiary">
-                  {f.story_timeline != null && <span>埋设于第 {String(f.story_timeline)} 章</span>}
-                  {f.importance_score != null && <span className="tabular-nums">重要度 {String(f.importance_score)}</span>}
-                </div>
-              </div>
-            </div>
-          ))}
-        </section>
-      )}
-    </div>
-  )
-}
-
-/* ─── Tab 3: 统计总览 ─── */
-
-function StatsTab({ projectId }: { projectId: string }) {
-  const [stats, setStats] = useState<Record<string, unknown> | null>(null)
-  const [loading, setLoading] = useState(false)
-
-  useEffect(() => {
-    setLoading(true)
-    memoryApi.getStats(projectId)
-      .then(res => setStats(res.stats || {}))
-      .catch(() => toast.error('加载统计失败'))
-      .finally(() => setLoading(false))
-  }, [projectId])
-
-  if (loading) return <LoadingPanel />
-  if (!stats) return <EmptyPanel icon={BarChart3} title="暂无统计数据" />
-
-  const entries = Object.entries(stats)
-  const scalarEntries = getScalarEntries(stats)
-  const groupedEntries = getGroupedEntries(stats)
-
-  if (typeof stats.error === 'string') {
-    return <EmptyPanel icon={BarChart3} title="暂无统计数据" description={stats.error} />
-  }
-
-  return (
-    <div className="space-y-4">
-      {scalarEntries.length > 0 && (
-        <section className={cn('hh-panel grid grid-cols-2 divide-surface-border/80 md:divide-x', scalarEntries.length >= 4 ? 'md:grid-cols-4' : 'md:grid-cols-3')}>
-          {scalarEntries.map(([key, value]) => (
-            <div key={key} className="px-5 py-4 md:px-6">
-              <p className="text-xs text-content-tertiary">{STAT_LABELS[key] ?? key}</p>
-              <p className="mt-1 text-2xl font-semibold tracking-tight text-content tabular-nums">{value}</p>
-            </div>
-          ))}
-        </section>
-      )}
-      {groupedEntries.length > 0 && (
-        <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-          {groupedEntries.map(([key, value]) => {
-            const items = formatCountMap(key, value)
-            return (
-              <section key={key} className="hh-panel p-6">
-                <div className="mb-4 flex items-center justify-between gap-3">
-                  <h3 className="text-lg font-semibold tracking-tight text-content">{STAT_LABELS[key] ?? key}</h3>
-                  <span className="text-xs text-content-tertiary tabular-nums">{items.length} 项</span>
-                </div>
-                {items.length === 0 ? (
-                  <p className="text-sm text-content-tertiary">暂无数据</p>
-                ) : (
-                  <div className="divide-y divide-surface-border/80">
-                    {items.map(([label, count]) => (
-                      <div key={label} className="flex items-center justify-between gap-4 py-2 text-sm">
-                        <span className="truncate text-content-secondary">{label}</span>
-                        <span className="shrink-0 font-semibold text-content tabular-nums">{count}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </section>
-            )
-          })}
-        </div>
-      )}
-      {entries.length === 0 && (
-        <EmptyPanel icon={BookOpen} title="暂无统计数据" description="先分析章节以生成记忆，统计会自动汇总到这里。" />
-      )}
-    </div>
-  )
-}
-
-function isCountMap(value: unknown): value is Record<string, number> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function getScalarEntries(stats: Record<string, unknown>) {
-  return Object.entries(stats).filter((entry): entry is [string, number] => typeof entry[1] === 'number')
-}
-
-function getGroupedEntries(stats: Record<string, unknown>) {
-  return Object.entries(stats).filter((entry): entry is [string, Record<string, number>] => isCountMap(entry[1]))
-}
-
-function formatCountMap(section: string, value: Record<string, number>) {
-  const entries = Object.entries(value)
-
-  if (section === 'by_chapter') {
-    return entries.sort((a, b) => Number(a[0]) - Number(b[0])).map(([chapter, count]) => [`第 ${chapter} 章`, count] as const)
-  }
-
-  return entries
-    .sort((a, b) => b[1] - a[1])
-    .map(([label, count]) => [MEMORY_TYPE_LABELS[label] ?? label, count] as const)
 }

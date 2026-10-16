@@ -224,7 +224,7 @@ export function BookDissectExtractionModal({
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
               <p>
                 {task.stage === 'done'
-                  ? '本任务已抽取过：重新抽取会覆盖现有抽取数据并更新参考包。'
+                  ? '本任务已抽取过：重新抽取会覆盖现有抽取数据，并更新拆书结果和知识库条目（你改过的条目不覆盖）。'
                   : `上次抽取${task.status === 'cancelled' ? '被手动停止' : '未完成'}（已抽 ${task.chapters_extracted ?? 0} 章）：重新抽取会从头开始并覆盖这些数据。`}
               </p>
             </div>

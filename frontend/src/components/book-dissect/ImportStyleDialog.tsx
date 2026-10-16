@@ -1,6 +1,6 @@
 /**
- * 文风导入对话框：把参考包的 style 拷贝到指定项目的写作风格库
- *（原 pages/ReferencePackDetail.tsx 内联组件，V5 起拆书任务页与参考包详情页共用）
+ * 文风导入对话框：把拆书结果的 style 拷贝到指定项目的写作风格库
+ *（拆书任务页使用）
  */
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
@@ -59,7 +59,7 @@ export function ImportStyleDialog({
       return
     }
     if (!style.prompt_content) {
-      toast.error('该参考包文风缺少 prompt_content，无法导入')
+      toast.error('这本书的文风缺少写作指令（prompt_content），无法导入')
       return
     }
     setSubmitting(true)

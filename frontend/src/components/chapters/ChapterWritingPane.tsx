@@ -10,13 +10,12 @@ import {
 } from 'react'
 import {
   AlertTriangle, AlignLeft, Check, Copy, Crosshair, Highlighter, History, LayoutTemplate, Loader2, Maximize2, Minimize2,
-  MoreHorizontal, Redo2, Save, Search, Sparkles, Undo2, Wand2,
+  MoreHorizontal, Redo2, Save, Search, Sparkles, Undo2,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 import { chapterApi } from '@/services/api'
 import { useChapterAutosave } from '@/hooks/useChapterAutosave'
-import { ImitationDialog } from '@/components/ImitationDialog'
 import type { CompletionFetcher, CompletionStatus } from '@/editor/inlineSuggestion'
 import { DEFAULT_EDITOR_PREFS, EDITOR_FONT_CSS, loadEditorPrefs, saveEditorPrefs, type EditorPrefs } from '@/utils/editorPrefs'
 import { countParagraphs, countWords, formatParagraphs } from '@/utils/manuscript'
@@ -54,7 +53,7 @@ function clock(date: Date) {
 }
 
 export const ChapterWritingPane = forwardRef<ChapterWritingPaneHandle, ChapterWritingPaneProps>(function ChapterWritingPane(props, ref) {
-  const { chapter, projectId } = props
+  const { chapter } = props
   const editorRef = useRef<ManuscriptEditorHandle>(null)
   const callbacks = useRef(props)
   callbacks.current = props
@@ -71,7 +70,6 @@ export const ChapterWritingPane = forwardRef<ChapterWritingPaneHandle, ChapterWr
   const [layoutOpen, setLayoutOpen] = useState(false)
   const [moreOpen, setMoreOpen] = useState(false)
   const [readMode, setReadMode] = useState(false)
-  const [imitationOpen, setImitationOpen] = useState(false)
   const [titleDraft, setTitleDraft] = useState(chapter.title)
   const [sessionStart, setSessionStart] = useState(() => countWords(chapter.content ?? ''))
 
@@ -414,9 +412,6 @@ export const ChapterWritingPane = forwardRef<ChapterWritingPaneHandle, ChapterWr
           </button>
           {moreOpen && (
             <div className="absolute bottom-full right-0 z-30 mb-1.5 grid w-40 gap-0.5 rounded border border-surface-border bg-white p-1 shadow-lg" onMouseLeave={() => setMoreOpen(false)}>
-              <button onClick={() => { setMoreOpen(false); setImitationOpen(true) }} className="lj-tool w-full justify-start" title="从已挂载的仿写参考包生成草稿，追加到正文末尾">
-                <Wand2 className="h-4 w-4" />一键仿写
-              </button>
               <button onClick={() => void copy(`第${chapter.chapter_number}章 ${titleDraft}`, '章节标题')} className="lj-tool w-full justify-start">
                 <Copy className="h-4 w-4" />复制标题
               </button>
@@ -439,15 +434,6 @@ export const ChapterWritingPane = forwardRef<ChapterWritingPaneHandle, ChapterWr
           </button>
         </div>
       </footer>
-
-      <ImitationDialog
-        isOpen={imitationOpen}
-        projectId={projectId}
-        targetChapterId={chapter.id}
-        targetChapterTitle={titleDraft || '未命名章节'}
-        onClose={() => setImitationOpen(false)}
-        onApply={(draft) => editorRef.current?.appendText(draft)}
-      />
     </section>
   )
 })

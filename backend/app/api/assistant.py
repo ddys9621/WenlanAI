@@ -1,20 +1,27 @@
-"""全局智能助笔接口（参考岚笺 GlobalAssistantHost）：对话 / 发送前核对 / 作者回答 / 任务记录 / 字段候选 / 核对清单。
+"""全局智能助笔接口（参考岚笺 GlobalAssistantHost）：对话 / 发送前核对 / 作者回答 / 任务记录 / 字段候选 / 核对清单 /
+团队与上下文设置。
 
-一个项目一段可续接的对话；每条要求在后台任务里运行（SSE 推进度、处理记录、流式回复）；修改只产生候选。
+一个项目一段可续接的对话；每条要求在后台任务里运行（SSE 推进度、处理记录、流式回复、上下文用量）；修改只产生候选。
 """
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.ai_jobs import job_sse_response
 from app.api.deps import verify_request_project
-from app.api.settings import get_user_ai_service
+from app.api.settings import get_user_ai_service, load_or_create_settings
 from app.database import get_db
 from app.models.assistant import AssistantFieldCandidate, AssistantMessage, AssistantRun, AssistantSession, AssistantTeamSetting
-from app.schemas.assistant import AssistantAnswerRequest, AssistantSendRequest, AssistantTeamModelRequest
+from app.schemas.assistant import (
+    AssistantAnswerRequest, AssistantContextRequest, AssistantPage, AssistantSendRequest, AssistantTeamModelRequest,
+)
 from app.services import assistant_agent_service as agent
 from app.services import assistant_candidate_service as cands
+from app.services import assistant_context as budgeting
 from app.services import cocreation_team as team
+from app.services.project_ai_preference import load_project_ai_preference, resolve_override_values
 from app.services.story_progress import progress_snapshot
 from app.services.ai_jobs import AIJobConflictError, ai_jobs, job_session_factory
 from app.services.ai_service import AIService
@@ -148,10 +155,29 @@ async def answer_stream(
     return job_sse_response(job)
 
 
-@router.post("/preview", summary="发送前核对：本次会发给模型的内容（不调用模型）")
+async def _project_defaults(db: AsyncSession, project_id: str, request: Request) -> tuple[Optional[str], Optional[int]]:
+    """项目实际用的模型与 max_tokens（全局设置 + 本项目 AI 偏好，与 get_user_ai_service 同一来源，但不建 AI 客户端）。"""
+    user_id = getattr(request.state, "user_id", None)
+    if not user_id:
+        return None, None
+    values = resolve_override_values(await load_or_create_settings(db, user_id),
+                                     await load_project_ai_preference(db, project_id, user_id))
+    return values.get("llm_model"), values.get("max_tokens")
+
+
+@router.post("/preview", summary="发送前核对：本次会发给模型的内容与上下文用量（不调用模型）")
 async def preview_context(project_id: str, body: AssistantSendRequest, request: Request, db: AsyncSession = Depends(get_db)):
     await verify_request_project(request, project_id, db)
-    return await agent.preview(db, project_id, body.message, body.page.model_dump())
+    model, max_tokens = await _project_defaults(db, project_id, request)
+    return await agent.preview(db, project_id, body.message, body.page.model_dump(), default_model=model,
+                               max_tokens=max_tokens)
+
+
+@router.post("/context/usage", summary="上下文用量：下一条要求开跑时大约占多少（估算，不调用模型）")
+async def context_usage(project_id: str, body: AssistantPage, request: Request, db: AsyncSession = Depends(get_db)):
+    await verify_request_project(request, project_id, db)
+    model, max_tokens = await _project_defaults(db, project_id, request)
+    return await agent.estimate_usage(db, project_id, body.model_dump(), default_model=model, max_tokens=max_tokens)
 
 
 @router.get("/runs", summary="任务记录（进行中 / 等待回答的排在前面）")
@@ -220,15 +246,38 @@ async def project_checks(project_id: str, request: Request, db: AsyncSession = D
     return await compute_checks(db, project_id)
 
 
-async def _team_payload(db: AsyncSession, project_id: str) -> dict:
+async def _team_payload(db: AsyncSession, project_id: str, request: Request) -> dict:
     models = await agent.team_models(db, project_id)
-    return {"members": [team.member_view(m, models.get(m.id)) for m in team.MEMBERS], "starters": list(team.STARTERS)}
+    setting = await agent.context_setting(db, project_id)
+    default_model, _max_tokens = await _project_defaults(db, project_id, request)
+
+    def window(member_id: str, value: Optional[int] = setting) -> budgeting.Window:
+        return budgeting.resolve_window(value, models.get(member_id) or default_model)
+
+    editor, auto = window(team.DEFAULT_MEMBER), window(team.DEFAULT_MEMBER, None)
+    return {
+        "members": [{**team.member_view(m, models.get(m.id)), "context_window": window(m.id).tokens} for m in team.MEMBERS],
+        "starters": list(team.STARTERS),
+        "context": {
+            "setting": setting, "window": editor.tokens, "source": editor.source, "model": editor.model,
+            "auto": auto.tokens, "auto_source": auto.source, "presets": list(budgeting.PRESETS),
+            "min": budgeting.MIN_WINDOW, "max": budgeting.MAX_WINDOW,
+        },
+    }
 
 
-@router.get("/team", summary="共创室：成员（职责 / 模型）与开场引导")
+@router.get("/team", summary="共创室：成员（职责 / 模型 / 上下文上限）、上下文设置与开场引导")
 async def get_team(project_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     await verify_request_project(request, project_id, db)
-    return await _team_payload(db, project_id)
+    return await _team_payload(db, project_id, request)
+
+
+@router.put("/context", summary="共创室：设置上下文上限（token；空 = 自动按成员用的模型查窗口）")
+async def set_context_window(project_id: str, body: AssistantContextRequest, request: Request,
+                             db: AsyncSession = Depends(get_db)):
+    await verify_request_project(request, project_id, db)
+    await agent.save_context_setting(db, project_id, body.context_window)
+    return await _team_payload(db, project_id, request)
 
 
 @router.put("/team/{member_id}", summary="共创室：设置某位成员用的模型（空 = 跟随项目模型）")
@@ -246,7 +295,7 @@ async def set_member_model(project_id: str, member_id: str, body: AssistantTeamM
     else:
         row.model = model
     await db.commit()
-    return await _team_payload(db, project_id)
+    return await _team_payload(db, project_id, request)
 
 
 @router.get("/progress", summary="创作进度：总纲 / 卷纲 / 章纲 / 正文各到哪一步与建议的下一步")

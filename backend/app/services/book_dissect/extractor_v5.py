@@ -169,11 +169,10 @@ async def run_extraction_v5_background(task_id: str, user_id: str, ai_service: A
         generated = [k for k, v in payload.items() if isinstance(v, dict)]
 
         task.stage = task.extraction_phase = "pack"
-        _set_progress(task, _P_STYLE_END, "写入参考包并预压缩各维度…")
+        _set_progress(task, _P_STYLE_END, "写入拆书结果…")
         await db.commit()
-        pack_stage = begin_stage("pack", "写入参考包")
+        pack_stage = begin_stage("pack", "写入拆书结果")
         pack_id = await _write_reference_pack_v5(db, task, payload, generated)
-        await _precompress(db, pack_id, task_id)
 
         task.result_json = json.dumps({
             "version": PIPELINE_VERSION, "pack_id": pack_id, "generated_dimensions": generated,
@@ -214,6 +213,7 @@ async def run_extraction_v5_background(task_id: str, user_id: str, ai_service: A
     finally:
         if db is not None:
             await db.close()
+    await _import_to_knowledge(task_id, user_id)
 
 
 # ---------------------------------------------------------------------------
@@ -427,14 +427,11 @@ async def _write_reference_pack_v5(db: AsyncSession, task: BookDissectTask, payl
     return pack.id
 
 
-async def _precompress(db: AsyncSession, pack_id: str, task_id: str) -> None:
+async def _import_to_knowledge(task_id: str, user_id: str) -> None:
+    """拆书产物写入知识库（确定性转换，不调模型）。失败只记 warning：打开知识库书架时会自动补导。"""
     try:
-        pack = (await db.execute(select(ReferencePack).where(ReferencePack.id == pack_id))).scalar_one_or_none()
-        if pack is None:
-            return
-        from app.services.reference_pack.dimension_compressor import compress_pack_to_db
-        for field_name, text in compress_pack_to_db(pack).items():
-            setattr(pack, field_name, text)
-        await db.flush()
-    except Exception as exc:  # pragma: no cover - 预压缩失败运行时 fallback
-        logger.warning("[拆书V5] task=%s 预压缩失败（已跳过，运行时实时压缩）：%s", task_id, exc)
+        from app.services.knowledge import kb_import
+        async with await _create_task_session(user_id) as db:
+            await kb_import.import_dissect_task(db, task_id, user_id)
+    except Exception as exc:
+        logger.warning("[拆书V5] task=%s 写入知识库失败（打开知识库时会自动补导）：%s", task_id, exc)

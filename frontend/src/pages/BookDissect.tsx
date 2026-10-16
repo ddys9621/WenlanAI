@@ -16,7 +16,7 @@ import {
   Wand2,
 } from 'lucide-react'
 import { toast } from 'sonner'
-import { bookDissectApi, referencePackApi } from '@/services/api'
+import { bookDissectApi } from '@/services/api'
 import { useAIJobsStore, useRunningAIJobs } from '@/store/aiJobsStore'
 import type { AIJobSummary } from '@/types/ai_job'
 import type {
@@ -42,7 +42,7 @@ const STAGE_LABELS: Record<string, string> = {
   arcs: '划分剧情单元',
   skeleton: '分卷 / 全书骨架 / 写法手册 / 人物功能谱',
   style: '文风指纹',
-  pack: '生成参考包',
+  pack: '写入拆书结果',
   // 通用
   split_done: '已切分，待抽取',
   queued: '排队中',
@@ -498,7 +498,7 @@ function TaskDetail({
   const taskId = task?.id
   const taskStatus = task?.status
 
-  // 参考包详情：CTA 需真实状态（任务完成 ≠ 参考包可用），V5 视图的维度 tab 也直接读它。
+  // 拆书结果：CTA 需真实状态（任务完成 ≠ 结果可用），V5 视图的维度 tab 也直接读它。
   // 任务状态变化（running → completed）时重新拉取，抽取中每次 poll 不重复请求。
   const [pack, setPack] = useState<ReferencePackDetail | null>(null)
   const [packLoading, setPackLoading] = useState(false)
@@ -509,17 +509,12 @@ function TaskDetail({
     if (!taskId || taskStatus === 'pending') return
     let cancelled = false
     setPackLoading(true)
-    referencePackApi
-      .list()
-      .then(async (packs) => {
-        const summary = (packs ?? []).find((p) => p.task_id === taskId) ?? null
+    bookDissectApi
+      .getResult(taskId)
+      .then((detail) => {
         if (cancelled) return
-        if (!summary) {
-          setPackMissing(true)
-          return
-        }
-        const detail = await referencePackApi.get(summary.id)
-        if (!cancelled) setPack(detail)
+        if (detail) setPack(detail)
+        else setPackMissing(true)
       })
       .catch(() => {
         if (!cancelled) setPackMissing(true)
@@ -560,13 +555,13 @@ function TaskDetail({
         onDelete={() => onDelete(task)}
       />
 
-      {/* V3 R6 迁移提示 + V3.2-A 跳转创建项目 CTA（仅参考包就绪时展示，failed 不诱导挂载） */}
+      {/* 拆完的书已收进知识库：引导拿它做对标书（结果失败时不引导） */}
       {isReadyForImitation && packUsable && (
         <div className="flex flex-col gap-3 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100 sm:flex-row sm:items-start">
           <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-emerald-300" />
           <div className="min-w-0 flex-1 space-y-1">
             <p className="font-medium">
-              抽取完成 · 可使用本书作为参考创建项目、或去项目中一键仿写
+              抽取完成 · 已收进知识库，可以拿它做对标书
               {ctaPackStatus === 'partial' && (
                 <span className="ml-2 rounded-pill border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-300">
                   部分维度未生成
@@ -574,17 +569,17 @@ function TaskDetail({
               )}
             </p>
             <p className="text-xs text-emerald-200/80">
-              拆书产物已赋能为参考包（ReferencePack）。下面“创建新项目”会跳转项目创建向导，预选本书参考包，
-              项目创建后会自动挂载该参考包；也可去《参考库》手动挂载到其他已有项目。
+              拆书结果已写成知识库条目（导读、分卷、剧情单元、章卡、人物、写法、文风，每条都有去掉人名的版本）。
+              「以本书做对标创建项目」会在向导里预选它；已有项目可以在项目的「仿写参考」页选它。
             </p>
           </div>
-          {/* V3.2-A：跳转创建项目 + 预选本书，过 wizard 参数 ?wizard=1&pack_task_id=xxx */}
+          {/* 跳转创建项目 + 预选本书做对标：?wizard=1&dissect_task_id=xxx */}
           <Link
-            to={`/projects?wizard=1&pack_task_id=${task.id}`}
+            to={`/projects?wizard=1&dissect_task_id=${task.id}`}
             className="inline-flex shrink-0 items-center gap-1.5 rounded-btn bg-emerald-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-emerald-600"
           >
             <Wand2 className="h-3.5 w-3.5" />
-            以本书作参考创建项目
+            以本书做对标创建项目
           </Link>
         </div>
       )}
@@ -592,8 +587,8 @@ function TaskDetail({
         <div className="flex items-start gap-2 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
           <p className="min-w-0 text-xs leading-6">
-            抽取流程已结束，但参考包生成失败（核心维度缺失或章节抽取覆盖率过低），
-            <strong>暂不可用于挂载/仿写</strong>。可点击右上角「重新抽取」重跑本书。
+            抽取流程已结束，但拆书结果生成失败（核心维度缺失或章节抽取覆盖率过低），
+            <strong>暂不能做对标书</strong>。可点击右上角「重新抽取」重跑本书。
           </p>
         </div>
       )}
@@ -636,7 +631,7 @@ function TaskDetail({
 }
 
 // ============================================================
-// 子组件：抽取进度头（阶段 / 进度 / 章节计数 + 参考包入口）
+// 子组件：抽取进度头（阶段 / 进度 / 章节计数 + 知识库入口）
 // ============================================================
 
 function ProgressHeader({ task, pack }: { task: BookDissectTask; pack: ReferencePackDetail | null }) {
@@ -664,9 +659,9 @@ function ProgressHeader({ task, pack }: { task: BookDissectTask; pack: Reference
         )}
         {task.status === 'running' && <Loader2 className="h-3 w-3 animate-spin text-brand" />}
         {pack && (
-          <Link to={`/reference-packs/${pack.id}`} className="ml-auto inline-flex items-center gap-1 text-brand hover:underline">
+          <Link to="/knowledge" className="ml-auto inline-flex items-center gap-1 text-brand hover:underline">
             <Sparkles className="h-3 w-3" />
-            参考包详情
+            去知识库看
           </Link>
         )}
       </div>

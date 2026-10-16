@@ -53,21 +53,21 @@ async def written_upto(db: AsyncSession, project_id: str) -> int:
 async def actual_progress_block(
     db: AsyncSession, project_id: str, before_chapter: int, *, recent: int = 5, budget: int = 2_400,
 ) -> str:
-    """【📈 实际剧情进展】已写章节的层级摘要 + 最近几章摘要；规划以它为准修正，避免越写越偏。"""
+    """【📈 实际剧情进展】已写章节的层级摘要 + 最近几章档案摘要；规划以它为准修正，避免越写越偏。"""
     from app.models.chapter import Chapter
-    from app.models.memory import StoryMemory
+    from app.models.chapter_digest import ChapterDigest
     from app.services.arc_summary_service import render_story_so_far
 
     if before_chapter <= 1:
         return ""
     story, _covered = await render_story_so_far(db, project_id, before_chapter, budget_chars=budget // 2)
     rows = (await db.execute(
-        select(Chapter.chapter_number, Chapter.title, StoryMemory.content)
-        .join(StoryMemory, StoryMemory.chapter_id == Chapter.id)
+        select(Chapter.chapter_number, Chapter.title, ChapterDigest.summary)
+        .join(ChapterDigest, ChapterDigest.chapter_id == Chapter.id)
         .where(
             Chapter.project_id == project_id,
             Chapter.chapter_number < before_chapter,
-            StoryMemory.memory_type == "chapter_summary",
+            ChapterDigest.summary != "",
         )
         .order_by(Chapter.chapter_number.desc())
         .limit(recent)

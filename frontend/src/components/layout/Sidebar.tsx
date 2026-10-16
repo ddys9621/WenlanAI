@@ -7,7 +7,7 @@ import {
   PanelLeftClose,
   PanelLeft,
   BookOpen,
-  Library,
+  BookMarked,
   ScrollText,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -26,7 +26,7 @@ const navGroups = [
     items: [
       { icon: LayoutGrid, label: '我的项目', path: '/projects' },
       { icon: BookOpen, label: '拆书参考', path: '/book-dissect' },
-      { icon: Library, label: '参考库', path: '/reference-packs' },
+      { icon: BookMarked, label: '知识库', path: '/knowledge' },
       { icon: Settings, label: '设置', path: '/settings' },
       { icon: Puzzle, label: 'MCP 插件', path: '/mcp-plugins' },
     ],

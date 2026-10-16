@@ -8,6 +8,9 @@
   另外每次顺带补几个更早的缺口（项目中途启用本功能时逐步追平）。
 - invalidate_covering：某章被重新分析 / 覆盖后，删掉覆盖它的各级摘要（之后自然重算）。
 - render_story_so_far：「前情脉络」——对每段章节取能覆盖它的最高一级摘要，超预算先压缩最早的。
+  story_so_far_detail 额外给出真正被覆盖的章号集合：中间缺一段（某单元有章没分析、汇总不了）时，
+  调用方据此把空洞里的章补进近期概要，不再按「最大结束章」把它们一并当成已覆盖。
+章节摘要取自章节档案（chapter_digests）。
 """
 from __future__ import annotations
 
@@ -20,9 +23,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.logger import get_logger
 from app.models.arc_summary import ArcSummary
-from app.models.chapter import Chapter
-from app.models.memory import StoryMemory
 from app.models.volume import Volume
+from app.services.chapter_digest_service import digests_by_number
 from app.services.volume_planning import loads_units
 from app.services.context_budget import clip_text
 
@@ -143,16 +145,7 @@ async def resolve_arcs(db: AsyncSession, project_id: str, chapter_number: int) -
 
 
 async def _chapter_summaries(db: AsyncSession, project_id: str) -> dict[int, str]:
-    rows = (await db.execute(
-        select(Chapter.chapter_number, StoryMemory.content)
-        .join(Chapter, Chapter.id == StoryMemory.chapter_id)
-        .where(StoryMemory.project_id == project_id, StoryMemory.memory_type == "chapter_summary")
-    )).all()
-    out: dict[int, str] = {}
-    for number, content in rows:
-        if content:
-            out.setdefault(number, content)
-    return out
+    return {number: row.summary for number, row in (await digests_by_number(db, project_id)).items()}
 
 
 def _signature(parts: list[str]) -> str:
@@ -322,15 +315,22 @@ def _line(row: ArcSummary, content: str) -> str:
     return f"- 第{row.chapter_start}-{row.chapter_end}章{title}：{content}"
 
 
-async def render_story_so_far(
+@dataclass
+class StorySoFar:
+    text: str = ""
+    covered_until: int = 0
+    covered: set[int] = field(default_factory=set)
+
+
+async def story_so_far_detail(
     db: AsyncSession, project_id: str, current_chapter: int, budget_chars: int = 4000,
-) -> tuple[str, int]:
-    """前情脉络：每段章节用能覆盖它的最高一级摘要；返回 (文本, 覆盖到的最后一章)。"""
+) -> StorySoFar:
+    """前情脉络：每段章节用能覆盖它的最高一级摘要；同时给出真正被覆盖的章号（空洞不算）。"""
     rows = (await db.execute(
         select(ArcSummary).where(ArcSummary.project_id == project_id, ArcSummary.chapter_end < current_chapter)
     )).scalars().all()
     if not rows:
-        return "", 0
+        return StorySoFar()
     selected: list[ArcSummary] = []
     pos, last_end = 1, max(r.chapter_end for r in rows)
     while pos <= last_end:
@@ -341,7 +341,7 @@ async def render_story_so_far(
         best = max(covering, key=lambda r: (LEVEL_RANK.get(r.level, 0), r.chapter_end))
         selected.append(best)
         pos = best.chapter_end + 1
-    covered = max(r.chapter_end for r in selected)
+    covered = {n for r in selected for n in range(r.chapter_start, r.chapter_end + 1)}
     contents = [r.content for r in selected]
     text = "\n".join(_line(r, c) for r, c in zip(selected, contents))
     i = 0
@@ -351,4 +351,12 @@ async def render_story_so_far(
         i += 1
     if len(text) > budget_chars:
         text = clip_text(text, budget_chars, keep="tail")
-    return text, covered
+    return StorySoFar(text=text, covered_until=max(r.chapter_end for r in selected), covered=covered)
+
+
+async def render_story_so_far(
+    db: AsyncSession, project_id: str, current_chapter: int, budget_chars: int = 4000,
+) -> tuple[str, int]:
+    """前情脉络文本 + 覆盖到的最后一章（需要知道空洞的用 story_so_far_detail）。"""
+    detail = await story_so_far_detail(db, project_id, current_chapter, budget_chars)
+    return detail.text, detail.covered_until

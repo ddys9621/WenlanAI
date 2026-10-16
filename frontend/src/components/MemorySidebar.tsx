@@ -1,5 +1,5 @@
 import React, { useMemo, useEffect, useRef } from 'react';
-import { Flame, Star, Zap, User, type LucideIcon } from 'lucide-react';
+import { Flame, Star, Zap, type LucideIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { CollapseSection } from '@/components/ui/CollapseSection';
 import { Pill } from '@/components/ui/Pill';
@@ -16,13 +16,12 @@ interface MemorySidebarProps {
 const TYPE_CONFIG: Record<MemoryAnnotation['type'], { label: string; Icon: LucideIcon; color: string }> = {
   hook: { label: '钩子', Icon: Flame, color: '#ff6b6b' },
   foreshadow: { label: '伏笔', Icon: Star, color: '#6b7bff' },
-  plot_point: { label: '情节点', Icon: Zap, color: '#51cf66' },
-  character_event: { label: '角色事件', Icon: User, color: '#ffd93d' },
+  plot_point: { label: '关键转折', Icon: Zap, color: '#51cf66' },
 };
 
 /**
- * 记忆侧边栏组件
- * 展示章节的所有记忆标注
+ * 正文标注侧栏：本章的钩子 / 伏笔 / 关键转折（分析时记下的原文引句）。
+ * 引句在当前正文里找不到（正文改过）的标注照常列出，标「原文已改」，点击不跳转。
  */
 const MemorySidebar: React.FC<MemorySidebarProps> = ({
   annotations,
@@ -41,12 +40,7 @@ const MemorySidebar: React.FC<MemorySidebarProps> = ({
 
   // 按类型分组，每组按重要性排序
   const groupedAnnotations = useMemo(() => {
-    const groups: Record<MemoryAnnotation['type'], MemoryAnnotation[]> = {
-      hook: [],
-      foreshadow: [],
-      plot_point: [],
-      character_event: [],
-    };
+    const groups: Record<MemoryAnnotation['type'], MemoryAnnotation[]> = { hook: [], foreshadow: [], plot_point: [] };
     annotations.forEach((annotation) => {
       groups[annotation.type]?.push(annotation);
     });
@@ -57,13 +51,16 @@ const MemorySidebar: React.FC<MemorySidebarProps> = ({
   }, [annotations]);
 
   if (annotations.length === 0) {
-    return <p className="py-8 text-center text-xs text-content-tertiary">暂无分析数据</p>;
+    return <p className="py-8 text-center text-xs text-content-tertiary">暂无标注</p>;
   }
 
-  // 渲染单个记忆卡片
+  // 渲染单个标注卡片
   const renderMemoryCard = (annotation: MemoryAnnotation) => {
     const config = TYPE_CONFIG[annotation.type];
+    if (!config) return null;
     const isActive = activeAnnotationId === annotation.id;
+    const located = annotation.position >= 0;
+    const quote = typeof annotation.metadata?.quote === 'string' ? annotation.metadata.quote : '';
     return (
       <div
         key={annotation.id}
@@ -81,20 +78,17 @@ const MemorySidebar: React.FC<MemorySidebarProps> = ({
             {(annotation.importance * 10).toFixed(1)}
           </span>
         </div>
-        <p className="mb-1.5 text-[13px] leading-relaxed text-content-secondary">
-          {annotation.content.length > 100 ? `${annotation.content.slice(0, 100)}...` : annotation.content}
-        </p>
+        {annotation.content && annotation.content !== annotation.title && (
+          <p className="mb-1.5 text-[13px] leading-relaxed text-content-secondary">
+            {annotation.content.length > 100 ? `${annotation.content.slice(0, 100)}...` : annotation.content}
+          </p>
+        )}
+        {quote && <p className="text-xs leading-relaxed text-content-tertiary">「{quote}」</p>}
+        {!located && <Pill tone="gold" className="mt-1">原文已改，正文里找不到这句</Pill>}
         {annotation.tags && annotation.tags.length > 0 && (
-          <div className="flex flex-wrap gap-1">
+          <div className="mt-1 flex flex-wrap gap-1">
             {annotation.tags.map((tag, index) => <Pill key={index}>{tag}</Pill>)}
           </div>
-        )}
-        {/* 特殊元数据 */}
-        {annotation.metadata.strength && <p className="mt-1 text-[11px] text-content-tertiary">强度: {annotation.metadata.strength}/10</p>}
-        {annotation.metadata.foreshadowType && (
-          <Pill tone={annotation.metadata.foreshadowType === 'planted' ? 'brand' : 'green'} className="mt-1">
-            {annotation.metadata.foreshadowType === 'planted' ? '已埋下' : '已回收'}
-          </Pill>
         )}
       </div>
     );
@@ -104,8 +98,8 @@ const MemorySidebar: React.FC<MemorySidebarProps> = ({
     <div className="h-full overflow-y-auto">
       {/* 统计概览 */}
       <div className="hh-subpanel mb-3 p-3">
-        <p className="mb-2 text-sm font-semibold text-content">分析概览</p>
-        <div className="grid grid-cols-2 gap-2">
+        <p className="mb-2 text-sm font-semibold text-content">标注概览</p>
+        <div className="grid grid-cols-3 gap-2">
           {(Object.keys(TYPE_CONFIG) as MemoryAnnotation['type'][]).map((type) => (
             <div key={type}>
               <p className="text-xs text-content-tertiary">{TYPE_CONFIG[type].label}</p>
@@ -115,7 +109,6 @@ const MemorySidebar: React.FC<MemorySidebarProps> = ({
         </div>
       </div>
 
-      {/* 分类展示（角色事件默认收起） */}
       {(Object.keys(groupedAnnotations) as MemoryAnnotation['type'][]).map((type) => {
         const items = groupedAnnotations[type];
         if (items.length === 0) return null;
@@ -123,7 +116,7 @@ const MemorySidebar: React.FC<MemorySidebarProps> = ({
         return (
           <CollapseSection
             key={type}
-            defaultOpen={type !== 'character_event'}
+            defaultOpen
             count={items.length}
             title={<><config.Icon className="h-3.5 w-3.5" style={{ color: config.color }} />{config.label}</>}
           >

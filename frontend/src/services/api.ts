@@ -17,9 +17,26 @@ import type { SSEClientOptions } from '../utils/sseClient';
 import { PROJECT_HEADER, getActiveProjectId } from '../utils/activeProject';
 import type { MemoryAnnotation } from '../utils/annotationSegments';
 import type { UpdateCheckResult, UpdateJobStatus } from '../types/system_update';
+import type { EmbeddingDownloadResult, EmbeddingStatus } from '../types/embedding';
+import type {
+  BatchAnalyzeRequest,
+  BatchAnalyzeResult,
+  CharacterHistoryRow,
+  CharacterStateRow,
+  DigestRow,
+  LedgerOverview,
+  LedgerPromise,
+  LedgerSearchItem,
+  PromiseCreate,
+  PromiseUpdate,
+  RecallPreview,
+  StateCorrectionCreate,
+  TimelineItem,
+} from '../types/ledger';
 import type {
   AssistantAnswer,
   AssistantChecks,
+  AssistantContextUsage,
   AssistantFieldCandidate,
   AssistantPageContext,
   AssistantPreview,
@@ -108,6 +125,7 @@ import type {
   WorldRuleListResponse,
   PaginationResponse,
   ChapterAnalysisResponse,
+  ChapterDigestView,
   BookDissectTask,
   BookDissectExtractionOptions,
   BookDissectExtractionPlan,
@@ -176,7 +194,7 @@ export interface ChapterRegenerateRequest {
   paragraph_indices?: number[];
 }
 
-/** GET /chapters/{id}/annotations：正文里可定位的记忆标注 */
+/** GET /chapters/{id}/annotations：正文标注（按原文引句在当前正文里重新定位，找不到 position=-1） */
 export interface ChapterAnnotationsResponse {
   chapter_id: string;
   chapter_number: number;
@@ -184,7 +202,7 @@ export interface ChapterAnnotationsResponse {
   word_count: number;
   annotations: MemoryAnnotation[];
   has_analysis: boolean;
-  summary: { total_annotations: number; hooks: number; foreshadows: number; plot_points: number; character_events: number };
+  summary: { total_annotations: number; hooks: number; foreshadows: number; plot_points: number; located: number };
 }
 
 /** 去 AI 味重写任务的 result 事件 data：结果存为整章候选稿 */
@@ -329,6 +347,17 @@ export const settingsApi = {
   /** 用已保存的设置拉模型列表（项目内模型选择器；密钥不经前端） */
   getSavedModels: () =>
     api.get<unknown, { provider: string; models: AIModelOption[]; count?: number }>('/settings/saved-models'),
+
+  /** 向量（记忆检索）模型状态：预设 / 本地已有的模型、当前在用哪个、能不能改 */
+  getEmbedding: () => api.get<unknown, EmbeddingStatus>('/settings/embedding'),
+
+  /** 切换到已下载的向量模型（即时生效；随后后台按账本重建各项目的检索索引） */
+  activateEmbedding: (model: string) =>
+    api.post<unknown, { status: EmbeddingStatus; rebuild_job_id: string | null }>('/settings/embedding/activate', { model }),
+
+  /** 下载预设向量模型：后台任务 + SSE（逐文件、按字节报进度），activate=true 下完直接启用 */
+  downloadEmbeddingStream: (data: { model: string; activate?: boolean }, options?: SSEClientOptions<EmbeddingDownloadResult>) =>
+    ssePost<EmbeddingDownloadResult>('/api/settings/embedding/download', data, options),
   
   testApiConnection: (params: { api_key: string; api_base_url: string; provider: string; llm_model: string; max_tokens?: number }) =>
     api.post<unknown, {
@@ -565,6 +594,18 @@ export const chapterApi = {
   getAnalysis: (chapterId: string) =>
     api.get<unknown, ChapterAnalysisResponse>(`/chapters/${chapterId}/analysis`, { silent: true }),
 
+  /** 作者改章节档案（摘要 / 章末状态）：之后重新分析不覆盖，AI 新结果作为建议 */
+  updateDigest: (chapterId: string, data: { summary?: string; end_state?: string }) =>
+    api.put<unknown, { digest: ChapterDigestView }>(`/chapters/${chapterId}/digest`, data),
+
+  /** 采用 AI 新分析的档案（回到 AI 版本） */
+  acceptDigest: (chapterId: string) =>
+    api.post<unknown, { digest: ChapterDigestView }>(`/chapters/${chapterId}/digest/accept`),
+
+  /** 忽略 AI 新分析的档案建议（保留作者版本） */
+  dismissDigest: (chapterId: string) =>
+    api.post<unknown, { digest: ChapterDigestView }>(`/chapters/${chapterId}/digest/dismiss`),
+
   /** 手动分析章节：后台任务 + SSE（重连 / 停止走 aiJobsApi）POST /api/chapters/{id}/analyze-stream */
   analyzeChapterStream: (chapterId: string, options?: SSEClientOptions<{ task_id: string; chapter_id: string; status: string }>) =>
     ssePost<{ task_id: string; chapter_id: string; status: string }>(`/api/chapters/${chapterId}/analyze-stream`, {}, options),
@@ -642,6 +683,12 @@ export const assistantApi = {
   /** 共创室：设置某位成员的模型（空 = 跟随项目模型） */
   setMemberModel: (projectId: string, memberId: string, model: string | null) =>
     api.put<unknown, AssistantTeam>(`/projects/${projectId}/assistant/team/${memberId}`, { model }),
+  /** 共创室：设置上下文上限（token；null = 自动按模型查） */
+  setContextWindow: (projectId: string, contextWindow: number | null) =>
+    api.put<unknown, AssistantTeam>(`/projects/${projectId}/assistant/context`, { context_window: contextWindow }),
+  /** 上下文用量：下一条要求开跑时大约占多少（估算，不调用模型） */
+  contextUsage: (projectId: string, page: AssistantPageContext) =>
+    api.post<unknown, AssistantContextUsage>(`/projects/${projectId}/assistant/context/usage`, page),
   /** 创作进度：总纲 / 卷纲 / 章纲 / 正文各到哪一步与建议的下一步 */
   progress: (projectId: string) =>
     api.get<unknown, AssistantProgress>(`/projects/${projectId}/assistant/progress`, { silent: true }),
@@ -785,10 +832,9 @@ export const wizardStreamApi = {
       model?: string;
       enable_mcp?: boolean;
       selected_plugins?: string[];
-      // R8 拆书参考包显式参数（项目创建第一步，向后端透传）
-      pack_ids?: string[];
-      dimensions?: string[];
-      strength?: 'light' | 'medium' | 'deep';
+      /** 仿写参考：向导里选的对标书（项目建好后关联上，之后各步按它注入） */
+      kb_source_id?: string;
+      kb_mode?: KbMode;
       // 长篇设置（仅新建项目时生效）
       platform_preset?: PlatformPreset;
     },
@@ -811,10 +857,6 @@ export const wizardStreamApi = {
       model?: string;
       enable_mcp?: boolean;
       selected_plugins?: string[];
-      // R8 拆书参考包显式参数
-      pack_ids?: string[];
-      dimensions?: string[];
-      strength?: 'light' | 'medium' | 'deep';
     },
     options?: SSEClientOptions<GenerateCharactersResponse>
   ) => ssePost<GenerateCharactersResponse>(
@@ -848,10 +890,6 @@ export const wizardStreamApi = {
       model?: string;
       enable_mcp?: boolean;  // 是否启用MCP
       selected_plugins?: string[];  // 选择的插件列表
-      // R8：拆书参考包显式参数（任一为空数组/undefined 都走"自动模式"）
-      pack_ids?: string[];
-      dimensions?: string[];
-      strength?: 'light' | 'medium' | 'deep';
     },
     options?: SSEClientOptions<GenerateOutlineResponse>
   ) => ssePost<GenerateOutlineResponse>(
@@ -882,10 +920,6 @@ export const wizardStreamApi = {
       generation_prompt?: string;
       enable_mcp?: boolean;
       selected_plugins?: string[];
-      // R8 拆书参考包显式参数
-      pack_ids?: string[];
-      dimensions?: string[];
-      strength?: 'light' | 'medium' | 'deep';
     },
     options?: SSEClientOptions<WorldBuildingResponse>
   ) => ssePost<WorldBuildingResponse>(
@@ -1272,41 +1306,51 @@ export const organizationApi = {
 };
 
 // ============================================
-// 记忆系统 API
+// 故事账本 API（原「记忆系统」）：伏笔 / 人物状态 / 章节档案 / 时间线 / 召回预览
 // ============================================
-export const memoryApi = {
-  // 分析章节记忆
-  getProjectMemories: (projectId: string, params?: {
-    memory_type?: string;
-    chapter_id?: string;
-    limit?: number;
-  }) =>
-    api.get<unknown, { success: boolean; memories: Array<Record<string, unknown>>; total: number }>(`/memories/projects/${projectId}/memories`, { params }),
+const ledgerBase = (projectId: string) => `/memories/projects/${projectId}`;
 
-  // 获取章节分析结果
-  searchMemories: (projectId: string, data: {
-    query: string;
-    memory_types?: string[];
-    limit?: number;
-    min_importance?: number;
-  }) =>
-    api.post<unknown, { success: boolean; query: string; memories: Array<Record<string, unknown>>; total: number }>(
-      `/memories/projects/${projectId}/search`,
-      null,
-      { params: data }
-    ),
+export const ledgerApi = {
+  overview: (projectId: string) => api.get<unknown, LedgerOverview>(`${ledgerBase(projectId)}/overview`),
 
-  // 获取未解决伏笔
-  getForeshadows: (projectId: string, currentChapter: number) =>
-    api.get<unknown, { success: boolean; foreshadows: Array<Record<string, unknown>>; total: number }>(`/memories/projects/${projectId}/foreshadows`, { params: { current_chapter: currentChapter } }),
+  promises: (projectId: string, status: 'active' | 'resolved' | 'abandoned' | 'all' = 'active', q = '') =>
+    api.get<unknown, { as_of: number; total: number; items: LedgerPromise[] }>(`${ledgerBase(projectId)}/promises`, { params: { status, q } }),
+  /** 作者登记伏笔（全部字段以作者为准） */
+  createPromise: (projectId: string, data: PromiseCreate) =>
+    api.post<unknown, LedgerPromise>(`${ledgerBase(projectId)}/promises`, data),
+  /** 作者改伏笔 / 标回收 / 放弃 / 重新打开；改过的字段重新分析不覆盖 */
+  updatePromise: (projectId: string, promiseId: string, data: PromiseUpdate) =>
+    api.patch<unknown, LedgerPromise>(`${ledgerBase(projectId)}/promises/${promiseId}`, data),
+  /** 把重复的伏笔并进 keepId（章纲叙事任务里的引用改指过来） */
+  mergePromises: (projectId: string, keepId: string, mergeIds: string[]) =>
+    api.post<unknown, { id: string; merged: number }>(`${ledgerBase(projectId)}/promises/${keepId}/merge`, { merge_ids: mergeIds }),
 
-  // 获取记忆统计
-  getStats: (projectId: string) =>
-    api.get<unknown, { success: boolean; stats: Record<string, unknown> }>(`/memories/projects/${projectId}/stats`),
+  /** 写第 chapter 章时的人物状态（不传 = 最新一章之后） */
+  characters: (projectId: string, chapter?: number) =>
+    api.get<unknown, { as_of: number; items: CharacterStateRow[] }>(`${ledgerBase(projectId)}/characters`, { params: chapter ? { chapter } : {} }),
+  characterHistory: (projectId: string, name: string, before?: number) =>
+    api.get<unknown, { name: string; items: CharacterHistoryRow[] }>(`${ledgerBase(projectId)}/characters/history`, { params: { name, ...(before ? { before } : {}) } }),
+  /** 作者修正人物状态（重新分析不清；同章盖过 AI 结算） */
+  addCorrection: (projectId: string, data: StateCorrectionCreate) =>
+    api.post<unknown, { id: string }>(`${ledgerBase(projectId)}/state-corrections`, data),
+  deleteCorrection: (projectId: string, correctionId: string) =>
+    api.delete<unknown, { ok: boolean }>(`${ledgerBase(projectId)}/state-corrections/${correctionId}`),
 
-  // 删除章节记忆
-  deleteChapterMemories: (projectId: string, chapterId: string) =>
-    api.delete<unknown, { success: boolean; message: string }>(`/memories/projects/${projectId}/chapters/${chapterId}/memories`),
+  digests: (projectId: string) => api.get<unknown, { items: DigestRow[] }>(`${ledgerBase(projectId)}/digests`),
+  timeline: (projectId: string, params: { character?: string; from_chapter?: number; to_chapter?: number } = {}) =>
+    api.get<unknown, { items: TimelineItem[] }>(`${ledgerBase(projectId)}/timeline`, { params }),
+  /** 写第 N 章时会注入哪些记忆（不调用大模型） */
+  recallPreview: (projectId: string, chapterNumber?: number) =>
+    api.get<unknown, RecallPreview>(`${ledgerBase(projectId)}/recall-preview`, { params: chapterNumber ? { chapter_number: chapterNumber } : {} }),
+  search: (projectId: string, q: string) =>
+    api.get<unknown, { query: string; items: LedgerSearchItem[]; semantic: boolean }>(`${ledgerBase(projectId)}/search`, { params: { q } }),
+
+  /** 重建检索索引：后台任务 + SSE（不调用大模型） */
+  rebuildIndexStream: (projectId: string, options?: SSEClientOptions<{ count: number }>) =>
+    ssePost<{ count: number }>(`/api${ledgerBase(projectId)}/index/rebuild`, {}, options),
+  /** 按章序批量分析：后台任务 + SSE（事件 batch_chapter 逐章汇报） */
+  analyzeBatchStream: (projectId: string, data: BatchAnalyzeRequest, options?: SSEClientOptions<BatchAnalyzeResult>) =>
+    ssePost<BatchAnalyzeResult>(`/api${ledgerBase(projectId)}/analyze-batch`, data, options),
 };
 
 
@@ -1352,10 +1396,6 @@ export const bookDissectApi = {
   deleteTask: (taskId: string) =>
     api.delete<unknown, { message: string; task_id: string }>(`/book-dissect/${taskId}`),
 
-  // V3 R6 废弃：applyToWizard() 已移除。
-  // 后端端点统一返 410 Gone；改用 imitationApi.preview / imitationApi.streamUrl
-  // 配合 referencePackApi.attach 在用户自己项目内做「一键仿写」。
-
   // ----- 浏览：拆书卡 / 剧情单元 -----
   /** 全部拆书卡精简行（按章号升序，不含章纲正文） */
   listCards: (taskId: string) =>
@@ -1368,89 +1408,90 @@ export const bookDissectApi = {
   /** 全部剧情单元（按 arc_index 升序） */
   listArcs: (taskId: string) =>
     api.get<unknown, BookDissectStoryArc[]>(`/book-dissect/${taskId}/arcs`),
+
+  /** 拆书结果（全书骨架 / 文风 / 人物功能谱 / 写法手册 / 结构统计）；还没拆完时为 null */
+  getResult: (taskId: string) =>
+    api.get<unknown, ReferencePackDetail | null>(`/book-dissect/${taskId}/result`),
 };
 
 
+import type { ReferencePackDetail } from '@/types/reference_pack';
+
+
 // ============================================
-// 拆书 V3 仿写：参考包 API
+// 知识库 API（用户级、跨项目）
 // ============================================
 import type {
-  ReferencePackSummary,
-  ReferencePackDetail,
-  ProjectReferencePackItem,
-  AttachReferencePackRequest,
-  AttachReferencePackResponse,
-  UpdateAttachmentRequest,
-} from '@/types/reference_pack';
+  KbCitation,
+  KbCitationTarget,
+  KbEntry,
+  KbEntrySummary,
+  KbEntryType,
+  KbEntryUpdate,
+  KbMode,
+  KbPreview,
+  KbPreviewInput,
+  KbProjectLink,
+  KbProjectLinkInput,
+  KbSearchResult,
+  KbSource,
+  KbSourceUpdate,
+} from '@/types/knowledge';
 
-export const referencePackApi = {
-  /** 列出当前用户的所有参考包（不含 5 tab 详细内容） */
-  list: () => api.get<unknown, ReferencePackSummary[]>('/reference-packs'),
+export const knowledgeApi = {
+  /** 书架：全部来源（后端先给已完成但还没入库的拆书补导） */
+  listSources: () => api.get<unknown, KbSource[]>('/knowledge/sources'),
 
-  /** 参考包详情（含 5 tab 完整 JSON） */
-  get: (packId: string) =>
-    api.get<unknown, ReferencePackDetail>(`/reference-packs/${packId}`),
+  getSource: (sourceId: string) => api.get<unknown, KbSource>(`/knowledge/sources/${sourceId}`),
 
-  /** 删除参考包（同时清理所有项目挂载关联） */
-  delete: (packId: string) =>
-    api.delete<unknown, { deleted: string }>(`/reference-packs/${packId}`),
+  updateSource: (sourceId: string, payload: KbSourceUpdate) =>
+    api.patch<unknown, KbSource>(`/knowledge/sources/${sourceId}`, payload),
 
-  /** 列出某项目已挂载的参考包 */
-  listAttachments: (projectId: string) =>
-    api.get<unknown, ProjectReferencePackItem[]>(
-      `/projects/${projectId}/reference-packs`,
-    ),
+  /** 删除来源；拆书来源会连同拆书任务一起删除 */
+  deleteSource: (sourceId: string) => api.delete<unknown, { deleted: string }>(`/knowledge/sources/${sourceId}`),
 
-  /** 挂载参考包到项目 */
-  attach: (projectId: string, payload: AttachReferencePackRequest) =>
-    api.post<unknown, AttachReferencePackResponse>(
-      `/projects/${projectId}/reference-packs`,
-      payload,
-    ),
+  /** 按最新拆书结果重新导入（作者改过的条目不覆盖） */
+  reimportSource: (sourceId: string) => api.post<unknown, KbSource>(`/knowledge/sources/${sourceId}/reimport`),
 
-  /** 更新挂载配置（默认维度 / 强度） */
-  updateAttachment: (
-    projectId: string,
-    packId: string,
-    payload: UpdateAttachmentRequest,
-  ) =>
-    api.patch<unknown, ProjectReferencePackItem>(
-      `/projects/${projectId}/reference-packs/${packId}`,
-      payload,
-    ),
+  listEntries: (sourceId: string, entryType?: KbEntryType) =>
+    api.get<unknown, KbEntrySummary[]>(`/knowledge/sources/${sourceId}/entries`, {
+      params: entryType ? { entry_type: entryType } : undefined,
+    }),
 
-  /** 卸载参考包（保留项目本体） */
-  detach: (projectId: string, packId: string) =>
-    api.delete<unknown, { detached: string }>(
-      `/projects/${projectId}/reference-packs/${packId}`,
-    ),
+  getEntry: (entryId: string) => api.get<unknown, KbEntry>(`/knowledge/entries/${entryId}`),
+
+  /** 保存为作者版本 */
+  updateEntry: (entryId: string, payload: KbEntryUpdate) =>
+    api.patch<unknown, KbEntry>(`/knowledge/entries/${entryId}`, payload),
+
+  confirmEntry: (entryId: string) => api.post<unknown, KbEntry>(`/knowledge/entries/${entryId}/confirm`),
+
+  /** 恢复成拆书生成的版本（覆盖作者修改） */
+  resetEntry: (entryId: string) => api.post<unknown, KbEntry>(`/knowledge/entries/${entryId}/reset`),
+
+  /** 关键词检索：空格分隔，每个词都要命中 */
+  search: (params: { q: string; source_id?: string; entry_type?: KbEntryType; limit?: number; offset?: number }) =>
+    api.get<unknown, KbSearchResult>('/knowledge/search', { params }),
+
+  // ----- 项目的仿写参考 -----
+  /** 项目的对标书与仿写方式；没设时 link 为 null */
+  getProjectLink: (projectId: string) =>
+    api.get<unknown, { link: KbProjectLink | null }>(`/projects/${projectId}/knowledge`),
+
+  setProjectLink: (projectId: string, payload: KbProjectLinkInput) =>
+    api.put<unknown, KbProjectLink>(`/projects/${projectId}/knowledge`, payload),
+
+  /** 取消对标：生成时不再注入仿写参考 */
+  deleteProjectLink: (projectId: string) =>
+    api.delete<unknown, { deleted: boolean }>(`/projects/${projectId}/knowledge`),
+
+  /** 预览某个场景会注入的仿写参考（不调模型） */
+  previewProjectContext: (projectId: string, payload: KbPreviewInput) =>
+    api.post<unknown, KbPreview>(`/projects/${projectId}/knowledge/preview`, payload),
+
+  /** 生成结果的对标引用：target_id → 引用列表 */
+  citations: (projectId: string, targetType: KbCitationTarget, targetIds: string[]) =>
+    api.get<unknown, Record<string, KbCitation[]>>(`/projects/${projectId}/knowledge/citations`, {
+      params: { target_type: targetType, target_ids: targetIds.join(',') },
+    }),
 };
-
-
-// ============================================
-// 拆书 V3 R5：一键仿写（preview / stream）
-// ============================================
-import type {
-  ImitateChapterRequest,
-  ImitatePromptPreview,
-} from '@/types/reference_pack';
-
-export const imitationApi = {
-  /** Dry-run 预览：返回拼装后的 system/user prompt + 使用的 pack/维度/强度 */
-  preview: (projectId: string, payload: ImitateChapterRequest) =>
-    api.post<unknown, ImitatePromptPreview>(
-      `/projects/${projectId}/imitate-chapter-preview`,
-      payload,
-    ),
-
-  /** 一键仿写：后台任务 + SSE（meta / content / progress；重连 / 停止走 aiJobsApi）POST /api/projects/{id}/imitate-chapter-stream */
-  imitateChapterStream: (projectId: string, payload: ImitateChapterRequest, options?: SSEClientOptions<ImitationJobResult>) =>
-    ssePost<ImitationJobResult>(`/api/projects/${projectId}/imitate-chapter-stream`, payload, options),
-};
-
-/** 仿写任务的 result 事件 data */
-interface ImitationJobResult {
-  chars: number;
-  used_dimensions: string[];
-  strength: string;
-}

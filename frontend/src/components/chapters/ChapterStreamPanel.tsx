@@ -81,7 +81,7 @@ export function ChapterStreamPanel({
         </p>
       </div>
 
-      {/* 过程面板：阶段 / MCP 工具 / 参考资料（记忆、参考包） */}
+      {/* 过程面板：阶段 / MCP 工具 / 参考资料（记忆、仿写参考） */}
       {streamJob && showProcess && (
         <div className="border-b border-surface-border/80 bg-white/40 px-5 py-4">
           <AIJobProcess job={streamJob} />

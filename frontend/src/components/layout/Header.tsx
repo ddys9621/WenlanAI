@@ -25,7 +25,7 @@ interface HeaderProps {
 const ROUTE_META: Array<{ match: RegExp; title: string }> = [
   { match: /^\/(projects?)?$/, title: '我的项目' },
   { match: /^\/book-dissect/, title: '拆书参考' },
-  { match: /^\/reference-packs/, title: '参考库' },
+  { match: /^\/knowledge/, title: '知识库' },
   { match: /^\/settings$/, title: '设置' },
   { match: /^\/mcp-plugins$/, title: 'MCP 插件' },
   { match: /^\/user-management$/, title: '用户管理' },

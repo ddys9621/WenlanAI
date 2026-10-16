@@ -1,22 +1,24 @@
 // 记忆标注 → 正文片段 的纯函数切分逻辑（无 React 依赖，便于单独验证）
 
-export const ANNOTATION_TYPES = ['hook', 'foreshadow', 'plot_point', 'character_event'] as const;
+/** 标注类型：钩子 / 伏笔 / 关键转折（分析时记下原文引句，后端每次按当前正文重新定位） */
+export const ANNOTATION_TYPES = ['hook', 'foreshadow', 'plot_point'] as const;
 export type AnnotationType = (typeof ANNOTATION_TYPES)[number];
 
-// 标注数据类型
+// 标注数据类型（GET /chapters/{id}/annotations）
 export interface MemoryAnnotation {
   id: string;
   type: AnnotationType;
   title: string;
+  /** 为什么值得标（分析说明） */
   content: string;
   importance: number;
+  /** 引句在当前正文里的位置；找不到为 -1（侧栏照常列出，正文里不画） */
   position: number;
   length: number;
   tags: string[];
   metadata: {
-    strength?: number;
-    foreshadowType?: 'planted' | 'resolved';
-    relatedCharacters?: string[];
+    /** 分析时记下的原文引句 */
+    quote?: string;
     [key: string]: unknown;
   };
 }

@@ -16,9 +16,8 @@ webview_path = Path(webview.__file__).parent
 datas = [
     # 静态文件（前端）
     (str(backend_dir / 'static'), 'static'),
-    # Embedding 模型不再内置（体积 -470MB）：
-    # 首次启动由 app/services/embedding_bootstrap.py 经镜像自动下载，
-    # 失败则降级为「无向量记忆」模式运行
+    # Embedding 模型不内置：首次启动由 app/services/embedding_bootstrap.py 经镜像自动下载中文 bge-small-zh-v1.5（约 95MB），
+    # 只有旧版多语 MiniLM 时顺带升级；失败则继续用旧模型或降级为「无向量检索」（召回只按人物 / 关键词）
     # 配置文件模板
     (str(project_root / 'config.ini.template'), '.'),
     # 配置加载器

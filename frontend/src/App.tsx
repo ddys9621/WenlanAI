@@ -21,9 +21,9 @@ const Settings = lazy(() => import('@/pages/Settings'))
 const MCPPlugins = lazy(() => import('@/pages/MCPPlugins'))
 const UserManagement = lazy(() => import('@/pages/UserManagement'))
 const BookDissect = lazy(() => import('@/pages/BookDissect'))
-const ReferencePackLibrary = lazy(() => import('@/pages/ReferencePackLibrary'))
-const ReferencePackDetail = lazy(() => import('@/pages/ReferencePackDetail'))
-const ProjectReferencePacks = lazy(() => import('@/pages/ProjectReferencePacks'))
+const KnowledgeLibrary = lazy(() => import('@/pages/KnowledgeLibrary'))
+const KnowledgeSource = lazy(() => import('@/pages/KnowledgeSource'))
+const ProjectKnowledge = lazy(() => import('@/pages/ProjectKnowledge'))
 const WorldMap = lazy(() => import('@/pages/WorldMap'))
 
 export default function App() {
@@ -39,8 +39,10 @@ export default function App() {
             <Route path="/" element={<ProjectList />} />
             <Route path="/projects" element={<ProjectList />} />
             <Route path="/book-dissect" element={<BookDissect />} />
-            <Route path="/reference-packs" element={<ReferencePackLibrary />} />
-            <Route path="/reference-packs/:packId" element={<ReferencePackDetail />} />
+            {/* 参考库已并入知识库，老链接重定向 */}
+            <Route path="/reference-packs/*" element={<Navigate to="/knowledge" replace />} />
+            <Route path="/knowledge" element={<KnowledgeLibrary />} />
+            <Route path="/knowledge/:sourceId" element={<KnowledgeSource />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="/mcp-plugins" element={<MCPPlugins />} />
             <Route path="/user-management" element={<UserManagement />} />
@@ -61,7 +63,8 @@ export default function App() {
             <Route path="chapter-analysis" element={<ChapterAnalysis />} />
             <Route path="writing-styles" element={<WritingStyles />} />
             <Route path="memories" element={<Memories />} />
-            <Route path="reference-packs" element={<ProjectReferencePacks />} />
+            <Route path="knowledge" element={<ProjectKnowledge />} />
+            <Route path="reference-packs" element={<Navigate to="../knowledge" replace />} />
           </Route>
 
           {/* 独立页面 */}

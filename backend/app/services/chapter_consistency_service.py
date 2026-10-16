@@ -288,15 +288,10 @@ class ChapterConsistencyService:
         canonical_names: Optional[dict[str, str]] = None,
     ) -> list[dict[str, Any]]:
         issues: list[dict[str, Any]] = []
+        # 此前章节的信号连同作者修正一起看（作者改成"没死"的人再出场不报死人复活）
+        from app.services.character_state_service import state_signal_rows
 
-        previous_life_result = await db.execute(
-            select(ChapterContinuitySignal).where(
-                ChapterContinuitySignal.project_id == project_id,
-                ChapterContinuitySignal.chapter_number < chapter.chapter_number,
-                ChapterContinuitySignal.signal_type == "life_state",
-            )
-        )
-        previous_life_signals = previous_life_result.scalars().all()
+        previous_life_signals = await state_signal_rows(db, project_id, chapter.chapter_number, ("life_state",))
 
         previous_dead_by_character: dict[str, int] = {}
         for item in previous_life_signals:
@@ -308,14 +303,14 @@ class ChapterConsistencyService:
                     previous_dead_by_character.get(character_name, 0),
                     item.chapter_number or 0,
                 )
-            elif item.signal_value == "revived":
+            elif item.signal_value in ("revived", "survived"):
                 previous_dead_by_character.pop(character_name, None)
 
         current_life_signals = [item for item in signals if item["signal_type"] == "life_state"]
         revived_names = {
             self._normalize_name(item.get("character_name"))
             for item in current_life_signals
-            if item["signal_value"] == "revived"
+            if item["signal_value"] in ("revived", "survived")
         }
         current_character_names = self._collect_current_character_names(analysis, canonical_names)
         for character_name in sorted(current_character_names):
@@ -333,15 +328,7 @@ class ChapterConsistencyService:
                     }
                 )
 
-        previous_ability_result = await db.execute(
-            select(ChapterContinuitySignal).where(
-                ChapterContinuitySignal.project_id == project_id,
-                ChapterContinuitySignal.chapter_number < chapter.chapter_number,
-                ChapterContinuitySignal.signal_type == "ability",
-            )
-        )
-        previous_ability_signals = previous_ability_result.scalars().all()
-        previous_ability_signals.sort(key=lambda item: item.chapter_number or 0)
+        previous_ability_signals = await state_signal_rows(db, project_id, chapter.chapter_number, ("ability",))
         learned_abilities: dict[tuple[str, str], int] = {}
         latest_ability_state: dict[tuple[str, str], tuple[str, int]] = {}
         for item in previous_ability_signals:
@@ -460,15 +447,7 @@ class ChapterConsistencyService:
                     }
                 )
 
-        previous_location_result = await db.execute(
-            select(ChapterContinuitySignal).where(
-                ChapterContinuitySignal.project_id == project_id,
-                ChapterContinuitySignal.chapter_number < chapter.chapter_number,
-                ChapterContinuitySignal.signal_type == "location",
-            )
-        )
-        previous_location_signals = previous_location_result.scalars().all()
-        previous_location_signals.sort(key=lambda item: item.chapter_number or 0)
+        previous_location_signals = await state_signal_rows(db, project_id, chapter.chapter_number, ("location",))
         last_known_location: dict[str, tuple[str, int]] = {}
         for item in previous_location_signals:
             character_name = self._normalize_name(item.character_name)
@@ -540,6 +519,11 @@ class ChapterConsistencyService:
                 return
             key = " ".join(str(signal_key or "").split())[:200] or None
             if signal_type in {"realm", "item", "injury", "goal", "story_time"} and not key:
+                return
+            name = (character_name or "").strip() or None
+            # 同一事实只记一次（如死亡既在状态变化里、又从 death 事件推出来）
+            if any(s["signal_type"] == signal_type and s["character_name"] == name and s["signal_key"] == key
+                   and s["signal_value"] == normalized_value for s in signals):
                 return
             signals.append(
                 {

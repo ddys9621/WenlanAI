@@ -64,8 +64,8 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
     items: [
       { label: '章节写作', icon: BookOpen, path: 'chapter-analysis' },
       { label: '写作风格', icon: Palette, path: 'writing-styles' },
-      { label: '仿写参考包', icon: Library, path: 'reference-packs' },
-      { label: '记忆系统', icon: Brain, path: 'memories' },
+      { label: '仿写参考', icon: Library, path: 'knowledge' },
+      { label: '故事账本', icon: Brain, path: 'memories' },
     ],
   },
 ]

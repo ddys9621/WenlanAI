@@ -18,7 +18,8 @@ logger = get_logger(__name__)
 # database -> app.models -> model -> database 的循环导入。
 from app.models.analysis_task import AnalysisTask  # noqa: F401
 from app.models.assistant import (  # noqa: F401
-    AssistantFieldCandidate, AssistantMessage, AssistantRun, AssistantSession, AssistantTeamSetting,
+    AssistantContextSetting, AssistantFieldCandidate, AssistantMessage, AssistantRun, AssistantSession,
+    AssistantSessionSummary, AssistantTeamSetting,
 )
 from app.models.book_dissect_task import BookDissectTask  # noqa: F401
 from app.models.book_dissect_chapter_fact import BookDissectChapterFact  # noqa: F401
@@ -34,13 +35,15 @@ from app.models.character import Character  # noqa: F401
 from app.models.deai_prompt import DeaiPrompt  # noqa: F401
 from app.models.character_known_info import CharacterKnownInfo  # noqa: F401
 from app.models.generation_history import GenerationHistory  # noqa: F401
-from app.models.memory import PlotAnalysis, StoryMemory  # noqa: F401
+from app.models.knowledge import KbEntry, KbProjectLink, KbSource, KnowledgeCitation  # noqa: F401
+from app.models.memory import PlotAnalysis  # noqa: F401
+from app.models.chapter_digest import ChapterDigest  # noqa: F401
+from app.models.ledger_override import AuthorStateSignal, PromiseAuthorLock  # noqa: F401
 from app.models.narrative_promise import NarrativePromise  # noqa: F401
 from app.models.volume import Volume  # noqa: F401
 from app.models.project import Project  # noqa: F401
 from app.models.project_default_style import ProjectDefaultStyle  # noqa: F401
 from app.models.project_ai_preference import ProjectAIPreference  # noqa: F401
-from app.models.project_reference_pack import ProjectReferencePack  # noqa: F401
 from app.models.reference_pack import ReferencePack  # noqa: F401
 from app.models.relationship import (  # noqa: F401
     CharacterRelationship,

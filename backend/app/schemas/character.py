@@ -97,10 +97,6 @@ class CharacterGenerateRequest(BaseModel):
     requirements: Optional[str] = Field(None, description="特殊要求")
     enable_mcp: bool = Field(False, description="是否启用MCP工具增强（搜索人物原型参考）")
     selected_plugins: List[str] = Field(default_factory=list, description="选择的MCP插件列表")
-    # R8 拆书参考包显式参数（任一为空则走 injector 默认）
-    pack_ids: Optional[List[str]] = Field(None, description="显式选中的拆书参考包 ID 列表")
-    dimensions: Optional[List[str]] = Field(None, description="显式选中的参考维度")
-    strength: Optional[str] = Field(None, description="参考强度：light/medium/deep")
 
 
 class CharacterListResponse(BaseModel):

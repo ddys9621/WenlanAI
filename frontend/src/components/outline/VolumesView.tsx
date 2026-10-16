@@ -5,7 +5,10 @@ import { cn } from '@/lib/utils'
 import { volumeApi } from '@/services/api'
 import { useAIJobsStore, useRunningAIJobs } from '@/store/aiJobsStore'
 import { AIJobBanner } from '@/components/ai-job/AIJobBanner'
+import { KbCitationChips } from '@/components/knowledge/KbCitationChips'
 import { Modal } from '@/components/ui/Modal'
+import { useKbCitations } from '@/hooks/useKbCitations'
+import { unitCitationKey } from '@/utils/knowledge'
 import type { SSEClientOptions } from '@/utils/sseClient'
 import type { ChapterOutline, Volume, VolumeFields, VolumeJobResult, VolumeUnit, VolumeUnitInput } from '@/types'
 
@@ -57,6 +60,11 @@ export function VolumesView({
 
   const outlinesByChapter = useMemo(() => new Map(chapterOutlines.map((o) => [o.chapter_number, o])), [chapterOutlines])
   const unconfirmed = volumes.filter((v) => v.review_status === 'draft' || v.upstream_stale)
+  const citationVersion = volumes.map((v) => `${v.id}@${v.updated_at ?? ''}`).join(',')
+  const volumeCitations = useKbCitations(projectId, 'volume', volumes.map((v) => v.id), citationVersion)
+  const unitCitations = useKbCitations(
+    projectId, 'unit', volumes.flatMap((v) => v.units.map((u) => unitCitationKey(v.id, u.index))), citationVersion,
+  )
 
   const toggle = (id: string) => setExpanded((prev) => {
     const next = new Set(prev)
@@ -230,6 +238,7 @@ export function VolumesView({
                     <button onClick={() => removeVolume(v)} disabled={v.outline_count > 0} className="hh-icon-btn-plain h-8 w-8 hover:text-cinnabar disabled:opacity-40" title={v.outline_count > 0 ? '本卷已有章纲，先删章纲' : '删除'}><Trash2 className="h-3.5 w-3.5" /></button>
                   </div>
                 </div>
+                <KbCitationChips citations={volumeCitations[v.id]} className="mt-1.5 pl-6" />
 
                 {open && (
                   <div className="mt-3 space-y-3 border-t border-surface-border/80 pt-3 text-[13px] leading-6">
@@ -284,6 +293,7 @@ export function VolumesView({
                                 </div>
                                 {u.story && <p className="mt-1.5 whitespace-pre-wrap text-content-secondary">{u.story}</p>}
                                 {u.turn && <p className="mt-1 text-xs text-content-tertiary">结束时：{u.turn}</p>}
+                                <KbCitationChips citations={unitCitations[unitCitationKey(v.id, u.index)]} className="mt-1.5" />
                               </div>
                             )
                           })}

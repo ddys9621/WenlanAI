@@ -1,8 +1,5 @@
 /** 智能助笔的文本工具：修改候选的前后对比（按句子）、引用 / 快捷入口填入输入框、字段值显示。 */
 
-/** 后端每轮带入的历史条数上限（与 assistant_agent_service.HISTORY_LIMIT 一致） */
-export const HISTORY_LIMIT = 12
-
 export interface DiffBlock {
   kind: 'same' | 'change'
   before: string

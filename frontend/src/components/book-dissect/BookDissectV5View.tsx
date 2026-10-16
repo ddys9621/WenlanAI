@@ -1,5 +1,5 @@
 /**
- * 拆书浏览视图（拆书任务页与参考包详情页共用），与作者自己的 总纲 → 卷纲 → 章纲 一一对应：
+ * 拆书浏览视图（拆书任务页），与作者自己的 总纲 → 卷纲 → 章纲 一一对应：
  *
  *   1. 全书骨架   —— pack.synopsis（梗概 / 全书主线 / 分卷 / 卖点 / 高光 / 长线伏笔，≈ 总纲）+ 写法手册 + 结构统计（折叠）
  *   2. 剧情单元   —— pack.bridges 聚合 + GET /book-dissect/{id}/arcs 剧情单元列表（≈ 卷纲里的一件件事）
@@ -7,7 +7,7 @@
  *   4. 文风指纹   —— pack.style（prompt_content / 量化指标 / 例句），可复制 / 导入写作风格库
  *   5. 人物功能谱 —— pack.character_archive
  *
- * 拆书卡 / 剧情单元直接读任务表，抽取进行中也能逐步看到；维度 tab 依赖参考包就绪。
+ * 拆书卡 / 剧情单元直接读任务表，抽取进行中也能逐步看到；维度 tab 依赖拆书结果就绪。
  */
 import { useEffect, useMemo, useState } from 'react'
 import {
@@ -67,7 +67,7 @@ const TABS: Array<{ key: V5Tab; label: string; hint: string; icon: React.Compone
 
 export interface BookDissectV5ViewProps {
   taskId: string
-  /** 参考包详情；null = 尚未生成 / 加载失败 */
+  /** 拆书结果；null = 尚未生成 / 加载失败 */
   pack: ReferencePackDetail | null
   packLoading?: boolean
   /** 初始 tab（任务页抽取中默认落到逐章拆书表） */
@@ -142,7 +142,7 @@ export function BookDissectV5View({ taskId, pack, packLoading = false, initialTa
   )
 }
 
-/** 维度 tab 的统一门卫：参考包加载中 / 不存在时给占位 */
+/** 维度 tab 的统一门卫：拆书结果加载中 / 不存在时给占位 */
 function PackGate({
   pack,
   loading,
@@ -153,8 +153,8 @@ function PackGate({
   children: (pack: ReferencePackDetail) => React.ReactNode
 }) {
   if (pack) return <>{children(pack)}</>
-  if (loading) return <CenterLoader text="正在加载参考包…" />
-  return <NoDataHint label="参考包" hint="抽取完成后会自动生成参考包；抽取进行中可先在「逐章拆书表」查看已完成的章节" />
+  if (loading) return <CenterLoader text="正在加载拆书结果…" />
+  return <NoDataHint label="拆书结果" hint="抽取完成后会自动生成拆书结果并收进知识库；抽取进行中可先在「逐章拆书表」查看已完成的章节" />
 }
 
 // ============================================================

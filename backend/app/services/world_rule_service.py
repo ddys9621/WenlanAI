@@ -1,4 +1,9 @@
-"""世界规则服务 - 为生成流程提供世界观规则支持"""
+"""世界规则服务 - 为生成流程提供世界观规则支持
+
+向量集合随向量模型分开（集合名带模型指纹）：换模型后新集合为空，第一次检索时把本项目规则补进去；
+编码放进线程，不卡事件循环。
+"""
+import asyncio
 import hashlib
 import uuid
 from typing import List, Optional, Dict
@@ -10,7 +15,9 @@ from app.models.world_rule import WorldRule
 from app.models.project import Project
 from app.logger import get_logger
 from app.services.ai_service import ai_service
-from app.services.embedding_runtime import collection_suffix, get_chroma_client, get_embedding_model
+from app.services.embedding_runtime import (
+    collection_suffix, encode_texts, get_chroma_client, get_embedding_model, query_instruction, register_consumer,
+)
 from app.services.generation_trace import trace_reference
 
 logger = get_logger(__name__)
@@ -47,6 +54,7 @@ class WorldRuleService:
             self.client = None
             self.embedding_model = None
             self._initialized = True
+        register_consumer(self)  # 设置页换模型时由 embedding_runtime.switch_model 一起换
 
     def _get_collection_name(self, project_id: str) -> str:
         """生成项目专属的 collection 名称"""
@@ -195,44 +203,47 @@ class WorldRuleService:
             collection = self._get_or_create_collection(rule.project_id)
             if not collection:
                 return False
-
-            # 构建完整的文本描述（用于向量化）
-            text_parts = [
-                f"分类：{rule.category}",
-                f"名称：{rule.name}",
-                f"标识：{rule.key}"
-            ]
-            if rule.summary:
-                text_parts.append(f"简介：{rule.summary}")
-            if rule.details:
-                text_parts.append(f"详细设定：{rule.details}")
-
-            full_text = "\n".join(text_parts)
-
-            # 生成 embedding
-            embedding = self.embedding_model.encode(full_text).tolist()
-
-            # 添加到 ChromaDB
-            collection.upsert(
-                ids=[rule.id],
-                embeddings=[embedding],
-                documents=[full_text],
-                metadatas=[{
-                    "rule_id": rule.id,
-                    "project_id": rule.project_id,
-                    "category": rule.category,
-                    "key": rule.key,
-                    "name": rule.name,
-                    "order_index": rule.order_index
-                }]
-            )
-
+            await self._upsert_rules(collection, [rule])
             logger.info(f"✅ 规则已向量化: {rule.name} ({rule.key})")
             return True
 
         except Exception as e:
             logger.error(f"❌ 规则向量化失败: {str(e)}")
             return False
+
+    @staticmethod
+    def _rule_text(rule: WorldRule) -> str:
+        parts = [f"分类：{rule.category}", f"名称：{rule.name}", f"标识：{rule.key}"]
+        if rule.summary:
+            parts.append(f"简介：{rule.summary}")
+        if rule.details:
+            parts.append(f"详细设定：{rule.details}")
+        return "\n".join(parts)
+
+    async def _upsert_rules(self, collection, rules: List[WorldRule]) -> None:
+        if not rules:
+            return
+        texts = [self._rule_text(rule) for rule in rules]
+        vectors = await asyncio.to_thread(encode_texts, self.embedding_model, texts)
+        await asyncio.to_thread(
+            collection.upsert,
+            ids=[rule.id for rule in rules],
+            embeddings=vectors,
+            documents=texts,
+            metadatas=[{
+                "rule_id": rule.id, "project_id": rule.project_id, "category": rule.category, "key": rule.key,
+                "name": rule.name, "order_index": rule.order_index,
+            } for rule in rules],
+        )
+
+    async def _backfill_if_empty(self, db: AsyncSession, project_id: str, collection) -> None:
+        """当前模型的集合还是空的（刚换模型 / 旧规则从没进过向量库）：把本项目全部规则补进去。"""
+        if int(await asyncio.to_thread(collection.count)) > 0:
+            return
+        rules = await self.get_rules_by_project(db, project_id)
+        if rules:
+            await self._upsert_rules(collection, list(rules))
+            logger.info(f"🧱 世界规则向量已补齐：{len(rules)} 条")
 
     async def delete_rule_from_vector_db(
         self,
@@ -294,9 +305,15 @@ class WorldRuleService:
             collection = self._get_or_create_collection(project_id)
             if not collection:
                 return await self.get_rules_by_project(db, project_id, category)
+            await self._backfill_if_empty(db, project_id, collection)
+            total = int(await asyncio.to_thread(collection.count))
+            if total == 0:
+                return await self.get_rules_by_project(db, project_id, category)
 
-            # 生成查询 embedding
-            query_embedding = self.embedding_model.encode(query).tolist()
+            # 生成查询 embedding（bge 中文模型加检索指令）
+            query_embedding = (await asyncio.to_thread(
+                encode_texts, self.embedding_model, [query_instruction() + (query or "")[:400]]
+            ))[0]
 
             # 构建过滤条件
             where_filter = None
@@ -304,10 +321,11 @@ class WorldRuleService:
                 where_filter = {"category": category}
 
             # 向量检索
-            results = collection.query(
+            results = await asyncio.to_thread(
+                collection.query,
                 query_embeddings=[query_embedding],
-                n_results=limit,
-                where=where_filter
+                n_results=max(1, min(limit, total)),
+                where=where_filter,
             )
 
             if not results or not results['ids'] or not results['ids'][0]:

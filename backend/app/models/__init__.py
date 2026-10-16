@@ -9,9 +9,11 @@ from app.models.book_dissect_task import BookDissectTask
 from app.models.book_dissect_chapter_fact import BookDissectChapterFact
 from app.models.book_dissect_story_arc import BookDissectStoryArc
 from app.models.reference_pack import ReferencePack
-from app.models.project_reference_pack import ProjectReferencePack
+from app.models.knowledge import KbEntry, KbProjectLink, KbSource, KnowledgeCitation
 from app.models.settings import Settings
-from app.models.memory import StoryMemory, PlotAnalysis
+from app.models.memory import PlotAnalysis
+from app.models.chapter_digest import ChapterDigest
+from app.models.ledger_override import AuthorStateSignal, PromiseAuthorLock
 from app.models.writing_style import WritingStyle
 from app.models.project_default_style import ProjectDefaultStyle
 from app.models.mcp_plugin import MCPPlugin
@@ -35,7 +37,8 @@ from app.models.chapter_version import ChapterVersion
 from app.models.chapter_candidate import ChapterCandidate
 from app.models.world_map import WorldMap, WorldMapLocation
 from app.models.assistant import (
-    AssistantFieldCandidate, AssistantMessage, AssistantRun, AssistantSession, AssistantTeamSetting,
+    AssistantContextSetting, AssistantFieldCandidate, AssistantMessage, AssistantRun, AssistantSession,
+    AssistantSessionSummary, AssistantTeamSetting,
 )
 
 __all__ = [
@@ -52,10 +55,15 @@ __all__ = [
     "BookDissectChapterFact",
     "BookDissectStoryArc",
     "ReferencePack",
-    "ProjectReferencePack",
+    "KbSource",
+    "KbEntry",
+    "KbProjectLink",
+    "KnowledgeCitation",
     "Settings",
-    "StoryMemory",
     "PlotAnalysis",
+    "ChapterDigest",
+    "AuthorStateSignal",
+    "PromiseAuthorLock",
     "WritingStyle",
     "ProjectDefaultStyle",
     "MCPPlugin",
@@ -85,4 +93,6 @@ __all__ = [
     "AssistantRun",
     "AssistantFieldCandidate",
     "AssistantTeamSetting",
+    "AssistantContextSetting",
+    "AssistantSessionSummary",
 ]

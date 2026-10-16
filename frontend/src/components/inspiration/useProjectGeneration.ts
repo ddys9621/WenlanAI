@@ -13,7 +13,8 @@ import type {
 } from '../../types';
 import type { WizardAction, WizardData } from './types';
 import type { MCPSelectorValue } from '../MCPSelector';
-import type { ReferencePackSelectorValue } from '../ReferencePackSelector';
+import type { KbSourceChoice } from '../../types/knowledge';
+import { kbChoicePayload } from '../../utils/knowledge';
 
 export type GenerationNodeKey = 'worldBuilding' | 'characters' | 'outline' | 'volumes';
 
@@ -30,20 +31,8 @@ const DEFAULT_CHAPTER_COUNT = 30;
 interface UseProjectGenerationOptions {
   dispatch: React.Dispatch<WizardAction>;
   mcpSettings: MCPSelectorValue;
-  /** V3.2-B：灵感模式入口选好的拆书参考包（可选）。
-   * - enabled=true 时：三步生成都透传 R8 字段到后端
-   * - 未提供/enabled=false：走原本默认逻辑（项目创建后不挂载，后端 注入到机制也跳过拆书） */
-  refPackSettings?: ReferencePackSelectorValue;
-}
-
-/** 把 ReferencePackSelectorValue 转为 R8 API payload 字段（只在 enabled 时返回）。 */
-function _r8Payload(v?: ReferencePackSelectorValue): { pack_ids?: string[]; dimensions?: string[]; strength?: 'light' | 'medium' | 'deep' } {
-  if (!v || !v.enabled) return {};
-  return {
-    pack_ids: v.packIds.length > 0 ? v.packIds : undefined,
-    dimensions: v.dimensions.length > 0 ? v.dimensions : undefined,
-    strength: v.strength,
-  };
+  /** 灵感模式里选的对标书（可选）：只在建项目那一步传，项目建好后关联上，后续各步由后端按关联注入仿写参考 */
+  kbChoice?: KbSourceChoice;
 }
 
 const EMPTY_ARTIFACTS: GenerationArtifacts = {
@@ -108,7 +97,7 @@ const getNodeRange = (preset: StageProgressPreset, node: GenerationNodeKey): [nu
 const getOutlineFromResponse = (response: GenerateOutlineResponse) =>
   response.outline || response.outlines?.[0] || null;
 
-export function useProjectGeneration({ dispatch, mcpSettings, refPackSettings }: UseProjectGenerationOptions) {
+export function useProjectGeneration({ dispatch, mcpSettings, kbChoice }: UseProjectGenerationOptions) {
   const [artifacts, setArtifacts] = useState<GenerationArtifacts>(EMPTY_ARTIFACTS);
   const [runningNode, setRunningNode] = useState<GenerationNodeKey | null>(null);
   const generationRunRef = useRef(0);
@@ -229,8 +218,7 @@ export function useProjectGeneration({ dispatch, mcpSettings, refPackSettings }:
             character_count: 5,
             enable_mcp: mcpEnabled,
             selected_plugins: mcpPlugins,
-            // V3.2-B：灵感入口选好的拆书 pack 会在项目创建后被后端自动挂载
-            ..._r8Payload(refPackSettings),
+            ...kbChoicePayload(kbChoice),
           },
           {
             onProgress: (message, progress) => {
@@ -264,7 +252,7 @@ export function useProjectGeneration({ dispatch, mcpSettings, refPackSettings }:
     }
 
     return result as WorldBuildingResponse;
-  }, [dispatch, dispatchIfActive, isRunActive, mcpEnabled, mcpPlugins, refPackSettings]);
+  }, [dispatch, dispatchIfActive, isRunActive, mcpEnabled, mcpPlugins, kbChoice]);
 
   const runCharacters = useCallback(async (
     projectId: string,
@@ -298,8 +286,6 @@ export function useProjectGeneration({ dispatch, mcpSettings, refPackSettings }:
         genre: data.genre.join('、'),
         enable_mcp: mcpEnabled,
         selected_plugins: mcpPlugins,
-        // V3.2-B：后端读项目挂载列表（上一步刚被自动挂上）；此处继续透传以便后端有显式选择优先级
-        ..._r8Payload(refPackSettings),
       },
       {
         onProgress: (message, progress) => {
@@ -329,7 +315,7 @@ export function useProjectGeneration({ dispatch, mcpSettings, refPackSettings }:
     );
 
     return (result as { characters?: Character[] }).characters || [];
-  }, [dispatch, dispatchIfActive, isRunActive, mcpEnabled, mcpPlugins, refPackSettings]);
+  }, [dispatch, dispatchIfActive, isRunActive, mcpEnabled, mcpPlugins]);
 
   const runOutline = useCallback(async (
     projectId: string,
@@ -354,8 +340,6 @@ export function useProjectGeneration({ dispatch, mcpSettings, refPackSettings }:
         target_words: 100000,
         enable_mcp: mcpEnabled,
         selected_plugins: mcpPlugins,
-        // V3.2-B：透传灵感入口选好的拆书参数
-        ..._r8Payload(refPackSettings),
       },
       {
         onProgress: (message, progress) => {
@@ -387,7 +371,7 @@ export function useProjectGeneration({ dispatch, mcpSettings, refPackSettings }:
     );
 
     return getOutlineFromResponse(response as GenerateOutlineResponse);
-  }, [dispatch, dispatchIfActive, isRunActive, mcpEnabled, mcpPlugins, refPackSettings]);
+  }, [dispatch, dispatchIfActive, isRunActive, mcpEnabled, mcpPlugins]);
 
   const runVolumes = useCallback(async (
     projectId: string,

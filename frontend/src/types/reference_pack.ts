@@ -1,5 +1,5 @@
 /**
- * 拆书参考包类型定义
+ * 拆书结果类型（GET /book-dissect/{task_id}/result；表名沿用 reference_packs）：拆书页展示用
  *
  * 维度与作者自己的规划链对应：synopsis（全书骨架 ≈ 总纲）/ bridges（剧情单元库 ≈ 卷纲里的一件件事）/ 拆书卡（≈ 章纲）。
  * 后端 schema：@/backend/app/schemas/reference_pack.py
@@ -8,21 +8,7 @@
 export type ReferencePackStatus = 'generating' | 'ready' | 'partial' | 'failed';
 
 /**
- * 注入维度（与后端 ReferenceDimension Literal 一致，否则挂载请求会 422）
- */
-export type ReferenceDimension =
-  | 'synopsis' // 全书骨架（梗概 / 全书主线 / 分卷 / 卖点 / 成长路线）
-  | 'bridges' // 剧情单元库（单元长短 / 强弱交替 / 兑现方式 + 典型单元；键名沿用 bridges）
-  | 'style' // 文风指纹（prompt_content + 量化指标 + 例句）
-  | 'character_archive' // 人物功能谱
-  | 'methodology' // 写法手册
-  | 'structure' // 结构统计（钩子 / 节奏 / 兑现密度 / 张力曲线）
-  | 'corpus'; // 拆书卡检索（按本次内容 BM25 命中原书章）
-
-export type ReferenceStrength = 'light' | 'medium' | 'deep';
-
-/**
- * 参考包列表项（不含维度正文）
+ * 拆书结果的基本信息（不含维度正文）
  */
 export interface ReferencePackSummary {
   id: string;
@@ -31,7 +17,7 @@ export interface ReferencePackSummary {
   source_book_title: string;
   status: ReferencePackStatus;
   generated_dimensions: string[];
-  /** 拆书流水线版本（参考包内容格式） */
+  /** 拆书流水线版本（拆书结果的内容格式） */
   pipeline_version: number;
   error_message: string | null;
   attached_project_count: number;
@@ -40,7 +26,7 @@ export interface ReferencePackSummary {
 }
 
 /**
- * 参考包详情（六个维度正文一次返回）
+ * 拆书结果（六个维度正文一次返回）
  *
  * 维度内部为灵活的 dict（形状见下方 *Data）；null 表示该维度未生成（partial 状态下常见）。
  */
@@ -51,41 +37,6 @@ export interface ReferencePackDetail extends ReferencePackSummary {
   character_archive: Record<string, unknown> | null;
   methodology: Record<string, unknown> | null;
   structure: Record<string, unknown> | null;
-}
-
-/**
- * 项目已挂载参考包列表项
- */
-export interface ProjectReferencePackItem {
-  id: string; // 关联表主键
-  project_id: string;
-  pack_id: string;
-  pack_summary: ReferencePackSummary;
-  default_dimensions: ReferenceDimension[];
-  default_strength: ReferenceStrength;
-  attached_at: string;
-}
-
-/**
- * 挂载参考包请求 body
- */
-export interface AttachReferencePackRequest {
-  pack_id: string;
-  default_dimensions?: ReferenceDimension[];
-  default_strength?: ReferenceStrength;
-}
-
-export interface UpdateAttachmentRequest {
-  default_dimensions?: ReferenceDimension[];
-  default_strength?: ReferenceStrength;
-}
-
-export interface AttachReferencePackResponse {
-  attachment_id: string;
-  project_id: string;
-  pack_id: string;
-  default_dimensions: ReferenceDimension[];
-  default_strength: ReferenceStrength;
 }
 
 // ============================================================
@@ -246,47 +197,3 @@ export interface MethodologyData {
   growth_progression?: MethodologyItem | null;
   advantage_usage?: MethodologyItem | null;
 }
-
-// ============================================================
-// 一键仿写（V3 R5）
-// 后端 schema：@/backend/app/schemas/imitation.py
-// ============================================================
-
-/**
- * 一键仿写请求体
- *
- * pack_ids / dimensions / strength 全部可省略：
- * - 省略 pack_ids → 使用项目所有已挂载且 ready 的参考包
- * - 省略 dimensions → 取所选 pack 挂载关联的 default_dimensions 并集
- * - 省略 strength → 取所选 pack 中"最深"者
- */
-export interface ImitateChapterRequest {
-  user_intent: string;
-  target_chapter_id?: string;
-  pack_ids?: string[];
-  dimensions?: ReferenceDimension[];
-  strength?: ReferenceStrength;
-  target_word_count?: number;
-  style_id?: number;
-}
-
-export interface ImitationPackUsage {
-  pack_id: string;
-  source_book_title: string;
-  dimensions: string[];
-}
-
-export interface ImitatePromptPreview {
-  system_prompt: string;
-  user_prompt: string;
-  used_packs: ImitationPackUsage[];
-  used_dimensions: string[];
-  strength: ReferenceStrength;
-  target_word_count: number;
-  project_context_chars: number;
-  reference_chars: number;
-  extras?: Record<string, unknown>;
-}
-
-/** SSE 流式事件载荷（meta 事件） */
-

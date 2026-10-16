@@ -6,11 +6,9 @@
 - builder 函数纯异步、纯查表/纯字符串拼接，不调用 LLM
 - 失败时返回空字符串（被 assembler 标 skipped）
 - required 槽位空返回 → assembler 抛 ValueError
-- 拆书 builder（dissect_*）直接 SELECT ReferencePack 预压缩字段（V4.4 K5 三档）
 
 Phase 1 骨架版本：
 - 业务必填槽位（system_role / chapter_outline / project_skeleton / output_spec）实现最小可用版
-- 拆书槽位实现 SELECT 预压缩字段的查询逻辑
 - 历史接续/记忆/桥段位置等先返回基础占位，留 TODO 给后续完善
 """
 from __future__ import annotations
@@ -48,22 +46,6 @@ async def build_system_base_style(db: AsyncSession, ctx: Any) -> str:
 - 书面词换成嘴上会说的：随即→然后、些许→有点、眸→眼、宛如→像
 - ❌ 不用"道心坚定""一往无前""天地本质"等套路语，不用"为了天下苍生""更大的使命"等宏大主题，不用排比总结主角心理
 - ✅ 结尾停在具体动作、一句话或一个声音上，最好是钩子"""
-
-
-async def build_dissect_style(db: AsyncSession, ctx: Any) -> str:
-    """拆书文风指令（项目级缓存）。
-
-    实现：SELECT 项目挂载的第一个 ReferencePack 的 style_<strength> 字段。
-    """
-    pack = await _get_first_attached_pack(db, ctx.project_id)
-    if not pack:
-        return ""
-    strength = _get_strength_for(ctx, "style")
-    text = pack.get_precompressed("style", strength)
-    if not text:
-        return ""
-    book_title = getattr(pack, "source_book_title", "") or ""
-    return f"**拆书参考文风（来源：《{book_title}》）：**\n{text}"
 
 
 # ============================================================
@@ -263,139 +245,6 @@ async def build_output_spec(db: AsyncSession, ctx: Any) -> str:
 
 
 # ============================================================
-# 拆书 user 段 builder（统一查 ReferencePack 预压缩字段）
-# ============================================================
-
-def _make_dissect_builder(dimension: str) -> Callable[[AsyncSession, Any], Awaitable[str]]:
-    """工厂：生成读取指定维度预压缩字段的 builder。
-
-    优先级（V4.4 K5 三档预压缩生效后）：
-    1. 优先返回预压缩字段（pack.<dim>_<strength>）→ 由拆书时一次性生成 + 写 DB
-    2. fallback：实时调 dimension_compressor 从 _json 字段计算（首次访问）
-       - 比之前的"粗暴 substring 截断"质量高得多
-       - 性能：纯字典遍历 + 字符串拼接，几毫秒级
-       - 对 204 章已有拆书数据无需迁移
-    """
-    async def _builder(db: AsyncSession, ctx: Any) -> str:
-        pack = await _get_first_attached_pack(db, ctx.project_id)
-        if not pack:
-            return ""
-        strength = _get_strength_for(ctx, dimension)
-        # 1. 优先取已写 DB 的预压缩
-        text = pack.get_precompressed(dimension, strength)
-        if text:
-            return text
-        # 2. fallback：实时调 compressor
-        json_text = getattr(pack, f"{dimension}_json", None)
-        if not json_text:
-            return ""
-        from app.services.reference_pack.dimension_compressor import compress_dimension
-        try:
-            return compress_dimension(json_text, dimension, strength) or ""
-        except Exception as exc:  # pragma: no cover - 防御性
-            logger.warning(
-                "compressor 失败 dim=%s strength=%s err=%s", dimension, strength, exc
-            )
-            # 极端情况降级：粗暴 substring（旧 fallback）
-            max_chars = {"light": 130, "medium": 400, "deep": 1000}.get(strength, 400)
-            return json_text[:max_chars] + ("…(截断)" if len(json_text) > max_chars else "")
-
-    _builder.__name__ = f"build_dissect_{dimension}"
-    return _builder
-
-
-build_dissect_methodology = _make_dissect_builder("methodology")
-build_dissect_structure = _make_dissect_builder("structure")
-build_dissect_synopsis = _make_dissect_builder("synopsis")
-build_dissect_bridges = _make_dissect_builder("bridges")
-build_dissect_char_arch = _make_dissect_builder("character_archive")
-
-
-_CORPUS_CHARS_PER_ITEM = {"light": 200, "medium": 320, "deep": 450}
-
-
-async def build_dissect_corpus(db: AsyncSession, ctx: Any) -> str:
-    """corpus：BM25 检索项目挂载参考包的拆书卡（章节级动态，不缓存）。
-
-    锚文本按上下文取（章纲 → 用户输入 → 书名 + 主题）；top_k 查 CORPUS_TOPK。
-    """
-    from app.services.book_dissect.chapter_card_retriever import ChapterCardRetriever, format_card_hits
-    from app.services.reference_pack.policy_tables import get_corpus_top_k
-
-    top_k = get_corpus_top_k(ctx.scene, ctx.model_name)
-    if top_k <= 0:
-        return ""
-    packs = [p for p in await _get_attached_packs(db, ctx.project_id) if p.task_id]
-    if not packs:
-        return ""
-    query = await _corpus_anchor_text(db, ctx)
-    if not query:
-        return ""
-    hits = await ChapterCardRetriever().retrieve(db, task_ids=[p.task_id for p in packs], query=query, top_k=top_k)
-    if not hits:
-        return ""
-    strength = _get_strength_for(ctx, "corpus")
-    return format_card_hits(
-        hits,
-        title_map={p.task_id: p.source_book_title or "原书" for p in packs},
-        chars_per_item=_CORPUS_CHARS_PER_ITEM.get(strength, 320),
-        header="以下为原书相关拆书卡（与本次内容最相关的章），仅作节奏 / 结构参考，禁止照抄原书人名与情节：",
-    )
-
-
-async def _corpus_anchor_text(db: AsyncSession, ctx: Any) -> str:
-    """corpus 检索锚文本：越贴近本次要写的内容越靠前。"""
-    parts: list[str] = []
-    if getattr(ctx, "chapter_outline_id", None):
-        from app.models.chapter_outline import ChapterOutline
-
-        co = (await db.execute(select(ChapterOutline).where(ChapterOutline.id == ctx.chapter_outline_id))).scalar_one_or_none()
-        if co:
-            parts = [co.title, co.plot_points, co.key_events]
-    if not any(parts):
-        parts = [getattr(ctx, "user_input", None)]
-    if not any(parts):
-        parts = [getattr(ctx, "title", None), getattr(ctx, "theme", None), getattr(ctx, "description", None)]
-    return " ".join(str(p).strip() for p in parts if p and str(p).strip())
-
-
-# ============================================================
-# helpers
-# ============================================================
-
-async def _get_attached_packs(db: AsyncSession, project_id: str) -> list:
-    """SELECT 项目挂载的全部 ReferencePack（按 attached_at 排序）。"""
-    if not project_id:
-        return []
-    try:
-        from app.models.reference_pack import ReferencePack
-        from app.models.project_reference_pack import ProjectReferencePack
-    except ImportError:
-        return []
-
-    result = await db.execute(
-        select(ReferencePack)
-        .join(ProjectReferencePack, ProjectReferencePack.pack_id == ReferencePack.id)
-        .where(ProjectReferencePack.project_id == project_id)
-        .order_by(ProjectReferencePack.attached_at)
-    )
-    return list(result.scalars().all())
-
-
-async def _get_first_attached_pack(db: AsyncSession, project_id: str):
-    """SELECT 项目挂载的第一个 ReferencePack（按 attached_at 排序）。"""
-    packs = await _get_attached_packs(db, project_id)
-    return packs[0] if packs else None
-
-
-def _get_strength_for(ctx: Any, dimension: str) -> str:
-    """查 (scene, tier) → policy → strength。"""
-    from app.services.reference_pack.policy_tables import get_policy
-    policy = get_policy(ctx.scene, ctx.model_name)
-    return policy.get(dimension, "off")
-
-
-# ============================================================
 # builder 注册表（assembler 按 slot.name 查找）
 # ============================================================
 
@@ -403,7 +252,6 @@ SLOT_BUILDERS: dict[str, Callable[[AsyncSession, Any], Awaitable[str]]] = {
     # system 段
     "system_role":            build_system_role,
     "system_base_style":      build_system_base_style,
-    "dissect_style":          build_dissect_style,
     # user 段 - 必填业务
     "project_skeleton":       build_project_skeleton,
     "chapter_outline":        build_chapter_outline,
@@ -416,15 +264,5 @@ SLOT_BUILDERS: dict[str, Callable[[AsyncSession, Any], Awaitable[str]]] = {
     "history_normal":         build_history_normal,
     "history_brief":          build_history_brief,
     "memory_topk":            build_memory_topk,
-    # user 段 - 拆书 V5 维度（synopsis / methodology / structure / bridges / character_archive / corpus）
-    "dissect_methodology":    build_dissect_methodology,
-    "dissect_structure":      build_dissect_structure,
-    "dissect_synopsis":       build_dissect_synopsis,
-    "dissect_corpus":         build_dissect_corpus,
-    "dissect_bridges":        build_dissect_bridges,
-    "dissect_character_archive": build_dissect_char_arch,
 }
 
-
-# 供规划服务取参考包标题
-get_first_attached_pack = _get_first_attached_pack

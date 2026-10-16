@@ -278,9 +278,11 @@ async def delete_project(
         )
         logger.debug(f"删除角色数: {characters_result.rowcount}")
         
-        # 注意：StoryMemory和PlotAnalysis会通过数据库级联删除自动清理
-        # 但向量数据库已在上面手动清理
-        
+        # SQLite 没开外键级联：分析记录、章节档案、伏笔、状态信号、时间轴等账本表要手动清
+        from app.services.chapter_purge_service import purge_project_ledger
+
+        await purge_project_ledger(db, project_id)
+
         await db.delete(project)
         await db.commit()
         

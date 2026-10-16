@@ -157,7 +157,7 @@ class VolumeExportData(BaseModel):
 
 class ProjectExportData(BaseModel):
     """项目完整导出数据"""
-    version: str = "2.0.0"
+    version: str = "2.1.0"
     export_time: str
     project: Dict[str, Any]
     chapters: List[ChapterExportData] = []
@@ -172,6 +172,9 @@ class ProjectExportData(BaseModel):
     world_rules: List[WorldRuleExportData] = []
     volumes: List[VolumeExportData] = []
     chapter_outlines: List[ChapterOutlineExportData] = []
+    # 2.1.0 起：故事账本（分析记录 / 章节档案 / 伏笔 / 状态信号 / 作者修正 / 时间轴 / 因果 / 关系 / 已知信息 / 层级摘要），
+    # 导入后不用整本书重新分析；结构见 services/ledger_transfer.py
+    ledger: Optional[Dict[str, Any]] = None
 
 
 class ImportValidationResult(BaseModel):

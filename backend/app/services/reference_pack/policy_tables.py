@@ -1,16 +1,10 @@
-"""V4.2 查表架构：4 张完全硬编码的策略查表（详见 v4_design.md §10.3）。
+"""查表：模型分档与按档位的条数（全部硬编码）。
 
-核心原则：**Injector 内零计算、零 if/else、零 fallback**。
-所有"哪个场景注入什么档位、放多长、放多少条"全在这里写死。
-
-4 张表：
 1. MODEL_TIERS    模型分档（S/M/L/XL）按上下文窗口大小
-2. POLICY_TABLE   场景×档位 → 维度策略（7 场景 × 4 档 = 28 entry）
-3. CORPUS_TOPK    corpus 检索 top-K 查表
-4. HISTORICAL_CONTEXT_TABLE  历史接续摘要数量查表
-5. MEMORY_TOPK_TABLE         智能记忆 top-K 查表
+2. HISTORICAL_CONTEXT_TABLE  历史接续摘要数量查表
+3. MEMORY_TOPK_TABLE         智能记忆 top-K 查表
 
-新增模型只动 MODEL_TIERS；新增场景只动 POLICY_TABLE；零 Injector 代码改动。
+新增模型只动 MODEL_TIERS。
 """
 from __future__ import annotations
 
@@ -22,12 +16,6 @@ ModelTier = Literal["S", "M", "L", "XL"]
 # M  = 32K    主流（Qwen-Max / 豆包 Pro 32K / Yi-Large 32K）
 # L  = 64K    大窗口（DeepSeek V3 / GLM-4 64K）
 # XL = 128K+  旗舰（Claude Sonnet 4.5 / GPT-4o / Gemini 2.0 / Moonshot K2 / GLM-4.5）
-
-Strength = Literal["off", "light", "medium", "deep"]
-# off    = 0 token，完全不注入
-# light  = ≤200 token
-# medium = ≤600 token
-# deep   = ≤1500 token
 
 
 # ============================================================
@@ -121,119 +109,6 @@ def get_model_tier(model_name: str) -> ModelTier:
         if key != "_default" and name.startswith(key):
             return tier
     return MODEL_TIERS["_default"]
-
-
-# ============================================================
-# 表 B：场景 × 模型档位 → 维度策略（核心交付物）
-# ============================================================
-# 每个 (scene, tier) entry 明确写死每个维度的 strength
-# strength: 'off' / 'light' / 'medium' / 'deep'
-#
-# 拆书维度共 7 维（与作者的 总纲 → 卷纲 → 章纲 对应）：
-#   synopsis（全书骨架 ≈ 总纲）/ bridges（剧情单元库 ≈ 卷纲里的一件件事，键名沿用）/ style（文风指纹）
-#   / character_archive（人物功能谱）/ methodology（写法手册）/ structure（结构统计）/ corpus（拆书卡检索 ≈ 章纲）
-
-V5_DIMENSIONS: tuple[str, ...] = (
-    "synopsis", "bridges", "style", "character_archive", "methodology", "structure", "corpus",
-)
-
-POLICY_TABLE: dict[tuple[str, ModelTier], dict[str, Strength]] = {
-
-    # ============ 1. 世界观生成 ============
-    ("world_building", "S"):  {"synopsis": "medium"},
-    ("world_building", "M"):  {"synopsis": "deep"},
-    ("world_building", "L"):  {"synopsis": "deep"},
-    ("world_building", "XL"): {"synopsis": "deep"},
-
-    # ============ 2. 角色生成 ============
-    ("character", "S"):  {"character_archive": "medium", "synopsis": "light"},
-    ("character", "M"):  {"character_archive": "deep", "synopsis": "medium", "corpus": "light"},
-    ("character", "L"):  {"character_archive": "deep", "synopsis": "medium", "corpus": "light"},
-    ("character", "XL"): {"character_archive": "deep", "synopsis": "medium", "corpus": "medium"},
-
-    # ============ 3. 故事大纲 ============
-    ("story_outline", "S"):  {"synopsis": "medium", "methodology": "medium", "structure": "light"},
-    ("story_outline", "M"):  {"synopsis": "deep", "methodology": "deep", "bridges": "medium", "structure": "medium"},
-    ("story_outline", "L"):  {"synopsis": "deep", "methodology": "deep", "bridges": "medium", "structure": "medium"},
-    ("story_outline", "XL"): {"synopsis": "deep", "methodology": "deep", "bridges": "deep", "structure": "deep"},
-
-    # ============ 3.5 卷纲规划（分卷 / 细化剧情单元）============
-    ("volume_planning", "S"):  {"bridges": "medium", "synopsis": "light", "methodology": "light"},
-    ("volume_planning", "M"):  {"bridges": "deep", "methodology": "deep", "synopsis": "medium",
-                                "structure": "medium", "character_archive": "medium"},
-    ("volume_planning", "L"):  {"bridges": "deep", "methodology": "deep", "synopsis": "medium",
-                                "structure": "medium", "character_archive": "medium"},
-    ("volume_planning", "XL"): {"bridges": "deep", "methodology": "deep", "synopsis": "deep",
-                                "structure": "deep", "character_archive": "deep"},
-
-    # ============ 4. 章纲（批量）============
-    ("chapter_outline", "S"):  {"methodology": "medium", "structure": "medium", "synopsis": "light"},
-    ("chapter_outline", "M"):  {"methodology": "deep", "structure": "deep", "bridges": "medium",
-                                "synopsis": "medium", "corpus": "medium"},
-    ("chapter_outline", "L"):  {"methodology": "deep", "structure": "deep", "bridges": "medium",
-                                "synopsis": "medium", "corpus": "medium"},
-    ("chapter_outline", "XL"): {"methodology": "deep", "structure": "deep", "bridges": "deep",
-                                "synopsis": "deep", "corpus": "deep"},
-
-    # ============ 5a. 章节正文（每章触发，最高频）============
-    ("chapter_content", "S"):  {"style": "medium", "corpus": "light", "methodology": "light"},
-    ("chapter_content", "M"):  {"style": "deep", "corpus": "medium", "methodology": "medium",
-                                "bridges": "light", "structure": "light", "synopsis": "light"},
-    ("chapter_content", "L"):  {"style": "deep", "corpus": "deep", "methodology": "medium",
-                                "bridges": "light", "structure": "medium", "synopsis": "light"},
-    ("chapter_content", "XL"): {"style": "deep", "corpus": "deep", "methodology": "deep",
-                                "bridges": "medium", "structure": "deep", "synopsis": "medium",
-                                "character_archive": "medium"},
-
-    # ============ 5b. 章节重生成 ============
-    ("chapter_regenerate", "S"):  {"style": "medium", "corpus": "light"},
-    ("chapter_regenerate", "M"):  {"style": "deep", "corpus": "medium", "methodology": "medium"},
-    ("chapter_regenerate", "L"):  {"style": "deep", "corpus": "medium", "methodology": "medium"},
-    ("chapter_regenerate", "XL"): {"style": "deep", "corpus": "deep", "methodology": "deep"},
-}
-
-
-def get_policy(scene: str, model_name: str) -> dict[str, Strength]:
-    """查表入口：返回 (scene, tier) 对应的维度策略。
-
-    Returns:
-        dict[dimension_name, strength]，未在表中的场景返回空 dict（兜底白名单）
-    """
-    tier = get_model_tier(model_name)
-    return POLICY_TABLE.get((scene, tier), {})
-
-
-# ============================================================
-# 表 C：corpus 检索 top-K 查表
-# ============================================================
-# 不再用公式反算，每个 (scene, tier) 写死 K
-
-CORPUS_TOPK: dict[tuple[str, ModelTier], int] = {
-    ("chapter_content", "S"):  1,
-    ("chapter_content", "M"):  3,
-    ("chapter_content", "L"):  5,
-    ("chapter_content", "XL"): 5,
-
-    ("chapter_outline", "S"):  0,
-    ("chapter_outline", "M"):  2,
-    ("chapter_outline", "L"):  3,
-    ("chapter_outline", "XL"): 5,
-
-    ("chapter_regenerate", "S"):  1,
-    ("chapter_regenerate", "M"):  2,
-    ("chapter_regenerate", "L"):  3,
-    ("chapter_regenerate", "XL"): 5,
-
-    ("character", "S"):  0,
-    ("character", "M"):  1,
-    ("character", "L"):  2,
-    ("character", "XL"): 3,
-}
-
-
-def get_corpus_top_k(scene: str, model_name: str) -> int:
-    """查表获取 corpus 检索 top-K（零计算）。"""
-    return CORPUS_TOPK.get((scene, get_model_tier(model_name)), 0)
 
 
 # ============================================================

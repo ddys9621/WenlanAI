@@ -8,6 +8,8 @@ import { Check, FileText, Loader2, Trash2, TriangleAlert } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { chapterCandidateApi } from '@/services/api';
+import { KbCitationChips } from '@/components/knowledge/KbCitationChips';
+import { useKbCitations } from '@/hooks/useKbCitations';
 import type { Chapter } from '@/types';
 import type { CandidateAdoptResult, CandidateDetail, CandidateSummary } from '@/types/writing';
 import { formatServerTime } from '@/utils/serverTime';
@@ -39,6 +41,7 @@ export function CandidatePanel({ chapter, focusCandidateId, onAdopted, onChanged
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
   const [autoAnalyze, setAutoAnalyze] = useState(false);
+  const citations = useKbCitations(chapter.project_id, 'chapter_candidate', detail ? [detail.id] : []);
 
   const loadList = useCallback(async (prefer?: string | null) => {
     setLoading(true);
@@ -183,6 +186,7 @@ export function CandidatePanel({ chapter, focusCandidateId, onAdopted, onChanged
               </div>
             )}
             <AdherenceReportView report={detail.adherence} />
+            <KbCitationChips citations={citations[detail.id]} />
           </div>
 
           <div className="flex min-h-0 flex-1 flex-col">

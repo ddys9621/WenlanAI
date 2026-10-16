@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-READ_TOOLS = ("search_project", "list_fields", "read_field", "story_progress", "read_reference")
+READ_TOOLS = ("search_project", "list_fields", "read_field", "story_progress", "kb_search", "kb_read")
 PLANNING_TOOLS = ("plan_volumes", "detail_volume", "plan_chapters")
 
 

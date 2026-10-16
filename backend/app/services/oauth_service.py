@@ -20,8 +20,9 @@ class LinuxDOOAuthService:
     """Linux.do Connect 的三步：授权地址 → code 换 token → token 拉用户信息"""
 
     AUTHORIZE_URL = "https://connect.linux.do/oauth2/authorize"
-    TOKEN_URL = "https://connect.linux.do/oauth2/token"
-    USERINFO_URL = "https://connect.linux.do/api/user"
+    API_BASES = ("https://connect.linuxdo.org", "https://connect.linux.do")
+    TOKEN_PATH = "/oauth2/token"
+    USERINFO_PATH = "/api/user"
 
     def __init__(
         self,
@@ -39,6 +40,15 @@ class LinuxDOOAuthService:
 
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(timeout=self.timeout, follow_redirects=True, transport=self._transport)
+
+    async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        async with self._client() as client:
+            for base in self.API_BASES[:-1]:
+                try:
+                    return await client.request(method, base + path, **kwargs)
+                except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+                    logger.warning(f"[Linux.do] {base} 连接失败，改试下一个地址: {type(e).__name__}: {e}")
+            return await client.request(method, self.API_BASES[-1] + path, **kwargs)
 
     def authorization_url(self, state: str) -> str:
         params = {
@@ -60,8 +70,7 @@ class LinuxDOOAuthService:
             "redirect_uri": self.redirect_uri,
         }
         try:
-            async with self._client() as client:
-                response = await client.post(self.TOKEN_URL, data=data, headers={"Accept": "application/json"})
+            response = await self._request("POST", self.TOKEN_PATH, data=data, headers={"Accept": "application/json"})
         except httpx.HTTPError as e:
             logger.warning(f"[Linux.do] 获取访问令牌网络异常: {type(e).__name__}: {e}")
             return None
@@ -88,8 +97,7 @@ class LinuxDOOAuthService:
             "User-Agent": _BROWSER_UA,  # 真实浏览器 UA，避免被 Cloudflare 拦截
         }
         try:
-            async with self._client() as client:
-                response = await client.get(self.USERINFO_URL, headers=headers)
+            response = await self._request("GET", self.USERINFO_PATH, headers=headers)
         except httpx.HTTPError as e:
             logger.warning(f"[Linux.do] 获取用户信息网络异常: {type(e).__name__}: {e}")
             return None

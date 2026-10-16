@@ -356,7 +356,12 @@ export interface Chapter {
   outline_review_status?: 'draft' | 'confirmed' | null;  // 关联章纲：draft = AI 草拟待确认
   outline_upstream_stale?: boolean;    // 关联章纲的上游（卷纲 / 总纲）已改
   pending_candidates?: number;         // 待采用的候选稿数
+  /** 列表接口附带的分析状态（无正文为 null）：已分析 / 正文改过待重新分析 / 未分析 / 最近一次失败 / 分析中 */
+  analysis_status?: ChapterAnalysisStatus | null;
+  analysis_message?: string | null;    // 失败原因 / 降级说明
 }
+
+export type ChapterAnalysisStatus = 'ok' | 'stale' | 'missing' | 'failed' | 'running';
 
 export interface ChapterCreate {
   project_id: string;
@@ -387,10 +392,8 @@ export interface ChapterGenerateRequest {
   /** 写完后另起一次模型调用审校章纲遵循度，报告附在候选稿上（默认开） */
   adherence_review?: boolean;
   selected_plugins?: string[];
-  // R8 拆书参考包显式参数（任一为空则走默认）
-  pack_ids?: string[];
-  dimensions?: string[];
-  strength?: 'light' | 'medium' | 'deep';
+  /** 仿写参考：本次对标原书第几章（留空按章纲引用 / 位置自动对位） */
+  kb_chapter?: number;
 }
 
 /** 服务端批量生成（后台任务，关掉浏览器也不停；已有正文的章节自动跳过 → 同范围重新发起即续跑） */
@@ -468,10 +471,6 @@ export interface GenerateCharacterRequest {
   model?: string;
   enable_mcp?: boolean;
   selected_plugins?: string[];
-  // R8 拆书参考包显式参数（任一为空则走默认）
-  pack_ids?: string[];
-  dimensions?: string[];
-  strength?: 'light' | 'medium' | 'deep';
 }
 
 // 向导API响应类型
@@ -566,97 +565,53 @@ export interface ApiError {
   message?: string;
 }
 
-// 分析结果 - 钩子
-interface AnalysisHook {
-  type: string;
-  content: string;
-  strength: number;
-  position: string;
+/** 章节档案：摘要 + 章末状态（作者改过的重新分析不覆盖，AI 新结果放进 suggestion） */
+export interface ChapterDigestView {
+  chapter_id: string;
+  summary: string;
+  end_state: string;
+  source: 'ai' | 'author';
+  suggestion: { summary: string; end_state: string } | null;
+  /** 档案是按旧正文分析的（正文后来改过） */
+  stale: boolean;
+  updated_at?: string | null;
 }
 
-// 分析结果 - 伏笔
-interface AnalysisForeshadow {
-  content: string;
-  type: 'planted' | 'resolved';
-  strength: number;
-  subtlety: number;
-  reference_chapter?: number;
+/** 本章结算出的硬性状态变化（生死 / 位置 / 境界 / 物品 / 伤势 / 目标 / 能力 / 故事时间） */
+export interface ChapterStateChange {
+  signal_type: string;
+  label: string;
+  character_name?: string | null;
+  signal_key?: string | null;
+  signal_value: string;
+  evidence?: string | null;
 }
 
-// 分析结果 - 角色状态
-interface AnalysisCharacterState {
-  character_name: string;
-  state_before: string;
-  state_after: string;
-  psychological_change: string;
-  key_event: string;
-  relationship_changes: Record<string, string>;
-}
-
-// 分析结果 - 情节点
-interface AnalysisPlotPoint {
-  content: string;
-  type: 'revelation' | 'conflict' | 'resolution' | 'transition';
-  importance: number;
-  impact: string;
-}
-
-// 分析结果 - 场景
-interface AnalysisScene {
-  location: string;
-  atmosphere: string;
-  duration: string;
-}
-
-// 完整分析数据 - 匹配后端PlotAnalysis模型
-export interface AnalysisData {
+/** 分析记录本身：标注、出场人物变化、地点、正文指纹 */
+export interface ChapterAnalysisRecord {
   id: string;
   chapter_id: string;
-  plot_stage: string;
-  conflict_level: number;
-  conflict_types: string[];
-  emotional_tone: string;
-  emotional_intensity: number;
-  hooks: AnalysisHook[];
-  hooks_count: number;
-  foreshadows: AnalysisForeshadow[];
-  foreshadows_planted: number;
-  foreshadows_resolved: number;
-  plot_points: AnalysisPlotPoint[];
-  plot_points_count: number;
-  character_states: AnalysisCharacterState[];
-  scenes?: AnalysisScene[];
-  pacing: string;
-  overall_quality_score: number;
-  pacing_score: number;
-  engagement_score: number;
-  coherence_score: number;
-  analysis_report: string;
-  suggestions: string[];
-  dialogue_ratio: number;
-  description_ratio: number;
-  created_at: string;
+  annotations: unknown[];
+  character_states: Array<{ character_name: string; state_after?: string }>;
+  locations: string[];
+  content_hash?: string | null;
+  created_at?: string | null;
 }
 
-// 记忆片段
-export interface StoryMemory {
-  id: string;
-  type: 'hook' | 'foreshadow' | 'plot_point' | 'character_event';
-  title: string;
-  content: string;
-  importance: number;
-  tags: string[];
-  is_foreshadow: 0 | 1 | 2; // 0=普通, 1=已埋下, 2=已回收
-}
-
-// 章节分析结果响应 - 匹配后端API返回
+// 章节分析结果响应（GET /chapters/{id}/analysis；没分析过也没档案 → 404）
 export interface ChapterAnalysisResponse {
   chapter_id: string;
-  analysis: AnalysisData;  // 注意：后端返回的是analysis而不是analysis_data
-  memories: StoryMemory[];
+  analyzed: boolean;
+  is_stale: boolean;
+  content_updated_at?: string | null;
+  analysis: ChapterAnalysisRecord | null;
+  digest: ChapterDigestView | null;
+  state_changes: ChapterStateChange[];
   narrative_state?: ChapterNarrativeState;
   consistency_audit?: ConsistencyAuditView;
-  created_at: string;
+  /** 最近一次分析任务：failed 时 message 是原因（之前的结果仍在用）；completed 带 message = 降级说明 */
+  task?: { status: string; message?: string | null; completed_at?: string | null } | null;
+  created_at?: string | null;
 }
 
 interface ChapterCausalLinkView {
@@ -1096,7 +1051,7 @@ export interface BookDissectChapterMeta {
 // V1 采样式 schema（DissectResult / DissectProjectSchema 等）已随 V1 逻辑一并移除。
 
 export type BookDissectStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
-/** 拆书流水线阶段：切章 → 拆书卡 → 剧情单元 → 分卷 / 骨架 → 文风 → 参考包 */
+/** 拆书流水线阶段：切章 → 拆书卡 → 剧情单元 → 分卷 / 骨架 → 文风 → 拆书结果 */
 export type BookDissectStage =
   | 'split_done'
   | 'queued'
@@ -1223,7 +1178,7 @@ export interface BookDissectChapterCard {
   extraction_error: string | null;
 }
 
-/** 剧情单元（GET /book-dissect/{id}/arcs），与参考包 bridges.typical_arcs 同形：一件完整的事 */
+/** 剧情单元（GET /book-dissect/{id}/arcs），与拆书结果 bridges.typical_arcs 同形：一件完整的事 */
 export interface BookDissectStoryArc {
   arc_index: number;
   start_chapter: number;

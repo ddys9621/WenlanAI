@@ -2,7 +2,8 @@
 
 数据源是章节分析结算出的连续性信号（chapter_continuity_signals）：生死 / 地点 / 能力 / 境界 / 物品 / 伤势 /
 目标 / 故事时间 / 出场。按章号回放得到"写第 N 章时每个角色的当前状态"——信号随章节重新分析、重写覆盖
-自动清理重结算，状态天然幂等，不另存一份会过期的快照。
+自动清理重结算，状态天然幂等，不另存一份会过期的快照。作者修正（author_state_signals）一起回放，
+同一章排在 AI 信号之后（以作者为准），重新分析不会清掉。
 
 正文生成只注入本章相关的少数角色（章纲涉及 / 视角 / 近期活跃 / 与视角有关系 / 主角），不再把全部角色
 （自动建档后会有几百个）塞进每章提示词；死亡 / 失踪角色单列名单作为硬约束，防止"死人复活"。
@@ -17,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.chapter_continuity_signal import ChapterContinuitySignal
 from app.models.character import Character
+from app.models.ledger_override import AuthorStateSignal
 from app.models.relationship import CharacterRelationship
 from app.services.relationship_timeline import relationship_states_before
 
@@ -100,50 +102,62 @@ def replay_signals(signals: Iterable[Any]) -> dict[str, CharacterState]:
     return states
 
 
+@dataclass(frozen=True)
+class SignalRow:
+    """回放用的一条信号（AI 结算或作者修正，字段同 chapter_continuity_signals）。"""
+    chapter_number: int
+    signal_type: str
+    character_name: Optional[str]
+    signal_key: Optional[str]
+    signal_value: str
+    source: str = "ai"
+    evidence_text: Optional[str] = None
+
+
+async def state_signal_rows(
+    db: AsyncSession,
+    project_id: str,
+    before_chapter: Optional[int],
+    types: Iterable[str],
+    names: Optional[Iterable[str]] = None,
+) -> list[SignalRow]:
+    """AI 信号 + 作者修正，按章号排序；同一章作者修正排在后面（回放时覆盖 AI）。before_chapter=None 不限章。"""
+    types = list(types)
+    wanted = [n for n in (names or []) if n]
+    if names is not None and not wanted:
+        return []
+    out: list[SignalRow] = []
+    for model, source in ((ChapterContinuitySignal, "ai"), (AuthorStateSignal, "author")):
+        query = select(model).where(model.project_id == project_id, model.signal_type.in_(types))
+        if before_chapter is not None:
+            query = query.where(model.chapter_number < before_chapter)
+        if wanted:
+            query = query.where(model.character_name.in_(wanted))
+        for row in (await db.execute(query.order_by(model.chapter_number))).scalars().all():
+            out.append(SignalRow(
+                chapter_number=row.chapter_number or 0, signal_type=row.signal_type, character_name=row.character_name,
+                signal_key=row.signal_key, signal_value=row.signal_value, source=source,
+                evidence_text=getattr(row, "evidence_text", None) or getattr(row, "note", None),
+            ))
+    return sorted(out, key=lambda r: r.chapter_number)  # 稳定排序：同章 AI 在前、作者在后
+
+
 async def load_character_states(
     db: AsyncSession, project_id: str, before_chapter: int, names: Optional[Iterable[str]] = None,
 ) -> dict[str, CharacterState]:
-    """写第 before_chapter 章时的角色状态（只回放此前章节的信号）。names 给定时只查这些人。"""
-    query = select(ChapterContinuitySignal).where(
-        ChapterContinuitySignal.project_id == project_id,
-        ChapterContinuitySignal.chapter_number < before_chapter,
-        ChapterContinuitySignal.signal_type.in_(STATE_SIGNAL_TYPES),
-    )
-    wanted = [n for n in (names or []) if n]
-    if names is not None:
-        if not wanted:
-            return {}
-        query = query.where(ChapterContinuitySignal.character_name.in_(wanted))
-    rows = (await db.execute(query.order_by(ChapterContinuitySignal.chapter_number))).scalars().all()
-    return replay_signals(rows)
+    """写第 before_chapter 章时的角色状态（只回放此前章节的信号与作者修正）。names 给定时只查这些人。"""
+    return replay_signals(await state_signal_rows(db, project_id, before_chapter, STATE_SIGNAL_TYPES, names))
 
 
 async def load_absent_states(db: AsyncSession, project_id: str, before_chapter: int) -> dict[str, CharacterState]:
     """只回放生死信号：死亡 / 失踪名单要覆盖全体角色，但不必拉全部状态信号。"""
-    rows = (await db.execute(
-        select(ChapterContinuitySignal)
-        .where(
-            ChapterContinuitySignal.project_id == project_id,
-            ChapterContinuitySignal.chapter_number < before_chapter,
-            ChapterContinuitySignal.signal_type == "life_state",
-        )
-        .order_by(ChapterContinuitySignal.chapter_number)
-    )).scalars().all()
+    rows = await state_signal_rows(db, project_id, before_chapter, ("life_state",))
     return {name: st for name, st in replay_signals(rows).items() if st.absent}
 
 
 async def latest_story_time(db: AsyncSession, project_id: str, before_chapter: int) -> Optional[tuple[str, int]]:
-    row = (await db.execute(
-        select(ChapterContinuitySignal.signal_key, ChapterContinuitySignal.chapter_number)
-        .where(
-            ChapterContinuitySignal.project_id == project_id,
-            ChapterContinuitySignal.chapter_number < before_chapter,
-            ChapterContinuitySignal.signal_type == "story_time",
-        )
-        .order_by(ChapterContinuitySignal.chapter_number.desc())
-        .limit(1)
-    )).first()
-    return (row[0], row[1]) if row and row[0] else None
+    rows = [r for r in await state_signal_rows(db, project_id, before_chapter, ("story_time",)) if r.signal_key]
+    return (rows[-1].signal_key, rows[-1].chapter_number) if rows else None
 
 
 async def recent_presence(db: AsyncSession, project_id: str, before_chapter: int, window: int = 3) -> list[str]:

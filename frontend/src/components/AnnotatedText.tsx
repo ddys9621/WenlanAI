@@ -23,7 +23,6 @@ const TYPE_COLORS: Record<AnnotationType, string> = {
   hook: '#ff6b6b',
   foreshadow: '#6b7bff',
   plot_point: '#51cf66',
-  character_event: '#ffd93d',
 };
 
 // 类型图标映射
@@ -31,7 +30,6 @@ const TYPE_ICONS: Record<AnnotationType, string> = {
   hook: '🎣',
   foreshadow: '🌟',
   plot_point: '💎',
-  character_event: '👤',
 };
 
 /** 悬停中的片段：fixed 定位的浮层不受阅读区 overflow 裁剪，上方空间不够就翻到下方 */
@@ -65,15 +63,8 @@ const AnnotatedText: React.FC<AnnotatedTextProps> = ({
     }
   }, [scrollToAnnotation]);
 
-  // 解析标注在正文中的区间（丢弃类型未知 / 位置无效的标注）
-  const spans = useMemo(() => {
-    const resolved = resolveSpans(content, annotations ?? []);
-    const dropped = (annotations?.length ?? 0) - resolved.length;
-    if (dropped > 0) {
-      console.warn(`AnnotatedText: ${dropped}个标注无法在正文中定位，可展示标注${resolved.length}个`);
-    }
-    return resolved;
-  }, [annotations, content]);
+  // 解析标注在正文中的区间（丢弃类型未知 / 引句在当前正文里找不到的标注：它们只在侧栏列出）
+  const spans = useMemo(() => resolveSpans(content, annotations ?? []), [annotations, content]);
 
   // 在标注边界处切分正文；重叠 / 相同区间的标注共享同一片段，正文不会重复或错位
   const segments = useMemo(() => buildSegments(content, spans), [content, spans]);

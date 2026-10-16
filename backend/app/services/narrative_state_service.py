@@ -14,6 +14,7 @@ from app.models.chapter import Chapter
 from app.models.chapter_causal_link import ChapterCausalLink
 from app.models.character import Character
 from app.models.character_known_info import CharacterKnownInfo
+from app.models.ledger_override import PromiseAuthorLock
 from app.models.narrative_promise import NarrativePromise
 from app.models.relationship import CharacterRelationship, Organization, OrganizationMember
 from app.models.relationship_event import RelationshipEvent
@@ -51,6 +52,12 @@ class NarrativeStateService:
     VISIBILITY_MAP = {"public": "public", "private": "private", "secret": "secret"}
     RELATION_STATUS_MAP = {"active": "active", "broken": "broken", "past": "past", "complicated": "complicated"}
     PRIORITY_WEIGHT = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+    TYPE_LABELS = {"foreshadow": "伏笔", "promise": "承诺", "mystery": "悬念", "conflict": "冲突"}
+    PRIORITY_LABELS = {"critical": "紧急", "high": "高", "medium": "中", "low": "低"}
+    # 作者锁里 "*" 展开成全部可锁字段（作者新建的承诺：以作者为准，对账也不删）
+    LOCKABLE_FIELDS = frozenset({
+        "title", "content", "promise_type", "priority", "deadline_chapter", "owner", "target", "status",
+    })
     # 未设计划回收章时，多少章没被提及才算"掉线"：长篇里跨几百章的伏笔很正常，按优先级缩放而非一刀切 5 章
     DROPOUT_THRESHOLD = {"critical": 30, "high": 50, "medium": 80, "low": 120}
     NEAR_DEADLINE_CHAPTERS = 3
@@ -108,22 +115,30 @@ class NarrativeStateService:
         pov_character_name: Optional[str] = None,
         character_names: Optional[Iterable[str]] = None,
         focus_promise_ids: Optional[Iterable[str]] = None,
+        character_ids: Optional[Iterable[str]] = None,
+        promise_limit: int = 10,
     ) -> Dict[str, str]:
         """Build context blocks for generation from durable narrative state.
 
         character_names：本章相关角色（出场 / 视角 / 近期活跃）。给出时组织归属只列这些人——全量归属表
         随自动建档无限增长，长篇里每章都塞进去纯属噪音。
         focus_promise_ids：本章章纲计划要推进 / 回收的承诺，必定排在承诺清单最前。
+        character_ids：本章相关角色的 id；给出时因果 / 时间轴 / 关系动态优先取和他们有关的近事。
         """
+        involved = {cid for cid in (character_ids or ()) if cid}
         active_promises = await self._maybe_await(self._get_active_promises(
-            db, project_id, current_chapter, focus_ids=set(focus_promise_ids or ()),
+            db, project_id, current_chapter, focus_ids=set(focus_promise_ids or ()), limit=promise_limit,
         ))
-        recent_causal_links = await self._maybe_await(self._get_recent_causal_links(db, project_id, current_chapter))
+        recent_causal_links = await self._maybe_await(
+            self._get_recent_causal_links(db, project_id, current_chapter, involved_ids=involved)
+        )
         recent_relationships = await self._maybe_await(
-            self._get_recent_relationship_events(db, project_id, current_chapter, pov_character_name)
+            self._get_recent_relationship_events(db, project_id, current_chapter, pov_character_name, involved_ids=involved)
         )
         relationship_names = await self._load_event_character_names(db, recent_relationships)
-        recent_timeline = await self._maybe_await(self._get_recent_timeline_events(db, project_id, current_chapter))
+        recent_timeline = await self._maybe_await(
+            self._get_recent_timeline_events(db, project_id, current_chapter, involved_ids=involved)
+        )
         pov_known_info = await self._maybe_await(
             self._get_pov_known_info(db, project_id, current_chapter, pov_character_name)
         )
@@ -200,11 +215,21 @@ class NarrativeStateService:
             update(NarrativePromise).where(NarrativePromise.source_chapter_id == chapter_id).values(needs_reconcile=True)
         )
 
+    async def _lock_fields(self, db: AsyncSession, promise_id: Optional[str]) -> set[str]:
+        """作者锁住的字段（重新分析不改它们；锁了 status 的回收 / 推进状态也以作者为准）。"""
+        if not promise_id or db is None:
+            return set()
+        row = await db.get(PromiseAuthorLock, promise_id)
+        fields = set(row.fields or []) if row is not None else set()
+        return set(self.LOCKABLE_FIELDS) if "*" in fields else fields
+
     async def _clear_promise_resolutions(self, db: AsyncSession, chapter_id: str) -> None:
         result = await db.execute(
             select(NarrativePromise).where(NarrativePromise.resolved_chapter_id == chapter_id)
         )
         for promise in result.scalars().all():
+            if "status" in await self._lock_fields(db, promise.id):
+                continue  # 作者亲手标的回收：重新分析不撤
             promise.resolved_chapter_id = None
             promise.resolved_chapter_number = None
             promise.resolution_note = None
@@ -251,27 +276,11 @@ class NarrativeStateService:
         analysis: Dict[str, Any],
         characters: dict[str, Character],
     ) -> int:
+        # 只认 narrative_promises：旧版另把 foreshadows 兜底再记一遍，同一个坑会成两条（标题=整段内容的那条挤占清单）
         count = 0
-
-        # 1) explicit narrative promises
         for item in analysis.get("narrative_promises", []) or []:
-            count += await self._upsert_promise_from_item(db, project_id, chapter, item, characters)
-
-        # 2) fallback from foreshadow extraction
-        for index, item in enumerate(analysis.get("foreshadows", []) or []):
-            promise_item = {
-                "promise_type": "foreshadow",
-                "title": (item.get("content") or f"伏笔-{index + 1}")[:200],
-                "content": item.get("content") or "",
-                "priority": "medium",
-                "status": "resolved" if item.get("type") == "resolved" else "open",
-                "reference_chapter": item.get("reference_chapter"),
-                "resolves_promise_id": item.get("resolves_promise_id"),
-                "deadline_chapter": item.get("deadline_chapter"),
-                "evidence": item.get("keyword") or "",
-            }
-            count += await self._upsert_promise_from_item(db, project_id, chapter, promise_item, characters)
-
+            if isinstance(item, dict):
+                count += await self._upsert_promise_from_item(db, project_id, chapter, item, characters)
         return count
 
     async def _find_open_promise_by_id(
@@ -299,60 +308,73 @@ class NarrativeStateService:
         item: Dict[str, Any],
         characters: dict[str, Character],
     ) -> int:
+        """一条伏笔动作入账：advance 推进旧坑、resolve 回收旧坑、plant 埋新坑。
+
+        advance / resolve 都只作用于已有承诺（编号精确命中优先，其次按标题），找不到就跳过——
+        旧版会另建一条（推进 → 重复的未回收承诺；回收 → 孤立的已回收承诺）。同名的旧坑被「再埋」一次也当推进。
+        """
         promise_type = self._normalize_promise_type(item.get("promise_type"))
         title = (item.get("title") or item.get("content") or "").strip()[:200]
         content = (item.get("content") or "").strip()
-        if not title or not content:
-            return 0
-
         status = self._normalize_promise_status(item.get("status"))
         advances_id = item.get("advances_promise_id")
-        if advances_id and status != "resolved":
-            # 推进 / 提及旧承诺：刷新活跃章，不另建一条重复记录
+        action = (item.get("action") or "").strip().lower()
+        if action not in ("plant", "advance", "resolve"):
+            action = "resolve" if status == "resolved" else ("advance" if advances_id else "plant")
+
+        if action == "advance":
             target = await self._find_open_promise_by_id(db, project_id, advances_id, chapter.chapter_number)
-            if target is not None:
-                target.last_activated_chapter = max(target.last_activated_chapter or 0, chapter.chapter_number)
-                if target.status == "open":
-                    target.status = "progressing"
-                return 1
-        if status == "resolved":
+            if target is None and title:
+                target = await self._find_open_promise_by_title(db, project_id, chapter.chapter_number, title)
+            return await self._advance(db, target, chapter)
+
+        if action == "resolve":
             matched = await self._find_resolvable_promise(
                 db=db,
                 project_id=project_id,
                 current_chapter=chapter.chapter_number,
                 promise_type=promise_type,
                 title=title,
-                content=content,
+                content=content or title,
                 resolves_title=item.get("resolves_title"),
                 reference_chapter=item.get("reference_chapter"),
                 resolves_promise_id=item.get("resolves_promise_id") or advances_id,
             )
-            if matched:
-                matched.status = "resolved"
-                matched.last_activated_chapter = chapter.chapter_number
-                matched.resolved_chapter_id = chapter.id
-                matched.resolved_chapter_number = chapter.chapter_number
-                matched.resolution_note = content[:1000]
-                return 1
+            if matched is None or "status" in await self._lock_fields(db, matched.id):
+                return 0
+            matched.status = "resolved"
+            matched.last_activated_chapter = chapter.chapter_number
+            matched.resolved_chapter_id = chapter.id
+            matched.resolved_chapter_number = chapter.chapter_number
+            matched.resolution_note = (content or title)[:1000]
+            return 1
 
+        if not title or not content:
+            return 0
         reconciled = await self._reconcile_planted(db, chapter, title, content)
         if reconciled is not None:
-            # 同一条伏笔：更新描述，保留 ID 与后面章节对它的推进 / 回收记录
-            reconciled.promise_type = promise_type
-            reconciled.title = title
-            reconciled.content = content
-            reconciled.owner_character_id = self._match_character_id(item.get("owner_character_name"), characters)
-            reconciled.target_character_id = self._match_character_id(item.get("target_character_name"), characters)
-            reconciled.priority = self._normalize_priority(item.get("priority"))
-            reconciled.deadline_chapter = self._safe_int(item.get("deadline_chapter")) or reconciled.deadline_chapter
+            # 同一条伏笔：更新描述，保留 ID 与后面章节对它的推进 / 回收记录；作者锁住的字段不动
+            locked = await self._lock_fields(db, reconciled.id)
+            updates = {
+                "promise_type": promise_type, "title": title, "content": content,
+                "priority": self._normalize_priority(item.get("priority")),
+            }
+            for field, value in updates.items():
+                if field not in locked:
+                    setattr(reconciled, field, value)
+            if "owner" not in locked:
+                reconciled.owner_character_id = self._match_character_id(item.get("owner_character_name"), characters)
+            if "target" not in locked:
+                reconciled.target_character_id = self._match_character_id(item.get("target_character_name"), characters)
+            if "deadline_chapter" not in locked:
+                reconciled.deadline_chapter = self._safe_int(item.get("deadline_chapter")) or reconciled.deadline_chapter
             reconciled.evidence_text = (item.get("evidence") or "").strip() or reconciled.evidence_text
             reconciled.needs_reconcile = False
-            if status == "resolved" and reconciled.status != "resolved":
-                reconciled.status = "resolved"
-                reconciled.resolved_chapter_id = chapter.id
-                reconciled.resolved_chapter_number = chapter.chapter_number
-                reconciled.resolution_note = content[:1000]
             return 1
+
+        existing = await self._find_open_promise_by_title(db, project_id, chapter.chapter_number, title, exact=True)
+        if existing is not None:
+            return await self._advance(db, existing, chapter)
 
         db.add(
             NarrativePromise(
@@ -365,16 +387,46 @@ class NarrativeStateService:
                 owner_character_id=self._match_character_id(item.get("owner_character_name"), characters),
                 target_character_id=self._match_character_id(item.get("target_character_name"), characters),
                 priority=self._normalize_priority(item.get("priority")),
-                status=status,
+                status="open" if status == "resolved" else status,
                 deadline_chapter=self._safe_int(item.get("deadline_chapter")),
                 last_activated_chapter=chapter.chapter_number,
                 evidence_text=(item.get("evidence") or "").strip() or None,
-                resolved_chapter_id=chapter.id if status == "resolved" else None,
-                resolved_chapter_number=chapter.chapter_number if status == "resolved" else None,
-                resolution_note=content[:1000] if status == "resolved" else None,
             )
         )
         return 1
+
+    async def _advance(self, db: AsyncSession, target: Optional[NarrativePromise], chapter: Chapter) -> int:
+        if target is None:
+            return 0
+        target.last_activated_chapter = max(target.last_activated_chapter or 0, chapter.chapter_number)
+        if target.status == "open" and "status" not in await self._lock_fields(db, target.id):
+            target.status = "progressing"
+        return 1
+
+    async def _find_open_promise_by_title(
+        self, db: AsyncSession, project_id: str, current_chapter: int, title: str, *, exact: bool = False,
+    ) -> Optional[NarrativePromise]:
+        """起于本章之前、仍未回收的同名承诺（exact=False 时标题互相包含也算，至少 4 个字才比）。"""
+        key = self._normalize_key(title)
+        if not key:
+            return None
+        rows = (await db.execute(
+            select(NarrativePromise).where(
+                NarrativePromise.project_id == project_id,
+                NarrativePromise.source_chapter_number < current_chapter,
+                NarrativePromise.status.in_(self.ACTIVE_STATUSES),
+            ).order_by(NarrativePromise.source_chapter_number)
+        )).scalars().all()
+        for row in rows:
+            if self._normalize_key(row.title) == key:
+                return row
+        if exact or len(key) < 4:
+            return None
+        for row in rows:
+            other = self._normalize_key(row.title)
+            if len(other) >= 4 and (key in other or other in key):
+                return row
+        return None
 
     async def _reconcile_planted(
         self, db: AsyncSession, chapter: Chapter, title: str, content: str,
@@ -388,14 +440,26 @@ class NarrativeStateService:
         )).scalars().all())
         if not candidates:
             return None
+        # 作者改过标题的：也按 AI 原标题认（重新分析时模型给的还是原标题）
+        origin = {
+            row.promise_id: row.origin_title for row in (await db.execute(
+                select(PromiseAuthorLock).where(PromiseAuthorLock.promise_id.in_([c.id for c in candidates]))
+            )).scalars() if row.origin_title
+        }
         key_title = self._normalize_key(title)
         key_content = self._normalize_key(content)[:20]
+
+        def titles(candidate: NarrativePromise) -> list[str]:
+            keys = [self._normalize_key(candidate.title)]
+            if candidate.id in origin:
+                keys.append(self._normalize_key(origin[candidate.id]))
+            return [k for k in keys if k]
+
         for candidate in candidates:
-            if key_title and self._normalize_key(candidate.title) == key_title:
+            if key_title and key_title in titles(candidate):
                 return candidate
         for candidate in candidates:
-            other = self._normalize_key(candidate.title)
-            if key_title and other and (key_title in other or other in key_title):
+            if key_title and any(key_title in other or other in key_title for other in titles(candidate)):
                 return candidate
         for candidate in candidates:
             if key_content and key_content in self._normalize_key(candidate.content):
@@ -414,8 +478,8 @@ class NarrativeStateService:
             used_later = (promise.resolved_chapter_number or 0) > chapter.chapter_number or (
                 (promise.last_activated_chapter or 0) > chapter.chapter_number
             )
-            if used_later:
-                promise.needs_reconcile = False
+            if used_later or await self._lock_fields(db, promise.id):
+                promise.needs_reconcile = False  # 后面章节用过 / 作者改过的：留着
             else:
                 await db.delete(promise)
 
@@ -637,11 +701,29 @@ class NarrativeStateService:
             return f" ⚠️掉线预警（{gap}章未提及）"
         return ""
 
+    # 近事候选窗：只在最近这么多条里挑和本章人物有关的（再往前的交给召回器的「相关旧事」）
+    RECENT_POOL = 40
+
+    @staticmethod
+    def _prefer_involved(rows: list, involved_ids: Optional[set[str]], limit: int) -> list:
+        """和本章人物有关的排前面（同等按章号倒序），再用其余近事补满。"""
+        if not involved_ids:
+            return rows[:limit]
+
+        def touches(row: Any) -> bool:
+            ids = set(getattr(row, "actor_ids", None) or []) | set(getattr(row, "target_ids", None) or [])
+            return bool(ids & involved_ids)
+
+        hits = [r for r in rows if touches(r)]
+        rest = [r for r in rows if not touches(r)]
+        return (hits + rest)[:limit]
+
     async def _get_recent_causal_links(
         self,
         db: AsyncSession,
         project_id: str,
         current_chapter: int,
+        involved_ids: Optional[set[str]] = None,
     ) -> list[ChapterCausalLink]:
         result = await db.execute(
             select(ChapterCausalLink)
@@ -650,9 +732,9 @@ class NarrativeStateService:
                 ChapterCausalLink.chapter_number < current_chapter,
             )
             .order_by(ChapterCausalLink.chapter_number.desc(), ChapterCausalLink.importance_score.desc())
-            .limit(6)
+            .limit(self.RECENT_POOL if involved_ids else 6)
         )
-        return list(result.scalars().all())
+        return self._prefer_involved(list(result.scalars().all()), involved_ids, 6)
 
     async def _get_recent_relationship_events(
         self,
@@ -660,19 +742,22 @@ class NarrativeStateService:
         project_id: str,
         current_chapter: int,
         pov_character_name: Optional[str],
+        involved_ids: Optional[set[str]] = None,
     ) -> list[RelationshipEvent]:
         pov_character = await self._find_character_by_name(db, project_id, pov_character_name)
-        character_id = pov_character.id if pov_character else None
+        ids = set(involved_ids or ())
+        if pov_character is not None:
+            ids.add(pov_character.id)
 
         query = select(RelationshipEvent).where(
             RelationshipEvent.project_id == project_id,
             RelationshipEvent.chapter_number < current_chapter,
         )
-        if character_id:
+        if ids:
             query = query.where(
                 or_(
-                    RelationshipEvent.character_from_id == character_id,
-                    RelationshipEvent.character_to_id == character_id,
+                    RelationshipEvent.character_from_id.in_(ids),
+                    RelationshipEvent.character_to_id.in_(ids),
                 )
             )
 
@@ -684,6 +769,7 @@ class NarrativeStateService:
         db: AsyncSession,
         project_id: str,
         current_chapter: int,
+        involved_ids: Optional[set[str]] = None,
     ) -> list[TimelineEvent]:
         result = await db.execute(
             select(TimelineEvent)
@@ -692,9 +778,9 @@ class NarrativeStateService:
                 TimelineEvent.chapter_number < current_chapter,
             )
             .order_by(TimelineEvent.chapter_number.desc())
-            .limit(8)
+            .limit(self.RECENT_POOL if involved_ids else 8)
         )
-        return list(result.scalars().all())
+        return self._prefer_involved(list(result.scalars().all()), involved_ids, 8)
 
     async def _get_pov_known_info(
         self,
@@ -726,9 +812,11 @@ class NarrativeStateService:
 
         lines = ["【因果链账本】"]
         for item in items:
-            lines.append(
-                f"- 第{item.chapter_number}章：因={item.cause}；事={item.event}；果={item.effect}；决={item.decision or '无'}"
-            )
+            chain = " → ".join(part for part in (
+                (item.cause or "")[:40], (item.event or "")[:50], (item.effect or "")[:40],
+            ) if part)
+            decision = f"；决定：{item.decision[:30]}" if item.decision else ""
+            lines.append(f"- 第{item.chapter_number}章：{chain}{decision}")
         return "\n".join(lines) + "\n"
 
     def _format_promises(self, items: Iterable[NarrativePromise], current_chapter: int) -> str:
@@ -738,12 +826,23 @@ class NarrativeStateService:
 
         lines = ["【叙事承诺清单】"]
         for item in items:
-            flag = self._promise_flag(item, current_chapter)
-            status = self._promise_status_as_of(item, current_chapter)
-            lines.append(
-                f"- [{item.promise_type}/{item.priority}/{status}] {item.title}（起于第{item.source_chapter_number}章）{flag}: {item.content[:120]}"
-            )
+            lines.append(self.promise_line(item, current_chapter))
         return "\n".join(lines) + "\n"
+
+    def promise_line(self, item: Any, current_chapter: int) -> str:
+        """一条一行：[伏笔·高·推进中] 标题（第N章起，计划第M章前）⚠️旗标：内容。标题 30 字、内容 60 字封顶。"""
+        status = self._promise_status_as_of(item, current_chapter)
+        tags = [self.TYPE_LABELS.get(item.promise_type or "", item.promise_type or "伏笔"),
+                self.PRIORITY_LABELS.get(item.priority or "medium", "中")]
+        if status == "progressing":
+            tags.append("推进中")
+        deadline = getattr(item, "deadline_chapter", None)
+        plan = f"，计划第{deadline}章前" if deadline else ""
+        flag = self._promise_flag(item, current_chapter)
+        title = (item.title or "")[:30]
+        content = (item.content or "").strip()
+        detail = "" if not content or self._normalize_key(content) == self._normalize_key(item.title) else f"：{content[:60]}"
+        return f"- [{'·'.join(tags)}] {title}（第{item.source_chapter_number}章起{plan}）{flag.strip()}{detail}"
 
     @staticmethod
     def _promise_status_as_of(item: Any, current_chapter: int) -> str:
@@ -787,7 +886,7 @@ class NarrativeStateService:
             location = f" @ {item.location}" if item.location else ""
             time_marker = f" / {item.time_marker}" if item.time_marker else ""
             lines.append(
-                f"- 第{item.chapter_number}章：{item.title}{location}{time_marker} -> {item.description[:120]}"
+                f"- 第{item.chapter_number}章：{item.title}{location}{time_marker} -> {(item.description or '')[:80]}"
             )
         return "\n".join(lines) + "\n"
 

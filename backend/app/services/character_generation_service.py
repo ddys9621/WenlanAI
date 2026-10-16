@@ -1,7 +1,7 @@
 """AI 生成单个角色（2026-09-11 从 api/characters.py 的 generate 端点抽出，供后台任务 runner 调用）。
 
-过程追踪：各步骤用 stage_scope 标注；MCP 工具调用 / 拆书参考 / LLM 进度由共享入口
-（MCPToolService / ReferencePackInjector / AIService）自动上报，这里不重复发事件。
+过程追踪：各步骤用 stage_scope 标注；MCP 工具调用 / 仿写参考 / LLM 进度由共享入口
+（MCPToolService / traced_kb_context / AIService）自动上报，这里不重复发事件。
 服务层只抛 ValueError（面向用户的可读提示）或底层异常，由调用方转 HTTP 或任务 error 事件。
 """
 from __future__ import annotations
@@ -21,6 +21,7 @@ from app.schemas.character import CharacterGenerateRequest, CharacterResponse
 from app.services.ai_jobs import AIJob, Runner
 from app.services.ai_service import AIService
 from app.services.generation_trace import stage_scope
+from app.services.knowledge.kb_context import traced_kb_context
 from app.services.prompt_service import prompt_service
 from app.services.relationship_matcher import match_relationship_type
 from app.utils.json_cleaner import clean_and_parse_json
@@ -142,35 +143,14 @@ async def generate_character_for_project(
         project_context="\n".join(project_context_parts), user_input=user_input
     )
 
-    # 拆书参考注入（R6）：archetypes / corpus 维度提供角色塑造手法参考（injector 自动上报 reference 事件）
-    async with stage_scope("reference_pack", "组装拆书参考包") as st:
-        try:
-            from app.services.reference_pack_injector import ReferencePackInjector
-
-            _ref_block = await ReferencePackInjector().build_reference_block(
-                db, request.project_id,
-                scene="character_generation",
-                fallback_dimensions=("archetypes", "corpus"),
-                pack_ids=request.pack_ids,
-                dimensions=request.dimensions,
-                strength=request.strength,
-                anchor_query=f"{request.role_type or ''} {user_input}".strip() or "角色生成",
-            )
-        except ValueError as exc:
-            st.skip(str(exc)[:80])          # 项目未挂载参考包 / 所选包未就绪
-        except Exception as exc:  # noqa: BLE001 - 防御性兜底
-            logger.warning("[R6-角色] 拆书参考注入失败（已跳过）: %s", exc)
-            st.skip("注入失败，已跳过")
+    # 仿写参考：对标书的人物功能谱（去名版），只学人物功能与关系张力
+    async with stage_scope("knowledge", "组装仿写参考") as st:
+        kb = await traced_kb_context(db, request.project_id, "characters")
+        if kb.text:
+            prompt = f"{prompt}\n\n{kb.text}"
+            st.note(source=kb.source_title, entries=len(kb.refs))
         else:
-            if _ref_block.user_segment:
-                prompt = (
-                    f"{prompt}\n\n{_ref_block.user_segment}\n\n"
-                    "请参考上述拆书中的角色塑造手法（仅作方法参考，"
-                    "不要复刻原书人名与具体设定），生成本项目的角色。"
-                )
-                st.note(packs=len(_ref_block.used_packs), dimensions="、".join(_ref_block.used_dimensions))
-            else:
-                st.skip("参考包无可用内容")
+            st.skip("项目没有对标书")
 
     async with stage_scope("llm", "模型生成角色卡") as st:
         logger.info(

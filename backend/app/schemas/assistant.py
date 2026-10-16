@@ -36,3 +36,8 @@ class AssistantAnswerRequest(BaseModel):
 class AssistantTeamModelRequest(BaseModel):
     """共创室成员的模型；空串 / null = 跟随项目模型。"""
     model: Optional[str] = Field(None, max_length=100)
+
+
+class AssistantContextRequest(BaseModel):
+    """共创室上下文上限（token）；null = 自动：按成员用的模型查窗口，查不到按 64K。"""
+    context_window: Optional[int] = Field(None, ge=16_000, le=2_000_000)

@@ -27,14 +27,12 @@ import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 import { useStore } from '@/store/index'
 import { useProjectSync } from '@/store/hooks'
-import { projectApi, referencePackApi, wizardStreamApi } from '@/services/api'
+import { knowledgeApi, projectApi, wizardStreamApi } from '@/services/api'
 import InspirationModal from '@/components/inspiration/InspirationModal'
 import { MCPSelector } from '@/components/MCPSelector'
-import {
-  ReferencePackSelector,
-  DEFAULT_SELECTOR_VALUE as DEFAULT_REF_PACK_VALUE,
-  type ReferencePackSelectorValue,
-} from '@/components/ReferencePackSelector'
+import { KbSourcePicker } from '@/components/knowledge/KbSourcePicker'
+import type { KbSourceChoice } from '@/types/knowledge'
+import { kbChoicePayload, NO_KB_CHOICE } from '@/utils/knowledge'
 import { BrandLogo } from '@/components/ui/BrandLogo'
 import { parseServerTime } from '@/utils/serverTime'
 import type { PlatformPreset, Project } from '@/types'
@@ -597,8 +595,8 @@ export default function ProjectList() {
   const [deletingProject, setDeletingProject] = useState<Project | null>(null)
   const [showImportDialog, setShowImportDialog] = useState(false)
   const [showWizard, setShowWizard] = useState(false)
-  // V3.2-A：拆书页跳转过来预选本书参考包。仅首次 mount 读取 + 状态保留，避免反复触发
-  const [pendingPackTaskId, setPendingPackTaskId] = useState<string | null>(null)
+  // 拆书页跳转过来预选本书做对标书。仅首次 mount 读取 + 状态保留，避免反复触发
+  const [pendingDissectTaskId, setPendingDissectTaskId] = useState<string | null>(null)
   const inspirationOpen = searchParams.get('panel') === 'inspiration'
 
   const openInspiration = () => {
@@ -620,16 +618,16 @@ export default function ProjectList() {
     }
   }, [projectsInitialized, refreshProjects])
 
-  // V3.2-A：响应拆书页「以本书作参考创建项目」跳转（?wizard=1&pack_task_id=xxx）
+  // 响应拆书页「以本书做对标创建项目」跳转（?wizard=1&dissect_task_id=xxx）
   // 仅读一次，读后从 URL 移除参数避免刷新重复弹出
   useEffect(() => {
     if (searchParams.get('wizard') !== '1') return
-    const taskId = searchParams.get('pack_task_id')
-    setPendingPackTaskId(taskId)
+    const taskId = searchParams.get('dissect_task_id')
+    setPendingDissectTaskId(taskId)
     setShowWizard(true)
     const next = new URLSearchParams(searchParams)
     next.delete('wizard')
-    next.delete('pack_task_id')
+    next.delete('dissect_task_id')
     setSearchParams(next, { replace: true })
     // 只需首次 mount 或 URL 变化时检查
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -820,10 +818,10 @@ export default function ProjectList() {
         <WizardModal
           onClose={() => {
             setShowWizard(false)
-            setPendingPackTaskId(null)
+            setPendingDissectTaskId(null)
           }}
           onSuccess={handleWizardSuccess}
-          initialPackTaskId={pendingPackTaskId}
+          initialDissectTaskId={pendingDissectTaskId}
         />
       )}
     </div>
@@ -924,15 +922,15 @@ function StepRow({ status, title, description }: { status: GenStep; title: strin
 function WizardModal({
   onClose,
   onSuccess,
-  initialPackTaskId,
+  initialDissectTaskId,
 }: {
   onClose: () => void;
   onSuccess: (
     projectId: string,
     options?: { nextRoute?: 'volume_planning' | 'chapter_outlines' }
   ) => void;
-  /** V3.2-A：拆书页跳转过来时传入，在 mount 后拉取该任务对应的参考包预填 */
-  initialPackTaskId?: string | null;
+  /** 拆书页跳转过来时传入：mount 后在知识库里找到这本书，预选为对标书 */
+  initialDissectTaskId?: string | null;
 }) {
   const [form, setForm] = useState<WizardForm>(DEFAULT_WIZARD_FORM)
   const [phase, setPhase] = useState<WizardPhase>('form')
@@ -945,8 +943,7 @@ function WizardModal({
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [selectedPlugins, setSelectedPlugins] = useState<string[]>([])
   const [enableMcp, setEnableMcp] = useState(false)
-  // V3.2-B：拆书参考包选择状态（项目创建后后端会自动挂载）
-  const [refPack, setRefPack] = useState<ReferencePackSelectorValue>(DEFAULT_REF_PACK_VALUE)
+  const [kbChoice, setKbChoice] = useState<KbSourceChoice>(NO_KB_CHOICE)
 
   // 分步确认：每阶段生成完暂停，用户确认后再继续（贴合人类"逐层沉淀再展开"的创作节奏）
   const [stepConfirm, setStepConfirm] = useState(true)
@@ -969,31 +966,22 @@ function WizardModal({
       }
     })
 
-  // V3.2-A：从拆书页跳转过来时，根据 task_id 拉取对应的参考包并预填 refPack
+  // 从拆书页跳转过来时，在知识库里找到这本书，预选为对标书
   useEffect(() => {
-    if (!initialPackTaskId) return
+    if (!initialDissectTaskId) return
     let cancelled = false
-    referencePackApi
-      .list()
-      .then((packs) => {
+    knowledgeApi
+      .listSources()
+      .then((sources) => {
         if (cancelled) return
-        const matched = (packs ?? []).find((p) => p.task_id === initialPackTaskId)
+        const matched = (sources ?? []).find((s) => s.dissect_task_id === initialDissectTaskId)
         if (!matched) {
-          toast.warning('该拆书任务未生成参考包，请手动选择')
+          toast.warning('这本书还没收进知识库：拆书完成后再试，或在下面手动选择')
           return
         }
-        if (matched.status !== 'ready' && matched.status !== 'partial') {
-          toast.warning(`该参考包状态为 ${matched.status}，未就绪，请稍后重试`)
-          return
-        }
-        setRefPack({
-          enabled: true,
-          packIds: [matched.id],
-          dimensions: [],
-          strength: 'medium',
-        })
+        setKbChoice({ sourceId: matched.id, mode: 'borrow' })
         setAdvancedOpen(true)
-        toast.success(`已预选拆书参考包：${matched.source_book_title}`)
+        toast.success(`已选《${matched.title}》做对标书`)
       })
       .catch(() => {
         // api 拦截器已 toast
@@ -1001,16 +989,7 @@ function WizardModal({
     return () => {
       cancelled = true
     }
-  }, [initialPackTaskId])
-  // 把 refPack 转为 R8 API payload。未启用返空对象。
-  const r8Payload = (): { pack_ids?: string[]; dimensions?: string[]; strength?: 'light' | 'medium' | 'deep' } =>
-    !refPack.enabled
-      ? {}
-      : {
-          pack_ids: refPack.packIds.length > 0 ? refPack.packIds : undefined,
-          dimensions: refPack.dimensions.length > 0 ? refPack.dimensions : undefined,
-          strength: refPack.strength,
-        }
+  }, [initialDissectTaskId])
   const abortRef = useRef<AbortController | null>(null)
 
   const updateField = <K extends keyof WizardForm>(key: K, value: WizardForm[K]) => {
@@ -1061,8 +1040,7 @@ function WizardModal({
           character_count: form.character_count,
           enable_mcp: enableMcp,
           selected_plugins: selectedPlugins,
-          // V3.2-B：透传拆书参考包；项目创建成功后后端会自动挂载
-          ...r8Payload(),
+          ...kbChoicePayload(kbChoice),
           // 长篇设置：平台预设（单章字数与写法提示）
           ...(form.platform_preset ? { platform_preset: form.platform_preset } : {}),
         },
@@ -1109,8 +1087,6 @@ function WizardModal({
           requirements: form.requirements.trim() || undefined,
           enable_mcp: enableMcp,
           selected_plugins: selectedPlugins,
-          // V3.2-B：后端读项目挂载列表，此处继续透传以便后端有显式选择优先级
-          ...r8Payload(),
         },
         {
           signal: controller.signal,
@@ -1152,8 +1128,6 @@ function WizardModal({
           requirements: form.requirements.trim() || undefined,
           enable_mcp: enableMcp,
           selected_plugins: selectedPlugins,
-          // V3.2-B：透传拆书参考包选择
-          ...r8Payload(),
         },
         {
           signal: controller.signal,
@@ -1260,7 +1234,7 @@ function WizardModal({
 
   const advancedSummary = [
     stepConfirm ? '分步确认' : '连续生成',
-    refPack.enabled ? '拆书参考已启用' : '未用拆书参考',
+    kbChoice.sourceId ? '已选对标书' : '未选对标书',
     enableMcp ? 'MCP 已启用' : '未用 MCP',
   ].join(' · ')
 
@@ -1489,12 +1463,10 @@ function WizardModal({
 
                 {advancedOpen && (
                   <div className="mt-4 space-y-3">
-                    {/* V3.2-B：拆书参考包选择器（项目创建前选包，创建后自动挂载） */}
-                    <ReferencePackSelector
-                      value={refPack}
-                      onChange={setRefPack}
-                      disabledTitle="拆书参考包"
-                      hint="项目创建后会自动挂载到项目"
+                    <KbSourcePicker
+                      value={kbChoice}
+                      onChange={setKbChoice}
+                      hint="项目建好后会关联它，之后分卷、章纲、正文都按它注入仿写参考"
                     />
 
                     {/* MCP 插件 */}

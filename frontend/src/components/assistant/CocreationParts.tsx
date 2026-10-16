@@ -1,6 +1,6 @@
 /**
  * 智能助笔 · 共创室的小部件（参考岚笺 creative-team）：成员头像、团队条（点一下 @成员）、
- * 团队设置（每位成员可单独指定模型）、创作进度条、规划草案卡片（作者确认才定稿）。
+ * 团队设置（上下文上限、每位成员可单独指定模型）、上下文用量表、创作进度条、规划草案卡片（作者确认才定稿）。
  */
 import { useState } from 'react';
 import { ArrowRight, Check, Compass, Loader2, Settings2, X } from 'lucide-react';
@@ -8,8 +8,91 @@ import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { assistantApi, chapterOutlineApi, volumeApi } from '@/services/api';
 import { emitAssistantData } from '@/store/assistantStore';
-import type { AssistantMember, AssistantPlan, AssistantProgress, AssistantTeam } from '@/types/assistant';
+import type { AssistantContextUsage, AssistantMember, AssistantPlan, AssistantProgress, AssistantTeam } from '@/types/assistant';
 import { memberTone, planConfirmTargets, planEntity, planLink } from '@/utils/cocreation';
+import { formatTokens, parseWindowInput, sourceText, usageTitle, usageTone, windowChoice } from '@/utils/contextUsage';
+
+const TONE_TEXT = { ok: 'text-content-tertiary', warn: 'text-gold-500', full: 'text-cinnabar' } as const;
+const TONE_BAR = { ok: 'bg-brand-400', warn: 'bg-gold-400', full: 'bg-cinnabar' } as const;
+
+/** 输入框旁的上下文用量（参照写代码 agent）：空闲时是下一条要求开跑时的估算，运行中每一步刷新；悬停看分项 */
+export function ContextMeter({ usage, compacting }: { usage: AssistantContextUsage | null; compacting?: boolean }) {
+  if (!usage) return null;
+  const tone = usageTone(usage.percent);
+  return (
+    <span title={usageTitle(usage)} className={cn('flex cursor-help items-center gap-1 text-[10px] tabular-nums', TONE_TEXT[tone])}>
+      <span className="relative h-1.5 w-10 overflow-hidden rounded-full bg-surface-border-light">
+        <span className={cn('absolute inset-y-0 left-0 rounded-full', TONE_BAR[tone])} style={{ width: `${Math.min(100, usage.percent)}%` }} />
+      </span>
+      {compacting ? '正在压缩较早的对话…' : `${usage.percent}%（${formatTokens(usage.used)} / ${formatTokens(usage.limit)}）上下文已用`}
+      {!compacting && usage.history.summarized > 0 && <span className="text-content-tertiary">· 含前情摘要</span>}
+    </span>
+  );
+}
+
+function ContextLimit({ projectId, team, onChange }: { projectId: string; team: AssistantTeam; onChange: (team: AssistantTeam) => void }) {
+  const ctx = team.context;
+  const [choice, setChoice] = useState(() => windowChoice(ctx.setting, ctx.presets));
+  const [custom, setCustom] = useState(() => (ctx.setting ? String(Math.round(ctx.setting / 1000)) : ''));
+  const [saving, setSaving] = useState(false);
+
+  const save = async (value: number | null) => {
+    if (value === ctx.setting) return;
+    setSaving(true);
+    try {
+      const next = await assistantApi.setContextWindow(projectId, value);
+      onChange(next);
+      toast.success(value ? `上下文上限改为 ${formatTokens(value)}` : `上下文上限改为自动（${formatTokens(next.context.window)}）`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '没保存成功');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const pick = (value: string) => {
+    setChoice(value);
+    if (value !== 'custom') void save(value ? Number(value) : null);
+  };
+
+  const saveCustom = () => {
+    if (!custom.trim()) return;
+    const value = parseWindowInput(custom, ctx.min, ctx.max);
+    if (value === null) {
+      toast.error(`上下文上限填 ${formatTokens(ctx.min)}–${formatTokens(ctx.max)}：按 K 填（100 = 100K），也可以写 1.5M`);
+      return;
+    }
+    void save(value);
+  };
+
+  return (
+    <div className="mb-2 rounded border border-surface-border-light bg-surface-paper px-2.5 py-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-medium text-content">上下文上限</span>
+        <select value={choice} onChange={(e) => pick(e.target.value)} disabled={saving} className="hh-field h-7 w-auto py-0 text-[11px]">
+          <option value="">自动（{formatTokens(ctx.auto)}）</option>
+          {ctx.presets.map((p) => <option key={p} value={String(p)}>{formatTokens(p)}</option>)}
+          <option value="custom">自定义…</option>
+        </select>
+        {choice === 'custom' && (
+          <input
+            value={custom}
+            onChange={(e) => setCustom(e.target.value)}
+            onBlur={saveCustom}
+            onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+            placeholder="如 100（= 100K）"
+            className="hh-field h-7 w-28 text-[11px]"
+          />
+        )}
+        {saving && <Loader2 className="h-3.5 w-3.5 animate-spin text-brand" />}
+      </div>
+      <p className="mt-1 text-[11px] leading-5 text-content-tertiary">
+        {sourceText(ctx.source, ctx.model, ctx.window)}。每次调用模型都按这个上限装填：装不下先把本轮较早的工具结果压成一句，
+        较早的对话由模型压成「前情摘要」常驻。自动 = 按各成员用的模型查窗口，查不到按 64K；填得比模型实际窗口大会报错。
+      </p>
+    </div>
+  );
+}
 
 export function MemberAvatar({ member, size = 'sm' }: { member: Pick<AssistantMember, 'initials' | 'color' | 'name'>; size?: 'sm' | 'md' }) {
   return (
@@ -76,6 +159,7 @@ export function TeamSettings({ projectId, team, onChange, onClose }: {
         <span className="text-xs font-semibold text-content">共创团队</span>
         <button onClick={onClose} className="rounded p-1 text-content-tertiary hover:bg-surface-hover"><X className="h-3.5 w-3.5" /></button>
       </header>
+      <ContextLimit projectId={projectId} team={team} onChange={onChange} />
       <p className="mb-2 text-[11px] leading-5 text-content-tertiary">
         主编默认发言，会把专业的事交给成员；你也可以用「@成员」直接找人。模型留空 = 跟随项目模型（填设置里可用的模型名）。
       </p>
@@ -95,7 +179,11 @@ export function TeamSettings({ projectId, team, onChange, onClose }: {
               placeholder="跟随项目模型"
               className="hh-field h-7 w-36 text-[11px]"
             />
-            {saving === m.id && <Loader2 className="h-3.5 w-3.5 animate-spin text-brand" />}
+            {saving === m.id ? <Loader2 className="h-3.5 w-3.5 animate-spin text-brand" /> : m.context_window ? (
+              <span className="w-9 text-right text-[10px] tabular-nums text-content-tertiary" title="这位成员调用模型时的上下文上限">
+                {formatTokens(m.context_window)}
+              </span>
+            ) : null}
           </li>
         ))}
       </ul>
