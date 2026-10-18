@@ -21,12 +21,15 @@ import {
   ChevronUp,
   ArrowRight,
   Wand2,
+  Play,
   type LucideIcon,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 import { useStore } from '@/store/index'
 import { useProjectSync } from '@/store/hooks'
+import { useAIJobsStore } from '@/store/aiJobsStore'
+import { isJobCancelled, runWizardJob, type WizardJobKind } from '@/store/wizardJob'
 import { knowledgeApi, projectApi, wizardStreamApi } from '@/services/api'
 import InspirationModal from '@/components/inspiration/InspirationModal'
 import { MCPSelector } from '@/components/MCPSelector'
@@ -35,7 +38,15 @@ import type { KbSourceChoice } from '@/types/knowledge'
 import { kbChoicePayload, NO_KB_CHOICE } from '@/utils/knowledge'
 import { BrandLogo } from '@/components/ui/BrandLogo'
 import { parseServerTime } from '@/utils/serverTime'
-import type { PlatformPreset, Project } from '@/types'
+import type { SSEClientOptions } from '@/utils/sseClient'
+import type {
+  GenerateCharactersResponse,
+  GenerateOutlineResponse,
+  PlatformPreset,
+  Project,
+  WizardVolumesResponse,
+  WorldBuildingResponse,
+} from '@/types'
 
 /* ─── 常量 ─── */
 
@@ -832,6 +843,26 @@ export default function ProjectList() {
 
 type WizardPhase = 'form' | 'generating' | 'done'
 type GenStep = 'pending' | 'processing' | 'completed' | 'error'
+type WizardStepKey = 'world' | 'chars' | 'outline' | 'lines'
+/** 中断信息：停在哪一步、原因、是不是作者自己停的；可从这一步继续 */
+type WizardFailure = { step: WizardStepKey; message: string; stopped: boolean }
+
+const WIZARD_STEP_ORDER: WizardStepKey[] = ['world', 'chars', 'outline', 'lines']
+const WIZARD_STEP_LABEL: Record<WizardStepKey, string> = { world: '世界观', chars: '角色', outline: '总纲', lines: '卷纲' }
+/** 每步在总进度条上的起点（各占 25%） */
+const WIZARD_STEP_BASE: Record<WizardStepKey, number> = { world: 0, chars: 25, outline: 50, lines: 75 }
+const WIZARD_STEP_START: Record<WizardStepKey, string> = {
+  world: '正在生成世界观...',
+  chars: '正在生成角色...',
+  outline: '正在生成故事大纲...',
+  lines: '正在生成卷纲...',
+}
+/** 分步确认：进入这一步之前暂停时的提示 */
+const WIZARD_GATE_MESSAGE: Record<Exclude<WizardStepKey, 'world'>, string> = {
+  chars: '世界观已生成，请确认后继续',
+  outline: '角色已生成，请确认后继续',
+  lines: '故事大纲已生成，请确认后继续生成卷纲',
+}
 
 interface WizardForm {
   title: string
@@ -938,7 +969,8 @@ function WizardModal({
   const [progressMsg, setProgressMsg] = useState('')
   const [steps, setSteps] = useState<{ world: GenStep; chars: GenStep; outline: GenStep; lines: GenStep }>({ world: 'pending', chars: 'pending', outline: 'pending', lines: 'pending' })
   const [projectId, setProjectId] = useState('')
-  const [error, setError] = useState('')
+  const [failure, setFailure] = useState<WizardFailure | null>(null)
+  const error = failure?.message ?? ''
   const [minimized, setMinimized] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [selectedPlugins, setSelectedPlugins] = useState<string[]>([])
@@ -947,14 +979,14 @@ function WizardModal({
 
   // 分步确认：每阶段生成完暂停，用户确认后再继续（贴合人类"逐层沉淀再展开"的创作节奏）
   const [stepConfirm, setStepConfirm] = useState(true)
-  const [awaitingStep, setAwaitingStep] = useState<null | 'chars' | 'outline' | 'lines'>(null)
+  const [awaitingStep, setAwaitingStep] = useState<null | Exclude<WizardStepKey, 'world'>>(null)
   const [worldPreview, setWorldPreview] = useState<{ time_period?: string; location?: string; atmosphere?: string; rules?: string } | null>(null)
   const [charsPreview, setCharsPreview] = useState<string[]>([])
   const [linesPreview, setLinesPreview] = useState('')
   const continueGateRef = useRef<(() => void) | null>(null)
 
   /** 暂停生成流水线，等待用户点击「继续」 */
-  const waitForConfirm = (step: 'chars' | 'outline' | 'lines', progressVal: number, msg: string) =>
+  const waitForConfirm = (step: Exclude<WizardStepKey, 'world'>, progressVal: number, msg: string) =>
     new Promise<void>((resolve) => {
       setAwaitingStep(step)
       setProgress(progressVal)
@@ -990,7 +1022,12 @@ function WizardModal({
       cancelled = true
     }
   }, [initialDissectTaskId])
-  const abortRef = useRef<AbortController | null>(null)
+  /** 流水线轮次：停止 / 续跑时递增，旧一轮之后返回的结果和失败一律忽略 */
+  const runRef = useRef(0)
+  /** 正在进行（或暂停待确认）的那一步：失败 / 停止记在它身上，续跑从它开始 */
+  const stepRef = useRef<WizardStepKey>('world')
+  /** 正在运行的后端任务：停止时据此真正取消，而不只是断开连接 */
+  const jobIdRef = useRef<string | null>(null)
 
   const updateField = <K extends keyof WizardForm>(key: K, value: WizardForm[K]) => {
     setForm(prev => ({ ...prev, [key]: value }))
@@ -1013,195 +1050,173 @@ function WizardModal({
 
   const canSubmit = form.title.trim() && form.description.trim()
 
-  const handleStart = async () => {
-    if (!canSubmit) return
+  /**
+   * 从某一步起依次生成到卷纲；existingPid 为已建成的项目（续跑时传入）。
+   * 每步 = 一个后台任务（断线按 lastSeq 续上）；失败 / 被停止时把这一步标红并记下，作者可从这一步继续。
+   * 续跑不先清理：失败的那一步没提交任何数据（角色整批一次提交、总纲 / 卷纲本来就是替换）。
+   */
+  const runPipeline = async (from: WizardStepKey, existingPid = '') => {
+    const runId = ++runRef.current
+    const active = () => runRef.current === runId
+    const order = WIZARD_STEP_ORDER.slice(WIZARD_STEP_ORDER.indexOf(from))
+    let pid = existingPid
+
     setPhase('generating')
-    setError('')
+    setFailure(null)
+    setSteps(s => {
+      const next = { ...s }
+      for (const key of order) next[key] = 'pending'
+      return next
+    })
+
+    const runStep = <T,>(
+      key: WizardStepKey,
+      kind: WizardJobKind,
+      title: string,
+      connect: (options: SSEClientOptions<T>) => Promise<unknown>,
+    ) =>
+      runWizardJob<T>({
+        kind,
+        title,
+        projectId: pid || null,
+        connect,
+        onStarted: (jobId) => {
+          if (active()) jobIdRef.current = jobId
+          else void useAIJobsStore.getState().cancel(jobId) // 发起后、拿到任务 id 前就点了停止
+        },
+        onProgress: (msg, prog) => {
+          if (!active()) return
+          setProgressMsg(msg)
+          setProgress(WIZARD_STEP_BASE[key] + Math.floor(prog / 4))
+        },
+      })
 
     try {
-      abortRef.current?.abort()
-      const controller = new AbortController()
-      abortRef.current = controller
-
-      // Step 1: 世界观
-      setSteps(s => ({ ...s, world: 'processing' }))
-      setProgressMsg('正在生成世界观...')
-      setProgress(5)
-
-      const worldResult = await wizardStreamApi.generateWorldBuildingStream(
-        {
-          title: form.title.trim(),
-          description: form.description.trim(),
-          theme: form.theme.trim() || form.title.trim(),
-          genre: form.genre || '玄幻',
-          narrative_perspective: form.narrative_perspective,
-          target_words: form.target_words,
-          chapter_count: form.chapter_count,
-          character_count: form.character_count,
-          enable_mcp: enableMcp,
-          selected_plugins: selectedPlugins,
-          ...kbChoicePayload(kbChoice),
-          // 长篇设置：平台预设（单章字数与写法提示）
-          ...(form.platform_preset ? { platform_preset: form.platform_preset } : {}),
-        },
-        {
-          signal: controller.signal,
-          onProgress: (msg, prog) => {
-            setProgressMsg(msg)
-            setProgress(Math.floor(prog / 4))
-          },
-          onResult: (result) => {
-            setProjectId(result.project_id)
-            const r = result as { time_period?: string; location?: string; atmosphere?: string; rules?: string }
-            setWorldPreview({ time_period: r.time_period, location: r.location, atmosphere: r.atmosphere, rules: r.rules })
-            setSteps(s => ({ ...s, world: 'completed' }))
-          },
-          onError: (err) => {
-            setSteps(s => ({ ...s, world: 'error' }))
-            throw new Error(err)
-          },
+      for (const key of order) {
+        stepRef.current = key
+        // 分步确认：每步开始前暂停，可先去项目里查看 / 修改再继续（续跑的起点作者已点过「继续」，不再停）
+        if (key !== 'world' && key !== from && stepConfirm) {
+          await waitForConfirm(key, WIZARD_STEP_BASE[key], WIZARD_GATE_MESSAGE[key])
+          if (!active()) return
         }
-      )
+        setSteps(s => ({ ...s, [key]: 'processing' as GenStep }))
+        setProgressMsg(WIZARD_STEP_START[key])
+        setProgress(WIZARD_STEP_BASE[key] + (key === 'world' ? 5 : 0))
 
-      if (controller.signal.aborted) return
-      if (!worldResult?.project_id) throw new Error('项目创建失败')
-      const pid = worldResult.project_id
-
-      // 分步确认：世界观完成后暂停，可先去项目里查看/修改再继续
-      if (stepConfirm) {
-        await waitForConfirm('chars', 25, '世界观已生成，请确认后继续')
-      }
-      if (controller.signal.aborted) return
-
-      // Step 2: 角色
-      setSteps(s => ({ ...s, chars: 'processing' }))
-      setProgressMsg('正在生成角色...')
-      setProgress(25)
-
-      await wizardStreamApi.generateCharactersStream(
-        {
-          project_id: pid,
-          count: form.character_count,
-          theme: form.theme.trim() || undefined,
-          genre: form.genre || undefined,
-          requirements: form.requirements.trim() || undefined,
-          enable_mcp: enableMcp,
-          selected_plugins: selectedPlugins,
-        },
-        {
-          signal: controller.signal,
-          onProgress: (msg, prog) => {
-            setProgressMsg(msg)
-            setProgress(25 + Math.floor(prog / 4))
-          },
-          onResult: (result) => {
-            const chars = (result as { characters?: Array<{ name?: string }> }).characters || []
-            setCharsPreview(chars.slice(0, 6).map(c => String(c.name || '')).filter(Boolean))
-            setSteps(s => ({ ...s, chars: 'completed' }))
-          },
-          onError: (err) => {
-            setSteps(s => ({ ...s, chars: 'error' }))
-            throw new Error(err)
-          },
-        }
-      )
-
-      if (controller.signal.aborted) return
-
-      // 分步确认：角色完成后暂停
-      if (stepConfirm) {
-        await waitForConfirm('outline', 50, '角色已生成，请确认后继续')
-      }
-      if (controller.signal.aborted) return
-
-      // Step 3: 大纲
-      setSteps(s => ({ ...s, outline: 'processing' }))
-      setProgressMsg('正在生成故事大纲...')
-      setProgress(50)
-
-      await wizardStreamApi.generateCompleteOutlineStream(
-        {
-          project_id: pid,
-          chapter_count: form.chapter_count,
-          narrative_perspective: form.narrative_perspective,
-          target_words: form.target_words,
-          requirements: form.requirements.trim() || undefined,
-          enable_mcp: enableMcp,
-          selected_plugins: selectedPlugins,
-        },
-        {
-          signal: controller.signal,
-          onProgress: (msg, prog) => {
-            setProgressMsg(msg)
-            setProgress(50 + Math.floor(prog / 4))
-          },
-          onResult: () => {
-            setSteps(s => ({ ...s, outline: 'completed' }))
-          },
-          onError: (err) => {
-            setSteps(s => ({ ...s, outline: 'error' }))
-            throw new Error(err)
-          },
-        }
-      )
-
-      if (controller.signal.aborted) return
-      if (stepConfirm) {
-        await waitForConfirm('lines', 75, '故事大纲已生成，请确认后继续生成卷纲')
-      }
-      if (controller.signal.aborted) return
-
-      // Step 4: 卷纲（按总纲分卷，并把第 1 卷细化为剧情单元；全书章数 = 项目章节数）
-      setSteps(s => ({ ...s, lines: 'processing' }))
-      setProgressMsg('正在生成卷纲...')
-      setProgress(75)
-
-      await wizardStreamApi.generateVolumesStream(
-        {
-          project_id: pid,
-          chapter_count: form.chapter_count,
-        },
-        {
-          signal: controller.signal,
-          onProgress: (msg, prog) => {
-            setProgressMsg(msg)
-            setProgress(75 + Math.floor(prog / 4))
-          },
-          onResult: (result) => {
+        if (key === 'world') {
+          const result = await runStep<WorldBuildingResponse>(key, 'wizard_world_building', '向导：生成世界构建', (options) =>
+            wizardStreamApi.generateWorldBuildingStream(
+              {
+                title: form.title.trim(),
+                description: form.description.trim(),
+                theme: form.theme.trim() || form.title.trim(),
+                genre: form.genre || '玄幻',
+                narrative_perspective: form.narrative_perspective,
+                target_words: form.target_words,
+                chapter_count: form.chapter_count,
+                character_count: form.character_count,
+                enable_mcp: enableMcp,
+                selected_plugins: selectedPlugins,
+                ...kbChoicePayload(kbChoice),
+                // 长篇设置：平台预设（单章字数与写法提示）
+                ...(form.platform_preset ? { platform_preset: form.platform_preset } : {}),
+              },
+              options,
+            ))
+          if (!active()) return
+          if (!result?.project_id) throw new Error('项目创建失败')
+          pid = result.project_id
+          setProjectId(pid)
+          setWorldPreview({ time_period: result.time_period, location: result.location, atmosphere: result.atmosphere, rules: result.rules })
+        } else if (key === 'chars') {
+          const result = await runStep<GenerateCharactersResponse>(key, 'wizard_characters', '向导：生成角色', (options) =>
+            wizardStreamApi.generateCharactersStream(
+              {
+                project_id: pid,
+                count: form.character_count,
+                theme: form.theme.trim() || undefined,
+                genre: form.genre || undefined,
+                requirements: form.requirements.trim() || undefined,
+                enable_mcp: enableMcp,
+                selected_plugins: selectedPlugins,
+              },
+              options,
+            ))
+          if (!active()) return
+          setCharsPreview((result?.characters || []).slice(0, 6).map(c => String(c.name || '')).filter(Boolean))
+        } else if (key === 'outline') {
+          await runStep<GenerateOutlineResponse>(key, 'wizard_outline', '向导：生成故事大纲', (options) =>
+            wizardStreamApi.generateCompleteOutlineStream(
+              {
+                project_id: pid,
+                chapter_count: form.chapter_count,
+                narrative_perspective: form.narrative_perspective,
+                target_words: form.target_words,
+                requirements: form.requirements.trim() || undefined,
+                enable_mcp: enableMcp,
+                selected_plugins: selectedPlugins,
+              },
+              options,
+            ))
+          if (!active()) return
+        } else {
+          // 卷纲：按总纲分卷，并把第 1 卷细化为剧情单元；全书章数 = 项目章节数
+          const result = await runStep<WizardVolumesResponse>(key, 'wizard_volumes', '向导：生成卷纲', (options) =>
+            wizardStreamApi.generateVolumesStream({ project_id: pid, chapter_count: form.chapter_count }, options))
+          if (!active()) return
+          if (result) {
             setLinesPreview(
               `共 ${result.volumes.length} 卷 / ${result.chapter_count} 章：` +
               result.volumes.slice(0, 4).map(v => `《${v.title}》`).join('、') +
               (result.volumes.length > 4 ? ' …' : '')
             )
-            setSteps(s => ({ ...s, lines: 'completed' }))
-          },
-          onError: (err) => {
-            setSteps(s => ({ ...s, lines: 'error' }))
-            throw new Error(err)
-          },
+          }
         }
-      )
+        setSteps(s => ({ ...s, [key]: 'completed' as GenStep }))
+      }
 
       setProgress(100)
       setProgressMsg('项目创建完成！')
       setPhase('done')
       toast.success('项目创建成功！')
     } catch (err) {
-      const error = err as { name?: string; message?: string }
-      if (error.name === 'AbortError') {
-        return
-      }
-      setError(error.message || 'Creation failed')
-      toast.error('Project creation failed: ' + (error.message || 'Unknown error'))
+      if (!active()) return
+      const step = stepRef.current
+      const stopped = isJobCancelled(err)
+      const message = err instanceof Error && err.message ? err.message : '未知错误'
+      setSteps(s => ({ ...s, [step]: 'error' as GenStep }))
+      setFailure({ step, message, stopped })
+      setProgressMsg(stopped ? '已停止' : `「${WIZARD_STEP_LABEL[step]}」生成失败`)
+      // 任务失败的文案已带步骤名（如「向导：生成角色失败: …」），标题栏也写着是哪一步
+      if (stopped) toast.info(`已停止生成「${WIZARD_STEP_LABEL[step]}」`)
+      else toast.error(message)
+    } finally {
+      if (active()) jobIdRef.current = null
     }
   }
 
+  const handleStart = () => {
+    if (!canSubmit) return
+    void runPipeline('world')
+  }
+
+  /** 从中断的那一步继续（已完成的步骤保留） */
+  const handleResume = () => {
+    if (failure) void runPipeline(failure.step, projectId)
+  }
+
   const handleStop = () => {
-    abortRef.current?.abort()
-    // 若正处于分步确认暂停中，释放闸门让流水线感知 abort 并退出
+    runRef.current += 1 // 作废当前一轮：之后返回的结果 / 失败都不再处理
+    const jobId = jobIdRef.current
+    jobIdRef.current = null
+    // 真正取消后端任务（本步已写入的数据保留）；以前只断开连接，后端照样跑完并写库
+    if (jobId) void useAIJobsStore.getState().cancel(jobId)
+    // 若正处于分步确认暂停中，释放闸门让流水线退出
     continueGateRef.current?.()
     setAwaitingStep(null)
-    setError('已手动停止生成')
+    const step = stepRef.current
+    setSteps(s => (s[step] === 'processing' ? { ...s, [step]: 'pending' as GenStep } : s))
+    setFailure({ step, message: '已手动停止生成', stopped: true })
     setProgressMsg('已停止')
     // 如果已经创建了项目，可以进入项目查看已生成的部分
     if (projectId) {
@@ -1244,11 +1259,24 @@ function WizardModal({
       <div className="hh-glass fixed bottom-5 right-5 z-50 w-80 overflow-hidden animate-fade-in">
         <div className="flex items-center justify-between gap-3 px-4 py-3">
           <div className="flex min-w-0 items-center gap-2.5">
-            {phase === 'generating' && !awaitingStep && <Loader2 className="h-4 w-4 shrink-0 animate-spin text-brand" />}
-            {phase === 'generating' && awaitingStep && <CheckCircle2 className="h-4 w-4 shrink-0 text-amber-500" />}
-            {phase === 'done' && <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />}
+            {/* 缩小后中途失败也要看得出来：以前失败了这里照样转圈、显示书名 */}
+            {failure ? (
+              <AlertTriangle className={cn('h-4 w-4 shrink-0', failure.stopped ? 'text-amber-500' : 'text-red-500')} />
+            ) : phase === 'done' ? (
+              <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
+            ) : awaitingStep ? (
+              <CheckCircle2 className="h-4 w-4 shrink-0 text-amber-500" />
+            ) : (
+              <Loader2 className="h-4 w-4 shrink-0 animate-spin text-brand" />
+            )}
             <span className="truncate text-sm font-medium text-content">
-              {phase === 'done' ? '创建完成' : awaitingStep ? '等待确认 · 展开继续' : form.title || '生成中...'}
+              {failure
+                ? `${failure.stopped ? '已停止' : '生成失败'}：${WIZARD_STEP_LABEL[failure.step]} · 展开查看`
+                : phase === 'done'
+                  ? '创建完成'
+                  : awaitingStep
+                    ? '等待确认 · 展开继续'
+                    : form.title || '生成中...'}
             </span>
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
@@ -1265,7 +1293,7 @@ function WizardModal({
         <div className="hh-progress h-1">
           <div className="hh-progress-bar" style={{ width: `${Math.min(progress, 100)}%` }} />
         </div>
-        {phase === 'done' && projectId && (
+        {phase === 'done' && projectId && !failure && (
           <div className="p-3">
             <button onClick={enterProject} className="hh-btn-primary hh-btn-sm w-full">
               {enterLabel}
@@ -1285,7 +1313,13 @@ function WizardModal({
           <div className="min-w-0">
             <p className="hh-eyebrow">快速开始</p>
             <h2 className="mt-2 text-xl font-semibold tracking-tight text-content">
-              {phase === 'form' ? '新建小说项目' : isSuccess ? '项目创建完成' : error ? '生成已停止' : '正在生成设定'}
+              {phase === 'form'
+                ? '新建小说项目'
+                : isSuccess
+                  ? '项目创建完成'
+                  : failure
+                    ? failure.stopped ? '生成已停止' : `「${WIZARD_STEP_LABEL[failure.step]}」生成失败`
+                    : '正在生成设定'}
             </h2>
             <p className="mt-1 text-sm text-content-secondary">
               {phase === 'form'
@@ -1559,10 +1593,20 @@ function WizardModal({
                 </div>
               )}
 
-              {error && (
-                <div className="flex items-start gap-2 border border-red-200 bg-red-50/80 px-4 py-3 text-sm text-red-600">
+              {failure && (
+                <div
+                  className={cn(
+                    'flex items-start gap-2 border px-4 py-3 text-sm',
+                    failure.stopped ? 'border-amber-200 bg-amber-50/80 text-amber-700' : 'border-red-200 bg-red-50/80 text-red-600',
+                  )}
+                >
                   <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                  <span>{error}</span>
+                  <span>
+                    {failure.message}
+                    <span className="mt-1 block text-xs opacity-80">
+                      已完成的步骤保留在项目里，可从「{WIZARD_STEP_LABEL[failure.step]}」继续。
+                    </span>
+                  </span>
                 </div>
               )}
             </div>
@@ -1597,7 +1641,7 @@ function WizardModal({
             </>
           )}
           {(phase === 'done' || (phase === 'generating' && error)) && projectId && (
-            <button onClick={enterProject} className="hh-btn-primary">
+            <button onClick={enterProject} className={failure ? 'hh-btn-secondary' : 'hh-btn-primary'}>
               {enterLabel}
               <ArrowRight className="h-4 w-4" />
             </button>
@@ -1605,6 +1649,12 @@ function WizardModal({
           {error && !projectId && (
             <button onClick={onClose} className="hh-btn-secondary">
               关闭
+            </button>
+          )}
+          {failure && (
+            <button onClick={handleResume} className="hh-btn-primary">
+              <Play className="h-4 w-4" />
+              从「{WIZARD_STEP_LABEL[failure.step]}」继续
             </button>
           )}
         </div>

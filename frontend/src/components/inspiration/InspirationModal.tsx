@@ -12,12 +12,11 @@ import {
   CHOICE_STEPS,
   CONFIRM_CREATE_OPTION,
   MANUAL_INPUT_OPTIONS,
-  NODE_META,
   REGENERATE_OPTIONS,
   STEP_META,
   THINKING_PHASES,
 } from '@/components/inspiration/copy';
-import { FLOW_STEPS, getFlowStep, getLoadingApiStep, getStepChipStatus } from '@/components/inspiration/flow';
+import { FLOW_STEPS, getFlowStep, getInterruption, getLoadingApiStep, getStepChipStatus } from '@/components/inspiration/flow';
 import { SummaryList, type SummaryItem } from '@/components/inspiration/shared';
 import { IdeaStage } from '@/components/inspiration/stages/IdeaStage';
 import { ChoiceStage } from '@/components/inspiration/stages/ChoiceStage';
@@ -279,21 +278,14 @@ export default function InspirationModal({
       );
     }
     if (isConfirmStep) {
-      const failedMessage =
-        state.progressMessage && state.progress > 0 && state.progressMessage !== '项目创建完成！'
-          ? state.progressMessage
-          : null;
       // 项目已建成但某环节失败：从失败环节继续，而不是再创建一个重复项目
-      const nodeKeys = NODE_META.map((node) => node.key);
-      const failedNode =
-        nodeKeys.find((key) => state.generationSteps[key] === 'error') ??
-        nodeKeys.find((key) => state.generationSteps[key] !== 'completed');
+      const { message: failedMessage, resumeNode } = getInterruption(state);
       const resume =
-        failedMessage && state.projectId && failedNode && readyToGenerate
+        resumeNode && readyToGenerate
           ? {
-              node: failedNode,
+              node: resumeNode,
               steps: state.generationSteps,
-              onResume: () => void regenerateFrom(failedNode, wizardData as WizardData, state.projectId),
+              onResume: () => void regenerateFrom(resumeNode, wizardData as WizardData, state.projectId),
             }
           : undefined;
       return (

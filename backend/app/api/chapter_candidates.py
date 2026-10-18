@@ -12,9 +12,9 @@ from app.logger import get_logger
 from app.models.chapter import Chapter
 from app.models.chapter_candidate import ChapterCandidate
 from app.schemas.chapter_candidate import CandidateAdoptRequest
-from app.services.ai_jobs import AIJobConflictError
+from app.services.ai_jobs import AIJobConflictError, ai_jobs
 from app.services.ai_service import AIService
-from app.services.chapter_analysis_jobs import create_analysis_task, start_chapter_analysis
+from app.services.chapter_analysis_jobs import analysis_scope, create_analysis_task, start_chapter_analysis
 from app.services.chapter_candidate_service import (
     CandidateError,
     adopt_candidate,
@@ -37,6 +37,23 @@ async def _load_candidate(db: AsyncSession, chapter: Chapter, candidate_id: str)
     if not candidate:
         raise HTTPException(status_code=404, detail="候选稿不存在")
     return candidate
+
+
+async def _queue_analysis(db: AsyncSession, chapter: Chapter, user_id: str, ai_service: AIService) -> dict:
+    # 同章还在跑的分析读的是采用前的旧稿，结果对不上新正文：停掉它再排新的（否则新分析排不上，作者什么也看不到）
+    running = ai_jobs.current(analysis_scope(chapter.id))
+    if running is not None:
+        await ai_jobs.cancel(running.id)
+    task_id = await create_analysis_task(db, chapter_id=chapter.id, user_id=user_id, project_id=chapter.project_id)
+    try:
+        job = await start_chapter_analysis(
+            chapter_id=chapter.id, chapter_number=chapter.chapter_number, chapter_title=chapter.title,
+            user_id=user_id, project_id=chapter.project_id, task_id=task_id, ai_service=ai_service, manager=ai_jobs,
+        )
+    except AIJobConflictError as conflict:
+        logger.warning(f"⚠️ 采用候选稿后的分析没排上（刚有同章分析发起，跟着它走）: {conflict}")
+        job = ai_jobs.current(analysis_scope(chapter.id))
+    return {"analysis_task_id": task_id, "analysis_job_id": job.id if job else None}
 
 
 def _chapter_payload(chapter: Chapter) -> dict:
@@ -102,16 +119,7 @@ async def adopt_chapter_candidate(
         "analysis_job_id": None,
     }
     if body.auto_analyze and (chapter.content or "").strip() and user_id:
-        task_id = await create_analysis_task(db, chapter_id=chapter.id, user_id=user_id, project_id=chapter.project_id)
-        response["analysis_task_id"] = task_id
-        try:
-            job = await start_chapter_analysis(
-                chapter_id=chapter.id, chapter_number=chapter.chapter_number, chapter_title=chapter.title,
-                user_id=user_id, project_id=chapter.project_id, task_id=task_id, ai_service=user_ai_service,
-            )
-            response["analysis_job_id"] = job.id
-        except AIJobConflictError as conflict:
-            logger.warning(f"⚠️ 采用候选稿后的分析未启动（同章分析在跑）: {conflict}")
+        response.update(await _queue_analysis(db, chapter, user_id, user_ai_service))
     return response
 
 

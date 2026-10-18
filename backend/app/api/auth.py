@@ -21,6 +21,7 @@ from app.config import settings
 from app.services.auth_settings_service import AuthSettings, auth_settings_store
 from app.services.email_service import BRAND_NAME, CooldownError, SmtpConfig, email_code_store, send_email
 from app.services.oauth_service import LinuxDOOAuthService
+from app.services.system_settings_store import JsonSettingsStore
 
 
 CHINA_TZ = timezone(timedelta(hours=8))
@@ -93,6 +94,29 @@ async def _create_or_update_local_user(username: str):
     )
 
 
+class _UsedConfigPassword(BaseModel):
+    """配置文件里已经用过的密码（指纹）：生效过、或已被网页改密码顶掉；换成别的值才会再生效一次"""
+    user_id: str = ""
+    password_hash: str = ""
+
+
+_used_config_password_store = JsonSettingsStore("local_auth", _UsedConfigPassword, "本地账号")
+
+
+def _config_password_hash() -> str:
+    return hashlib.sha256(settings.LOCAL_AUTH_PASSWORD.encode()).hexdigest()
+
+
+async def _mark_config_password_used(user_id: str) -> None:
+    await _used_config_password_store.save(_UsedConfigPassword(user_id=user_id, password_hash=_config_password_hash()))
+
+
+async def mark_config_password_superseded(user_id: str) -> None:
+    """配置账号的密码在网页 / 管理后台改过：配置文件里现在这个密码随之作废"""
+    if settings.LOCAL_AUTH_USERNAME and settings.LOCAL_AUTH_PASSWORD and user_id == _local_user_id(settings.LOCAL_AUTH_USERNAME):
+        await _mark_config_password_used(user_id)
+
+
 async def _authenticate_config_local_account(username: str, password: str):
     """Authenticate the configured local admin account."""
     if not settings.LOCAL_AUTH_USERNAME or not settings.LOCAL_AUTH_PASSWORD:
@@ -102,29 +126,26 @@ async def _authenticate_config_local_account(username: str, password: str):
 
     user_id = _local_user_id(username)
     user = await user_manager.get_user(user_id)
+    has_password = user is not None and await password_manager.has_password(user_id)
+    used = await _used_config_password_store.get()
+    used_hash = used.password_hash if used.user_id == user_id else ""
 
-    if not user:
+    if not has_password or (used_hash and used_hash != _config_password_hash()):
         if password != settings.LOCAL_AUTH_PASSWORD:
             raise HTTPException(status_code=401, detail="用户名或密码错误")
-
-        user = await _create_or_update_local_user(username)
-        await password_manager.set_password(user.user_id, username, settings.LOCAL_AUTH_PASSWORD)
-        logger.info(f"[本地登录] 配置账号 {user.user_id} 首次登录，已创建本地用户")
+        if not user:
+            user = await _create_or_update_local_user(username)
+        await password_manager.set_password(user_id, username, settings.LOCAL_AUTH_PASSWORD)
+        await _mark_config_password_used(user_id)
+        logger.info(f"[本地登录] 配置账号 {user_id} 已按配置文件设置密码并登录")
         return user
 
-    db_valid = False
-    if await password_manager.has_password(user.user_id):
-        db_valid = await password_manager.verify_password(user.user_id, password)
-
-    config_valid = password == settings.LOCAL_AUTH_PASSWORD
-    if not db_valid and not config_valid:
+    if not used_hash:
+        await _mark_config_password_used(user_id)
+    if not await password_manager.verify_password(user_id, password):
         raise HTTPException(status_code=401, detail="用户名或密码错误")
 
-    if config_valid and not db_valid:
-        await password_manager.set_password(user.user_id, username, settings.LOCAL_AUTH_PASSWORD)
-        logger.info(f"[本地登录] 配置账号 {user.user_id} 密码已同步到数据库")
-
-    logger.info(f"[本地登录] 配置账号 {user.user_id} 登录成功")
+    logger.info(f"[本地登录] 配置账号 {user_id} 登录成功")
     return user
 
 
@@ -516,6 +537,7 @@ async def set_user_password(request: Request, password_req: SetPasswordRequest):
         raise HTTPException(status_code=400, detail="密码长度至少为6个字符")
 
     await password_manager.set_password(user.user_id, user.username, password_req.password)
+    await mark_config_password_superseded(user.user_id)
     logger.info(f"用户 {user.user_id} ({user.username}) 设置了自定义密码")
 
     return SetPasswordResponse(

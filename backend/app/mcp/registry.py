@@ -8,6 +8,7 @@ from app.mcp.config import mcp_config
 from app.mcp.server_config import TRANSPORT_STREAMABLE_HTTP
 from app.models.mcp_plugin import MCPPlugin
 from app.logger import get_logger
+from app.utils.outbound_guard import outbound_guard_for_user_id
 
 logger = get_logger(__name__)
 
@@ -217,13 +218,14 @@ class MCPPluginRegistry:
                         return False
 
                     plugin_config = plugin.config or {}
-                    # 为每个插件创建独立的HTTP客户端
+                    # 为每个插件创建独立的HTTP客户端；插件主人不是管理员时连接走出站守卫（防 SSRF）
                     client = HTTPMCPClient(
                         url=plugin.server_url,
                         headers=plugin.headers or {},
                         env=plugin.env or {},
                         timeout=plugin_config.get('timeout', 60.0),
                         transport=plugin_config.get('transport', TRANSPORT_STREAMABLE_HTTP),
+                        guard=await outbound_guard_for_user_id(plugin.user_id),
                     )
 
                     # 创建会话信息

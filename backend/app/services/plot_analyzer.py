@@ -37,6 +37,8 @@ FACTS_PROMPT = """你是长篇网文的连续性编辑。读完下面这一章{s
 ---
 记录规则：
 - 只记正文明确写出的事，不推测、不补设定；人名优先用「已登记角色」里的正式名
+- 回忆、梦境、幻象、别人讲的往事不是现在发生的：end_state / story_time / state_changes / relationships 只记现在这条线（回忆里出现的死人不算复活，往事里的地点、境界、关系也不算现在的）；往事写进 summary 或 events 时注明「回忆」，events 的 time 写成「回忆·十年前」这样
+- 整章都是往事、没有回到现在：end_state 和 story_time 留空
 - evidence 从正文逐字摘 6-30 字（必须能在原文里找到）
 - 没有的项给空数组 []，不要编{compact_rule}
 
@@ -63,7 +65,7 @@ FACTS_PROMPT = """你是长篇网文的连续性编辑。读完下面这一章{s
 8. relationships：人物关系的明确变化 [{{"from", "to", "delta", "reason_type", "reason", "status", "evidence"}}]
    delta = -100~100 的整数；reason_type = rescue / betrayal / alliance / misunderstanding / confession / rivalry / respect / hostility / other；status = active / broken / past / complicated
 9. knowledge：人物新知道的信息 [{{"who", "key", "content", "source", "secret"}}]；key = 10 字内的信息标签，source = witnessed / hearsay / deduced / document，secret = public / private / secret
-10. events：1-5 个关键事件 [{{"title", "what", "cause", "effect", "decision", "type", "actors", "targets", "location", "time", "visibility", "importance", "evidence"}}]
+10. events：1-5 个关键事件，按正文里的先后排列 [{{"title", "what", "cause", "effect", "decision", "type", "actors", "targets", "location", "time", "visibility", "importance", "evidence"}}]
     type = action / reveal / battle / meeting / departure / arrival / promise / mystery / conflict / death / other；有人死亡时 type = death、死者写进 targets；importance = 0~1
 11. 最后一个字段固定写 "end": true
 
@@ -85,6 +87,7 @@ CAST_PROMPT = """你是小说编辑。读完下面这一章{segment_note}，做�
 一、characters / organizations：本章出场、有名字的人物和组织（只写正文里有依据的信息，没提到的字段填 null）
 - 人物 = 能说话、能行动的个体；宗门 / 门派 / 家族 / 帮会 / 堂殿阁院等机构一律放 organizations
 - 已登记的只补本章新透露的信息
+- 回忆 / 往事里的身份与归属写进 background；affiliations 只写人物现在的归属（往事里待过的组织不写进 affiliations）
 - characters：[{{"name", "gender", "age", "role_type", "personality", "appearance", "speech_style", "background", "traits", "affiliations"}}]
   role_type = protagonist / major / supporting / minor；speech_style = 说话方式 / 口头禅（台词体现不出来填 null）；background = 一句话
   affiliations = [{{"org_name", "position", "change", "reason"}}]，change = joined / left / promoted / expelled / active

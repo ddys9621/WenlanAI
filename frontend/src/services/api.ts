@@ -18,6 +18,7 @@ import { PROJECT_HEADER, getActiveProjectId } from '../utils/activeProject';
 import type { MemoryAnnotation } from '../utils/annotationSegments';
 import type { UpdateCheckResult, UpdateJobStatus } from '../types/system_update';
 import type { EmbeddingDownloadResult, EmbeddingStatus } from '../types/embedding';
+import type { ProjectPromptItem, ProjectPromptList, ProjectPromptResetAll } from '../types/prompts';
 import type {
   BatchAnalyzeRequest,
   BatchAnalyzeResult,
@@ -37,6 +38,7 @@ import type {
   AssistantAnswer,
   AssistantChecks,
   AssistantContextUsage,
+  AssistantEntityCandidate,
   AssistantFieldCandidate,
   AssistantPageContext,
   AssistantPreview,
@@ -78,6 +80,8 @@ import type {
   OutlineCreate,
   OutlineUpdate,
   Character,
+  CharacterBatchGenerateRequest,
+  CharacterBatchResult,
   CharacterUpdate,
   Chapter,
   ChapterBatchRequest,
@@ -88,6 +92,8 @@ import type {
   GenerateCharacterRequest,
   GenerateCharactersResponse,
   GenerateOutlineResponse,
+  StoryOutlineGenerateRequest,
+  StoryOutlineGenerateResult,
   WizardVolumesRequest,
   WizardVolumesResponse,
   Settings,
@@ -123,6 +129,10 @@ import type {
   WorldRuleCreate,
   WorldRuleUpdate,
   WorldRuleListResponse,
+  SettingEntry,
+  SettingEntryCreate,
+  SettingEntryUpdate,
+  SettingEntryListResponse,
   PaginationResponse,
   ChapterAnalysisResponse,
   ChapterDigestView,
@@ -512,6 +522,9 @@ export const outlineApi = {
   activateOutline: (id: string) =>
     api.post<unknown, Outline>(`/story-outlines/${id}/activate`),
 
+  /** AI 生成总纲：启动后台任务并从头订阅事件（存成新的活跃版本；重连 / 停止走 aiJobsApi） */
+  generateStream: (projectId: string, data: StoryOutlineGenerateRequest, options?: SSEClientOptions<StoryOutlineGenerateResult>) =>
+    ssePost<StoryOutlineGenerateResult>(`/api/projects/${projectId}/story-outlines/generate-stream`, data, options),
 };
 
 export const characterApi = {
@@ -550,6 +563,10 @@ export const characterApi = {
   /** AI 生成角色：启动后台任务并从头订阅事件（重连 / 停止走 aiJobsApi）POST /api/characters/generate-stream */
   generateCharacterStream: (data: GenerateCharacterRequest, options?: SSEClientOptions<Character>) =>
     ssePost<Character>('/api/characters/generate-stream', data, options),
+
+  /** AI 批量生成角色与组织：后台任务，每批落库（重连 / 停止走 aiJobsApi）POST /api/characters/batch-generate-stream */
+  batchGenerateStream: (data: CharacterBatchGenerateRequest, options?: SSEClientOptions<CharacterBatchResult>) =>
+    ssePost<CharacterBatchResult>('/api/characters/batch-generate-stream', data, options),
 };
 
 export const chapterApi = {
@@ -675,6 +692,11 @@ export const assistantApi = {
     api.post<unknown, AssistantFieldCandidate>(`/projects/${projectId}/assistant/candidates/${candidateId}/undo`, {}, { silent: true }),
   rejectCandidate: (projectId: string, candidateId: string) =>
     api.post<unknown, AssistantFieldCandidate>(`/projects/${projectId}/assistant/candidates/${candidateId}/reject`, {}, { silent: true }),
+  /** 新建对象候选：应用才真正建档；409 = 已处理过 */
+  applyEntityCandidate: (projectId: string, candidateId: string) =>
+    api.post<unknown, AssistantEntityCandidate>(`/projects/${projectId}/assistant/entity-candidates/${candidateId}/apply`, {}, { silent: true }),
+  rejectEntityCandidate: (projectId: string, candidateId: string) =>
+    api.post<unknown, AssistantEntityCandidate>(`/projects/${projectId}/assistant/entity-candidates/${candidateId}/reject`, {}, { silent: true }),
   checks: (projectId: string) =>
     api.get<unknown, AssistantChecks>(`/projects/${projectId}/assistant/checks`),
   /** 共创室：成员（职责 / 模型）与开场引导 */
@@ -731,6 +753,14 @@ export const deaiPromptApi = {
   update: (projectId: string, id: string, data: Partial<DeaiPromptInput>) =>
     api.put<unknown, DeaiPrompt>(`/projects/${projectId}/deai-prompts/${id}`, data),
   remove: (projectId: string, id: string) => api.delete(`/projects/${projectId}/deai-prompts/${id}`),
+};
+
+export const projectPromptApi = {
+  list: (projectId: string) => api.get<unknown, ProjectPromptList>(`/projects/${projectId}/prompts`),
+  save: (projectId: string, key: string, content: string) =>
+    api.put<unknown, ProjectPromptItem>(`/projects/${projectId}/prompts/${key}`, { content }),
+  reset: (projectId: string, key: string) => api.delete<unknown, ProjectPromptItem>(`/projects/${projectId}/prompts/${key}`),
+  resetAll: (projectId: string) => api.delete<unknown, ProjectPromptResetAll>(`/projects/${projectId}/prompts`),
 };
 
 export const writingStyleApi = {
@@ -1167,6 +1197,21 @@ export const worldRulesApi = {
   // 删除世界规则
   delete: (ruleId: string) =>
     api.delete<unknown, { message: string }>(`/world-rules/${ruleId}`),
+};
+
+// 世界设定条目 API（术语 / 铁律 / 势力 / 通用规则等）
+export const settingEntriesApi = {
+  list: (projectId: string, category?: string) =>
+    api.get<unknown, SettingEntryListResponse>(
+      `/projects/${projectId}/setting-entries`,
+      { params: category ? { category } : {} }
+    ),
+  create: (projectId: string, data: SettingEntryCreate) =>
+    api.post<unknown, SettingEntry>(`/projects/${projectId}/setting-entries`, data),
+  update: (entryId: string, data: SettingEntryUpdate) =>
+    api.put<unknown, SettingEntry>(`/setting-entries/${entryId}`, data),
+  delete: (entryId: string) =>
+    api.delete<unknown, { message: string }>(`/setting-entries/${entryId}`),
 };
 
 // ============================================

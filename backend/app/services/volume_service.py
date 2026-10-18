@@ -35,6 +35,7 @@ from app.services.planning_context import (
 from app.services.knowledge import kb_refs
 from app.services.knowledge.kb_context import traced_kb_context
 from app.services.platform_presets import default_chapter_words
+from app.services.project_prompts import load_overrides as load_prompt_overrides
 from app.services.reference_pack import AssemblyContext, PromptAssembler
 from app.utils.story_outline_fields import parse_story_outline_fields
 
@@ -181,7 +182,7 @@ async def generate_skeleton(
     progress = await actual_progress_block(db, project_id, before_chapter=start) if await written_upto(db, project_id) else ""
     task = vp.render_skeleton_task(
         total_chapters=total, start_chapter=start, volume_count=volume_count or vp.suggest_volume_count(total - start + 1),
-        fixed_text=fixed,
+        fixed_text=fixed, guide=(await load_prompt_overrides(db, project_id)).get("volume_skeleton"),
     )
     kb = await traced_kb_context(db, project_id, "volume_skeleton")
     content = await _collect(
@@ -240,7 +241,8 @@ async def detail_volume(
             await actual_progress_block(db, volume.project_id, before_chapter=volume.chapter_start),
             promises, kb.text, _instruction(instruction),
             vp.render_detail_task({"volume_number": volume.volume_number, "title": volume.title,
-                                   "chapter_start": volume.chapter_start, "chapter_end": volume.chapter_end}),
+                                   "chapter_start": volume.chapter_start, "chapter_end": volume.chapter_end},
+                                  guide=(await load_prompt_overrides(db, volume.project_id)).get("volume_detail")),
             kb.ref_instruction,
         ),
         system_prompt=prompt.system_prompt, model=model, what=f"细化第{volume.volume_number}卷",
@@ -342,6 +344,7 @@ async def generate_unit_outlines(
     fields = await story_fields(db, volume.project_id)
     prompt = await _assemble(db, volume.project_id, OUTLINE_SCENE, _model(ai, model))
     words = default_chapter_words(getattr(project, "platform_preset", None))
+    guide = (await load_prompt_overrides(db, volume.project_id)).get("chapter_outlines")
     next_volume = await _neighbour(db, volume, 1)
     kb = await traced_kb_context(db, volume.project_id, "unit_outline", volume=volume, unit=unit)
     created: list[ChapterOutline] = []
@@ -359,7 +362,7 @@ async def generate_unit_outlines(
                 await _previous_chapter_block(db, volume.project_id, b_start),
                 await actual_progress_block(db, volume.project_id, before_chapter=b_start),
                 promise_text, kb.text, _instruction(instruction),
-                vp.render_chapters_task(unit, b_start, b_end, pov_line(project.narrative_perspective), words),
+                vp.render_chapters_task(unit, b_start, b_end, pov_line(project.narrative_perspective), words, guide=guide),
                 kb.ref_instruction,
             ),
             system_prompt=prompt.system_prompt, model=model, what=f"第 {b_start}-{b_end} 章章纲",

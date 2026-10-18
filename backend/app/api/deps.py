@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.logger import get_logger
 from app.models.project import Project
 from app.models.user import User
+from app.utils.outbound_guard import OutboundBlockedError, outbound_guard_for
 
 logger = get_logger(__name__)
 
@@ -29,6 +30,20 @@ def require_admin(request: Request) -> User:
     if not getattr(user, "is_admin", False):
         raise HTTPException(status_code=403, detail="需要管理员权限")
     return user
+
+
+def ensure_allowed_url(user: Any, url: Optional[str]) -> None:
+    """普通用户保存自填的外部地址（AI 接口 / MCP 服务器）前，先挡掉 IP 字面量、localhost 这类明显的内网地址（400）。
+
+    只为让作者当场看到原因；域名解析到内网的情况由建连时的出站守卫拦（app/utils/outbound_guard.py）。
+    """
+    guard = outbound_guard_for(user)
+    if guard is None:
+        return
+    try:
+        guard.check_static(url)
+    except OutboundBlockedError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 async def verify_project_access(project_id: str, user_id: str, db: AsyncSession) -> Project:

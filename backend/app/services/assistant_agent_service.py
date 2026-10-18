@@ -24,8 +24,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.logger import get_logger
 from app.models.assistant import (
-    AssistantContextSetting, AssistantFieldCandidate, AssistantMessage, AssistantRun, AssistantSession,
-    AssistantSessionSummary, AssistantTeamSetting,
+    AssistantContextSetting, AssistantEntityCandidate, AssistantFieldCandidate, AssistantMessage, AssistantRun,
+    AssistantSession, AssistantSessionSummary, AssistantTeamSetting,
 )
 from app.models.chapter import Chapter
 from app.models.chapter_candidate import utcnow
@@ -33,6 +33,7 @@ from app.models.project import Project
 from app.services import assistant_context as budgeting
 from app.services import cocreation_team as team
 from app.services.assistant_candidate_service import candidate_view
+from app.services.assistant_entity_candidate_service import entity_candidate_view
 from app.services.assistant_persistence import write_verified
 from app.services.assistant_tools import (
     DATA_LIMIT, PAGES, ToolContext, ToolOutcome, execute_tool, tool_catalog_text, tool_label,
@@ -131,6 +132,7 @@ def message_view(message: AssistantMessage) -> dict:
     return {
         "id": message.id, "role": message.role, "content": message.content, "created_at": _iso(message.created_at),
         "run_id": meta.get("run_id"), "steps": meta.get("steps", []), "candidates": meta.get("candidates", []),
+        "entity_candidates": meta.get("entity_candidates", []),
         "chapter_candidates": meta.get("chapter_candidates", []), "question": meta.get("question"),
         "answer": meta.get("answer"), "page": meta.get("page"), "plans": meta.get("plans", []),
         "member": team.member_view(speaker) if speaker else None, "delegated": bool(meta.get("delegated")),
@@ -183,7 +185,7 @@ async def session_messages(db: AsyncSession, session_id: str) -> list[AssistantM
 
 async def build_session_view(db: AsyncSession, session: Optional[AssistantSession]) -> dict:
     if session is None:
-        return {"session": None, "messages": [], "active_run": None, "candidates": []}
+        return {"session": None, "messages": [], "active_run": None, "candidates": [], "entity_candidates": []}
     active = (await db.execute(
         select(AssistantRun).where(AssistantRun.session_id == session.id, AssistantRun.status.in_(ACTIVE))
         .order_by(AssistantRun.created_at.desc())
@@ -192,11 +194,16 @@ async def build_session_view(db: AsyncSession, session: Optional[AssistantSessio
         select(AssistantFieldCandidate).where(AssistantFieldCandidate.session_id == session.id)
         .order_by(AssistantFieldCandidate.created_at)
     )).scalars().all()
+    entity_candidates = (await db.execute(
+        select(AssistantEntityCandidate).where(AssistantEntityCandidate.session_id == session.id)
+        .order_by(AssistantEntityCandidate.created_at)
+    )).scalars().all()
     return {
         "session": session_view(session),
         "messages": [message_view(m) for m in await session_messages(db, session.id)],
         "active_run": run_view(active) if active else None,
         "candidates": [candidate_view(c) for c in candidates],
+        "entity_candidates": [entity_candidate_view(c) for c in entity_candidates],
     }
 
 
@@ -523,6 +530,14 @@ async def _run_candidates(db: AsyncSession, run_id: str) -> list[dict]:
     return [candidate_view(c) for c in rows]
 
 
+async def _run_entity_candidates(db: AsyncSession, run_id: str) -> list[dict]:
+    rows = (await db.execute(
+        select(AssistantEntityCandidate).where(AssistantEntityCandidate.run_id == run_id)
+        .order_by(AssistantEntityCandidate.created_at)
+    )).scalars().all()
+    return [entity_candidate_view(c) for c in rows]
+
+
 @dataclass
 class RunState:
     """运行开始时读出的不变信息；运行中只改 steps，写库一律走 _save_run（不改 ORM 对象，免得和语句更新互相覆盖）。"""
@@ -589,11 +604,13 @@ async def _compact(db: AsyncSession, job: Any, ai_service: Any, state: RunState,
 async def _finish(db: AsyncSession, state: RunState, *, content: str, ctx: ToolContext, status: str,
                   question: Optional[dict] = None) -> dict:
     candidates = await _run_candidates(db, state.id)
+    entity_candidates = await _run_entity_candidates(db, state.id)
     meta = {
         "run_id": state.id,
         "member": ctx.member_id,
         "steps": [{k: s.get(k) for k in ("tool", "label", "ok", "summary", "args")} for s in state.steps],
         "candidates": [c["id"] for c in candidates],
+        "entity_candidates": [c["id"] for c in entity_candidates],
         "chapter_candidates": ctx.chapter_candidates,
         "plans": ctx.plans,
         **({"question": question} if question else {}),
@@ -622,7 +639,7 @@ async def _finish(db: AsyncSession, state: RunState, *, content: str, ctx: ToolC
     run = await _fresh(db, AssistantRun, state.id)
     message = await _fresh(db, AssistantMessage, message_id)
     return {"run": run_view(run), "message": message_view(message), "candidates": candidates,
-            "chapter_candidates": ctx.chapter_candidates}
+            "entity_candidates": entity_candidates, "chapter_candidates": ctx.chapter_candidates}
 
 
 async def _mark_stopped(db: AsyncSession, state: RunState, status: str, message: str) -> None:
@@ -662,7 +679,7 @@ async def _delegate(db: AsyncSession, state: RunState, ctx: ToolContext, job: An
     sub = ToolContext(db=db, project_id=ctx.project_id, session_id=ctx.session_id, run_id=ctx.run_id, page=ctx.page,
                       ai_service=ai_service, emit=ctx.emit, read_targets=ctx.read_targets, candidates=ctx.candidates,
                       chapter_candidates=ctx.chapter_candidates, user_id=ctx.user_id, member_id=member.id, model=model,
-                      plans=ctx.plans)
+                      plans=ctx.plans, entity_candidates=ctx.entity_candidates)
     budget = _budget(setting, model or getattr(ai_service, "default_model", None),
                      getattr(ai_service, "default_max_tokens", None))
     extra = ({"label": "主编交给你的任务", "content": task},)

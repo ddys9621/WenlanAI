@@ -33,31 +33,37 @@ logger = get_logger(__name__)
 MCP_REFERENCE_MAX_CHARS = 2000
 
 
-async def _collect_mcp_reference(
-    db: AsyncSession, *, user_id: str, project: Project, request: CharacterGenerateRequest
+async def collect_search_reference(
+    db: AsyncSession, *, user_id: str, plugins: list[str], query: str, log_tag: str = "角色生成"
 ) -> str:
-    """强控工具流：优先用搜索类工具查资料；没有可用工具返回空串（调用方标为跳过）。"""
+    """强控工具流：优先用搜索类工具查资料；没有可用工具返回空串（调用方标为跳过）。批量生成角色也用它。"""
     from app.services.mcp_tool_service import mcp_tool_service
 
-    tool_query = f"{project.theme or ''} {project.genre or ''} {request.role_type or '角色'} 角色设定 人物背景 性格特点"
-    available_tools = await mcp_tool_service.get_user_enabled_tools(
-        user_id=user_id, db_session=db, plugin_names=request.selected_plugins
-    )
+    available_tools = await mcp_tool_service.get_user_enabled_tools(user_id=user_id, db_session=db, plugin_names=plugins)
     search_tool = next((t for t in available_tools if "search" in t["function"]["name"].lower()), None)
     if search_tool is None:
-        logger.warning("⚠️ [角色生成] 未找到可用的搜索工具（插件：%s）", request.selected_plugins)
+        logger.warning("⚠️ [%s] 未找到可用的搜索工具（插件：%s）", log_tag, plugins)
         return ""
     tool_name = search_tool["function"]["name"]
     if "_" in tool_name:
         plugin_name, actual_tool_name = tool_name.split("_", 1)
     else:
         plugin_name, actual_tool_name = "unknown", tool_name
-    logger.info("🔍 [角色生成] 调用工具: %s", tool_name)
+    logger.info("🔍 [%s] 调用工具: %s", log_tag, tool_name)
     result = await mcp_tool_service._call_tool_with_retry(
         user_id=user_id, plugin_name=plugin_name, tool_name=actual_tool_name,
-        arguments={"query": tool_query, "numResults": 5}, timeout=60.0,
+        arguments={"query": query, "numResults": 5}, timeout=60.0,
     )
     return str(result) if result else ""
+
+
+async def _collect_mcp_reference(
+    db: AsyncSession, *, user_id: str, project: Project, request: CharacterGenerateRequest
+) -> str:
+    return await collect_search_reference(
+        db, user_id=user_id, plugins=request.selected_plugins,
+        query=f"{project.theme or ''} {project.genre or ''} {request.role_type or '角色'} 角色设定 人物背景 性格特点",
+    )
 
 
 async def generate_character_for_project(

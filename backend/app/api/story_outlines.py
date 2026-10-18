@@ -10,12 +10,19 @@ from app.logger import get_logger
 from app.models.story_outline import StoryOutline
 from app.schemas.story_outline import (
     StoryOutlineCreate,
+    StoryOutlineGenerateRequest,
     StoryOutlineResponse,
     StoryOutlineUpdate,
 )
 from app.services import outline_review_service as outline_review
+from app.services.ai_jobs import AIJobConflictError, ai_jobs, job_session_factory
+from app.services.ai_service import AIService
+from app.services.sse_job_adapter import make_sse_generator_runner
 from app.services.story_outline_service import StoryOutlineService
+from app.api.ai_jobs import job_sse_response
 from app.api.deps import verify_project_access
+from app.api.settings import get_user_ai_service
+from app.api.wizard_stream import outline_generator
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["story-outlines"])
@@ -69,6 +76,49 @@ async def create_story_outline(
     await db.refresh(db_outline)
 
     return db_outline
+
+
+@router.post("/projects/{project_id}/story-outlines/generate-stream", summary="AI 生成总纲（后台任务 + SSE）")
+async def generate_story_outline_stream(
+    project_id: str,
+    body: StoryOutlineGenerateRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user_ai_service: AIService = Depends(get_user_ai_service),
+):
+    """谋篇页「AI 生成」：和向导第 3 步同一个生成器（提示词 / 世界规则 / 仿写参考 / MCP 一致），但存成新的活跃版本、
+    旧版本保留，已有卷纲 / 章纲标「上游已改」。跑在通用后台任务上：弹窗 / 托盘可见、关页面不中断，
+    重连与停止走 /api/ai-jobs/*；同项目已有总纲生成在跑 → 409。视角 / 章数 / 字数留空按项目设置。
+    """
+    user_id = getattr(request.state, 'user_id', None)
+    project = await verify_project_access(project_id, user_id, db)
+    data = {
+        "project_id": project.id,
+        "user_id": user_id,
+        "narrative_perspective": body.narrative_perspective or project.narrative_perspective,
+        "chapter_count": body.chapter_count or project.chapter_count,
+        "target_words": body.target_words or project.target_words,
+        "requirements": (body.requirements or "").strip() or None,
+        "enable_mcp": body.enable_mcp,
+        "selected_plugins": body.selected_plugins,
+    }
+    data = {key: value for key, value in data.items() if value is not None}   # 生成器按 get(key, 默认值) 取，None 会顶掉默认值
+    try:
+        job = await ai_jobs.start(
+            kind="story_outline_generate",
+            title="AI 生成总纲",
+            user_id=user_id,
+            project_id=project.id,
+            runner=make_sse_generator_runner(
+                lambda session: outline_generator(data, session, user_ai_service, as_new_version=True),
+                session_factory=job_session_factory(user_id),
+            ),
+            cancel_message="已停止生成总纲；原有总纲不受影响",
+            meta={"chapter_count": data.get("chapter_count"), "enable_mcp": body.enable_mcp},
+        )
+    except AIJobConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return job_sse_response(job)
 
 
 @router.get("/projects/{project_id}/story-outlines", response_model=List[StoryOutlineResponse])

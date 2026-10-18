@@ -89,6 +89,7 @@ from app.services.chapter_consistency_service import chapter_consistency_service
 from app.services.memory_service import memory_service
 from app.services.narrative_state_service import narrative_state_service
 from app.services.narrative_tasks import render_narrative_tasks, task_promise_ids
+from app.services.project_prompts import load_overrides as load_prompt_overrides
 from app.services import chapter_digest_service, story_index_items
 from app.services.story_recall_service import build_story_context, recall_keywords
 from app.logger import get_logger
@@ -603,6 +604,13 @@ async def run_chapter_generation(job, *, chapter_id: str, user_id: str, ai_servi
         final_world_rules = project.world_rules or '未设定'
         if enhanced_world_rules:
             final_world_rules = f"{final_world_rules}\n\n{enhanced_world_rules}"
+        # 世界设定条目（术语 / 铁律 / 势力 / 规则等，语义检索）：让从 world_rules 单字段挪出来的设定在写作时仍读得到
+        from app.services import setting_entry_service
+        setting_summary = await setting_entry_service.generate_summary_with_search(
+            db_session, project.id, query_text, limit=6
+        )
+        if setting_summary:
+            final_world_rules = f"{final_world_rules}\n\n{setting_summary}"
 
         current_outline_content = _outline_task_text(chapter_outline, target_word_count)
         logger.info(f"📖 使用章纲生成: 第{chapter_outline.chapter_number}章《{chapter_outline.title}》")
@@ -761,6 +769,7 @@ async def run_chapter_generation(job, *, chapter_id: str, user_id: str, ai_servi
             target_word_count=target_word_count,
             word_soft_range=app_settings.chapter_word_soft_range,
             budget_chars=app_settings.chapter_context_budget_chars,
+            prompt_overrides=await load_prompt_overrides(db_session, project.id),
         ))
         prompt_chars = len(prompt.system) + len(prompt.user)
         st_prompt.done(prompt_chars=prompt_chars, trimmed=[k for k, v in prompt.report.items() if v.get("trimmed")])

@@ -7,7 +7,7 @@ export interface SSEMessage {
     | 'stage' | 'tool_call' | 'reference' | 'llm'
     | 'batch_chapter'
     // 全局智能助笔：处理记录一步 / 清掉误推的回复 / 内容修改候选 / 章节候选稿 / 打开页面 / 向作者提问
-    | 'tool' | 'content_reset' | 'candidate' | 'chapter_candidate' | 'navigate' | 'question'
+    | 'tool' | 'content_reset' | 'candidate' | 'entity_candidate' | 'chapter_candidate' | 'navigate' | 'question'
     // 共创室：本轮发言成员 / 主编交给成员 / 成员回复 / 规划草案卡片 / 启动的后台任务
     | 'speaker' | 'member_start' | 'member_message' | 'plan' | 'job'
     // 共创室上下文：这一步的用量 / 把较早的对话压成前情摘要（phase: running / done / failed）
@@ -70,7 +70,7 @@ class SSEPostClient<TResult = unknown, TRequest = unknown> {
   private reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   private isAborted = false;
   private resultData: TResult | undefined;
-  /** 已收到 done / error 事件，Promise 已经落定 */
+  /** Promise 已经落定（收到 done / error 事件，或连接提前关闭） */
   private settled = false;
 
   constructor(url: string, data: TRequest, options: SSEClientOptions<TResult> = {}) {
@@ -129,7 +129,8 @@ class SSEPostClient<TResult = unknown, TRequest = unknown> {
           // 流被对端/代理关闭却没收到 done/error 事件：不能让 Promise 永远挂起
           if (!this.settled && !this.isAborted) {
             const message = '连接在生成完成前中断';
-            this.options.onError?.(message);
+            this.settled = true;
+            this.notifyError(message);
             reject(new Error(message));
           }
           break;
@@ -163,12 +164,27 @@ class SSEPostClient<TResult = unknown, TRequest = unknown> {
       } else {
         const message = error instanceof Error ? error.message : 'Request failed';
         console.error('SSE POST request failed:', error);
-        if (!this.settled) this.options.onError?.(message);
+        if (!this.settled) {
+          this.settled = true;
+          this.notifyError(message);
+        }
         reject(error);
       }
     } finally {
       externalSignal?.removeEventListener('abort', abortHandler);
       await this.closeReader();
+    }
+  }
+
+  /**
+   * 通知调用方失败。调用方常在 onError 里 throw 来表达「这一步失败了」：回调抛出的异常不能打断
+   * 随后的 reject，否则 Promise 永不落定，await 它的流程（向导 / 灵感模式）会一直停在「生成中」。
+   */
+  private notifyError(message: string, code?: number): void {
+    try {
+      this.options.onError?.(message, code);
+    } catch (callbackError) {
+      console.debug('onError 回调抛出异常，已按原错误落定:', callbackError);
     }
   }
 
@@ -215,7 +231,7 @@ class SSEPostClient<TResult = unknown, TRequest = unknown> {
       case 'error': {
         const errText = extractErrorText(message);
         this.settled = true;
-        this.options.onError?.(errText, message.code);
+        this.notifyError(errText, message.code);
         reject(new Error(errText));
         break;
       }
@@ -248,6 +264,7 @@ class SSEPostClient<TResult = unknown, TRequest = unknown> {
       case 'tool':
       case 'content_reset':
       case 'candidate':
+      case 'entity_candidate':
       case 'chapter_candidate':
       case 'navigate':
       case 'question':

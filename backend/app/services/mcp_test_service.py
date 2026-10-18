@@ -13,6 +13,7 @@ from app.services.ai_service import create_user_ai_service
 from app.schemas.mcp_plugin import MCPTestResult
 from app.logger import get_logger
 from app.user_manager import User
+from app.utils.outbound_guard import outbound_guard_for
 
 logger = get_logger(__name__)
 
@@ -160,6 +161,7 @@ class MCPTestService:
                 reasoning_enabled=user_settings.reasoning_enabled,
                 reasoning_effort=user_settings.reasoning_effort,
                 thinking_budget_tokens=user_settings.thinking_budget_tokens,
+                outbound_guard=outbound_guard_for(user),
             )
             
             # 转换为OpenAI Function Calling格式

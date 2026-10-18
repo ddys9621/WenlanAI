@@ -1,6 +1,6 @@
 """故事大纲 Schema 定义"""
 from pydantic import BaseModel, Field, ConfigDict
-from typing import Optional
+from typing import List, Optional
 from datetime import datetime
 
 
@@ -23,6 +23,16 @@ class StoryOutlineUpdate(BaseModel):
     status: Optional[str] = Field(None, description="状态: draft/published")
     version: Optional[int] = Field(None, description="当前版本号（用于乐观锁）")
     order_index: Optional[int] = Field(None, description="排序序号")
+
+
+class StoryOutlineGenerateRequest(BaseModel):
+    """谋篇页 AI 生成总纲：视角 / 章数 / 字数留空时按项目设置补齐"""
+    narrative_perspective: Optional[str] = Field(None, description="叙事视角")
+    chapter_count: Optional[int] = Field(None, ge=1, description="预估全书章数")
+    target_words: Optional[int] = Field(None, ge=1, description="目标字数")
+    requirements: Optional[str] = Field(None, description="作者的额外要求")
+    enable_mcp: bool = Field(False, description="是否启用 MCP 工具检索参考资料")
+    selected_plugins: List[str] = Field(default_factory=list, description="选择的 MCP 插件")
 
 
 class StoryOutlineResponse(StoryOutlineBase):

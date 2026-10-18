@@ -306,6 +306,107 @@ class PromptService:
 3. 不要引用任何本批次中不存在的角色或组织名称
 4. 文本描述中不要使用中文引号（""），改用【】或《》"""
 
+    # 项目内批量补充角色与组织：已有角色 / 组织进上下文，关系与成员可以连到已有实体（向导第 2 步用上面的 CHARACTERS_BATCH_GENERATION）
+    CHARACTERS_SUPPLEMENT_GENERATION = """你是一位专业的角色设定师。这部小说已经有一批角色和组织，请按作者的要求为它补充新的角色与组织。
+
+作品信息：
+- 书名：{title}
+- 主题：{theme}
+- 类型：{genre}
+- 时间背景：{time_period}
+- 地理位置：{location}
+- 氛围基调：{atmosphere}
+- 世界规则：{rules}
+
+【已有角色与组织】（新实体的名字不能和它们重复）
+{existing_cast}
+
+【作者要求】
+{requirements}
+
+【数量要求 - 必须严格遵守】
+本次精确生成{count}个实体：{composition}，不多不少。
+
+要求：
+- 新实体要符合世界观设定，补进已有的人物网，而不是另起炉灶
+- 已有主角时不要再生成主角（protagonist），除非作者要求里明确提到；新人物以配角（supporting）和反派（antagonist）为主
+- 每个新人物都要和已有人物或本批新人物至少有一条关系
+- 新组织要和已有势力形成合作、对立或从属关系，并在背景里写清楚
+- 性格和背景要有深度，所有实体都要为故事服务
+
+**重要格式要求：**
+1. 只返回纯JSON数组格式，不要包含任何markdown标记、代码块标记或其他说明文字
+2. 不要在JSON字符串值中使用中文引号（""''），请使用英文引号或【】《》标记
+3. 专有名词和强调内容使用【】或《》，不要用引号
+
+请严格按照以下JSON数组格式返回（人物、组织各举一例，每个实体是数组中的一个对象）：
+[
+  {{
+    "name": "人物姓名",
+    "age": 25,
+    "gender": "男/女/其他",
+    "is_organization": false,
+    "role_type": "supporting/antagonist/protagonist",
+    "personality": "性格特点的详细描述（100-200字），包括核心性格、优缺点、特殊习惯",
+    "background": "背景故事的详细描述（100-200字），包括家庭背景、成长经历、重要转折",
+    "appearance": "外貌描述（50-100字），包括身高、体型、面容、着装风格",
+    "speech_style": "说话方式（20-40字）：语气、口头禅、怎么称呼别人，让读者不看名字也能认出是谁在说话",
+    "traits": ["特长1", "特长2", "特长3"],
+    "relationships_array": [
+      {{
+        "target_character_name": "已有人物或本批新人物的名字",
+        "relationship_type": "关系类型（必须从以下选择：父亲/母亲/兄弟/姐妹/子女/配偶/恋人/师父/徒弟/朋友/同学/邻居/知己/上司/下属/同事/合作伙伴/敌人/仇人/竞争对手/宿敌）",
+        "intimacy_level": 75,
+        "description": "关系描述"
+      }}
+    ],
+    "organization_memberships": [
+      {{
+        "organization_name": "已有组织或本批新组织的名字",
+        "position": "职位",
+        "rank": 5,
+        "loyalty": 80
+      }}
+    ]
+  }},
+  {{
+    "name": "组织名称",
+    "is_organization": true,
+    "role_type": "supporting",
+    "personality": "组织特性描述（100-200字），包括运作方式、核心理念、行事风格",
+    "background": "组织背景（100-200字），包括建立历史、发展历程、和已有势力的关系",
+    "appearance": "组织外在表现（50-100字），如总部位置、标志性建筑等",
+    "organization_type": "组织类型",
+    "organization_purpose": "组织目的",
+    "organization_members": ["成员1", "成员2"],
+    "power_level": 75,
+    "location": "组织所在地或主要活动区域",
+    "motto": "组织格言、口号或宗旨",
+    "color": "组织代表颜色（如：深红色、金色、黑色等）",
+    "traits": []
+  }}
+]
+
+**关系类型（必须从以下列表中精确选择一个，禁止自定义）：**
+- 家族：父亲、母亲、兄弟、姐妹、子女、配偶、恋人
+- 社交：师父、徒弟、朋友、同学、邻居、知己
+- 职业：上司、下属、同事、合作伙伴
+- 敌对：敌人、仇人、竞争对手、宿敌
+
+**重要说明：**
+1. **数量控制**：数组中必须精确包含{count}个对象，人物和组织各几个按上面的数量要求
+2. **关系约束**：relationships_array 只能引用【已有角色与组织】里的人物，或本批次的其他新人物
+3. **组织约束**：organization_memberships 只能引用【已有角色与组织】里的组织，或本批次中 is_organization=true 的新组织
+4. **禁止幻觉**：不要引用任何不存在的角色或组织，没有可引用的就留空数组[]
+5. intimacy_level是-100到100的整数（负值表示敌对仇恨关系），loyalty和power_level是0-100的整数
+6. 组织对象不需要 relationships_array 和 organization_memberships
+
+再次强调：
+1. 只返回纯JSON数组，不要有```json```这样的标记
+2. 数组中必须精确包含{count}个对象
+3. 新实体的名字不能和已有角色或组织重复
+4. 文本描述中不要使用中文引号（""），改用【】或《》"""
+
     # 修炼 / 感悟场景的写法，只给有修炼体系的类型（玄幻 / 仙侠 / 修仙）注入；原先放在正文文风段里对所有类型生效
     _CULTIVATION_SCENE_RULE = (
         "- 修炼/感悟场景：写他此刻在干什么、周围有什么动静（外面的声音、光线变了、有人路过），"
@@ -550,7 +651,7 @@ class PromptService:
 - 心理描写要符合所选视角的权限范围"""
 
     # 向导大纲生成提示词（网文风格优化版 v2 - 去重）
-    COMPLETE_OUTLINE_GENERATION = """# 角色设定
+    COMPLETE_OUTLINE_HEAD = """# 角色设定
 你是一位资深网文策划，专注于【{genre}】类型，擅长搭建全书主线、提炼卖点、把握节奏。
 
 # 任务说明
@@ -586,7 +687,9 @@ class PromptService:
 
 # 总纲8要素
 
-请围绕以下8个核心要素构思（注意：主角信息已在上方提供，总纲中不重复输出）：
+"""
+
+    OUTLINE_ELEMENTS = """请围绕以下8个核心要素构思（注意：主角信息已在上方提供，总纲中不重复输出）：
 
 ### 1. 故事梗概 (premise)
 - 用5-8句话概括整个故事
@@ -619,7 +722,9 @@ class PromptService:
 
 ### 8. 开篇钩子 (opening_hook)
 - 第一章如何抓住读者？
-- 如：主角被当众羞辱、获得神秘传承、发现惊天秘密
+- 如：主角被当众羞辱、获得神秘传承、发现惊天秘密"""
+
+    COMPLETE_OUTLINE_TAIL = """
 
 # 类型示例
 
@@ -1067,6 +1172,32 @@ class PromptService:
             genre=genre or "通用类型",
             requirements=requirements or "无特殊要求"
         )
+
+    @classmethod
+    def get_characters_supplement_prompt(cls, *, title: str, theme: str, genre: str, time_period: str,
+                                         location: str, atmosphere: str, rules: str, existing_cast: str,
+                                         requirements: str, character_count: int, organization_count: int) -> str:
+        """项目内批量补充角色与组织的提示词（已有角色 / 组织作为上下文）"""
+        composition = "、".join(
+            part for part in (
+                f"{character_count}个人物（is_organization=false）" if character_count else "",
+                f"{organization_count}个组织（is_organization=true）" if organization_count else "",
+            ) if part
+        )
+        return cls.format_prompt(
+            cls.CHARACTERS_SUPPLEMENT_GENERATION,
+            title=title or "未命名",
+            theme=theme or "未设定",
+            genre=genre or "通用类型",
+            time_period=time_period or "未设定",
+            location=location or "未设定",
+            atmosphere=atmosphere or "未设定",
+            rules=rules or "未设定",
+            existing_cast=existing_cast or "（暂无）",
+            requirements=requirements or "无特殊要求",
+            count=character_count + organization_count,
+            composition=composition,
+        )
     
     @classmethod
     def get_complete_outline_prompt(cls, title: str, theme: str, genre: str,
@@ -1076,7 +1207,9 @@ class PromptService:
                                    description: str = "",
                                    protagonists_info: str = "",
                                    requirements: str = "",
-                                   mcp_references: str = "") -> str:
+                                   mcp_references: str = "",
+                                   genre_guide: Optional[str] = None,
+                                   elements: Optional[str] = None) -> str:
         """获取向导大纲生成提示词（支持MCP增强、类型适配和主角绑定）"""
         # 格式化MCP参考资料
         mcp_text = ""
@@ -1104,10 +1237,13 @@ class PromptService:
 """
 
         # 根据类型选择对应的引导内容（支持多选类型合并）
-        genre_guide = cls._resolve_genre_guide(genre or "")
+        if genre_guide is None:
+            genre_guide_text = cls._resolve_genre_guide(genre or "")
+        else:
+            genre_guide_text = f"{genre_guide.strip()}\n" if genre_guide.strip() else ""
 
-        return cls.format_prompt(
-            cls.COMPLETE_OUTLINE_GENERATION,
+        head = cls.format_prompt(
+            cls.COMPLETE_OUTLINE_HEAD,
             title=title,
             theme=theme,
             genre=genre or "通用",
@@ -1121,10 +1257,12 @@ class PromptService:
             rules=rules or "未设定",
             protagonists_info=protagonists_text,
             characters_info=characters_info or "暂无其他角色",
-            genre_guide=genre_guide,
+            genre_guide=genre_guide_text,
             mcp_references=mcp_text,
             requirements=requirements or "无特殊要求"
         )
+        body = cls.OUTLINE_ELEMENTS if elements is None else elements.strip()
+        return head + body + cls.format_prompt(cls.COMPLETE_OUTLINE_TAIL)
     
     @classmethod
     def get_single_character_prompt(cls, project_context: str, user_input: str) -> str:

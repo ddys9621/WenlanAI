@@ -13,7 +13,7 @@ import { useKbCitations } from '@/hooks/useKbCitations';
 import type { Chapter } from '@/types';
 import type { CandidateAdoptResult, CandidateDetail, CandidateSummary } from '@/types/writing';
 import { formatServerTime } from '@/utils/serverTime';
-import { CANDIDATE_MODE_LABELS, candidateApplyPreview } from '@/utils/writingFlow';
+import { CANDIDATE_MODE_LABELS, candidateApplyPreview, loadAutoAnalyze, saveAutoAnalyze } from '@/utils/writingFlow';
 import { AdherenceReportView } from './AdherenceReportView';
 
 interface CandidatePanelProps {
@@ -40,7 +40,7 @@ export function CandidatePanel({ chapter, focusCandidateId, onAdopted, onChanged
   const [detail, setDetail] = useState<CandidateDetail | null>(null);
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
-  const [autoAnalyze, setAutoAnalyze] = useState(false);
+  const [autoAnalyze, setAutoAnalyze] = useState(loadAutoAnalyze);
   const citations = useKbCitations(chapter.project_id, 'chapter_candidate', detail ? [detail.id] : []);
 
   const loadList = useCallback(async (prefer?: string | null) => {
@@ -90,7 +90,10 @@ export function CandidatePanel({ chapter, focusCandidateId, onAdopted, onChanged
         force,
         auto_analyze: autoAnalyze,
       });
-      toast.success(result.snapshot_version_id ? '已采用：旧稿已存进历史版本，可随时恢复' : '已采用');
+      const adopted = result.snapshot_version_id ? '已采用：旧稿已存进历史版本，可随时恢复' : '已采用';
+      if (result.analysis_job_id) toast.success(`${adopted}；正在分析本章，进度见右侧「本章档案」和顶栏「AI 任务」`);
+      else if (autoAnalyze) toast.warning(`${adopted}；本章分析没能自动开始，可在章节目录点「分析」`);
+      else toast.success(adopted);
       onAdopted(result);
       onChanged?.();
       await loadList();
@@ -212,7 +215,14 @@ export function CandidatePanel({ chapter, focusCandidateId, onAdopted, onChanged
               {edited && <span className="lj-badge lj-badge--draft">已修改，采用时用你改过的版本</span>}
               {preview === null && <span className="lj-badge lj-badge--stale">选段在正文里对不上了，无法采用</span>}
               <label className="flex cursor-pointer items-center gap-1.5">
-                <input type="checkbox" checked={autoAnalyze} onChange={(e) => setAutoAnalyze(e.target.checked)} />
+                <input
+                  type="checkbox"
+                  checked={autoAnalyze}
+                  onChange={(e) => {
+                    setAutoAnalyze(e.target.checked);
+                    saveAutoAnalyze(e.target.checked);
+                  }}
+                />
                 采用后自动分析本章
               </label>
             </div>

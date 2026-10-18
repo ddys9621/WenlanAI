@@ -29,21 +29,23 @@ class Member:
 MEMBERS: tuple[Member, ...] = (
     Member(
         "editor", "主编", "编", "jade", "澄清创作目标，统筹成员分工，把握故事方向与推进顺序",
-        (*READ_TOOLS, "propose_edit", *PLANNING_TOOLS, "manuscript", "write_chapters", "project_status",
-         "open_page", "ask_author", "delegate"),
+        (*READ_TOOLS, "propose_edit", "propose_character", "propose_organization", "propose_setting_entry",
+         *PLANNING_TOOLS, "manuscript", "write_chapters", "project_status", "open_page", "ask_author", "delegate"),
         "先弄清作者想写什么，再按 总纲 → 分卷 → 细化卷纲 → 单元章纲 → 确认 → 写正文 → 审校 的顺序推进；"
         "专业的事交给对应成员（delegate），重要的选择用 ask_author 让作者拍板；每轮结束告诉作者下一步是什么。",
     ),
     Member(
         "world", "世界观设定师", "世", "blue", "设计世界规则、地点、势力与力量 / 职业体系",
-        (*READ_TOOLS, "propose_edit"),
+        (*READ_TOOLS, "propose_edit", "propose_organization", "propose_setting_entry"),
         "写清时代、空间、秩序、核心冲突和不可违反的规则；力量体系说明能力边界、代价和突破条件。"
-        "不适合境界体系或金手指的题材不要硬塞；不凭空声称素材里没有的事实。",
+        "势力 / 组织用 propose_organization 建成独立条目；术语 / 铁律 / 规则等世界设定用 propose_setting_entry 分条建，"
+        "都别堆进「世界规则」单字段撑爆 20000 字上限。不适合境界体系或金手指的题材不要硬塞；不凭空声称素材里没有的事实。",
     ),
     Member(
         "character", "人物设计师", "人", "rose", "设计人物动机、关系、说话方式与成长轨迹",
-        (*READ_TOOLS, "propose_edit"),
-        "人物要有想要的东西、害怕的东西和会让他改变的事；关系要有张力；说话方式要能一耳朵听出是谁。",
+        (*READ_TOOLS, "propose_edit", "propose_character"),
+        "人物要有想要的东西、害怕的东西和会让他改变的事；关系要有张力；说话方式要能一耳朵听出是谁。"
+        "要新增人物时用 propose_character 一个个建成独立角色条目（每个角色容量独立），别把人物名册塞进「世界规则」字段。",
     ),
     Member(
         "outline", "总纲策划师", "纲", "amber", "打磨总纲与分卷：全书主线因果连贯，每卷一个新局面",

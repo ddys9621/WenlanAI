@@ -160,6 +160,7 @@ export interface AssistantMessageView {
   run_id: string | null
   steps: AssistantStep[]
   candidates: string[]
+  entity_candidates: string[]
   chapter_candidates: AssistantChapterCandidateRef[]
   question?: AssistantQuestionCard | null
   answer?: AssistantAnswer[] | null
@@ -185,6 +186,26 @@ export interface AssistantFieldCandidate {
   reason: string
   status: AssistantCandidateStatus
   run_id: string | null
+  created_at: string | null
+  decided_at: string | null
+}
+
+/** 新建对象候选：工具只记下要新建的角色 / 组织 / 设定条目，作者「应用」才真正建档 */
+export type AssistantEntityCandidateStatus = 'candidate' | 'applied' | 'rejected'
+
+export interface AssistantEntityCandidate {
+  id: string
+  /** character / organization / setting_entry */
+  entity_type: string
+  label: string
+  page: string | null
+  /** 拟新建对象的各字段（已按类型校验过） */
+  payload: Record<string, string>
+  reason: string
+  status: AssistantEntityCandidateStatus
+  run_id: string | null
+  /** 应用后新建行的 id */
+  created_entity_id: string | null
   created_at: string | null
   decided_at: string | null
 }
@@ -219,12 +240,14 @@ export interface AssistantSessionView {
   messages: AssistantMessageView[]
   active_run: AssistantRunView | null
   candidates: AssistantFieldCandidate[]
+  entity_candidates: AssistantEntityCandidate[]
 }
 
 export interface AssistantRunResult {
   run: AssistantRunView
   message: AssistantMessageView
   candidates: AssistantFieldCandidate[]
+  entity_candidates: AssistantEntityCandidate[]
   chapter_candidates: AssistantChapterCandidateRef[]
 }
 

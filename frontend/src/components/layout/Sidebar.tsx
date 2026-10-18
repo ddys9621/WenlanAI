@@ -14,6 +14,7 @@ import { cn } from '@/lib/utils'
 import { BrandLogo } from '@/components/ui/BrandLogo'
 import { useUpdateStore } from '@/store/updateStore'
 import { useDesktopApi } from '@/hooks/useDesktopApi'
+import { useCurrentUser } from '@/hooks/useCurrentUser'
 
 interface SidebarProps {
   collapsed: boolean
@@ -33,6 +34,7 @@ const navGroups = [
   },
   {
     label: '管理台',
+    adminOnly: true,
     items: [
       { icon: Users, label: '用户管理', path: '/user-management' },
     ],
@@ -43,6 +45,8 @@ const navGroups = [
 export function Sidebar({ collapsed, onToggle }: SidebarProps) {
   // 根路径 `/` 也渲染项目列表，需让「我的项目」保持高亮
   const isRootProjects = useLocation().pathname === '/'
+  // 管理台只给管理员看（后端 /admin 接口对普通用户一律 403）
+  const isAdmin = !!useCurrentUser()?.is_admin
   // 有新版本时「设置」入口出红点（检查逻辑在 useUpdateAutoCheck / 设置页）；检查更新仅管理员可见
   const info = useUpdateStore((s) => s.info)
   const hasUpdate = useUpdateStore((s) => s.hasUpdate) && !!info?.can_manage
@@ -78,7 +82,7 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
         </div>
 
         <nav className="flex-1 overflow-y-auto px-2 py-2">
-          {navGroups.map((group) => (
+          {navGroups.filter((group) => isAdmin || !group.adminOnly).map((group) => (
             <div key={group.label} className="mb-2">
               {!collapsed && <p className="lj-rail-caption">{group.label}</p>}
               <ul className="space-y-0.5">

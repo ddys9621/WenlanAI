@@ -244,7 +244,7 @@ from app.api import (
     auth, settings, writing_styles, memories,
     mcp_plugins, mcp_marketplace, admin, inspiration,
     chapter_outlines, story_outlines, volumes,
-    world_rules, book_dissect,
+    world_rules, setting_entries, book_dissect,
     announcement
 )
 
@@ -284,6 +284,9 @@ app.include_router(_ai_jobs_api.router, prefix="/api")
 # 世界规则系统API
 app.include_router(world_rules.router, prefix="/api")
 
+# 世界设定条目 API（术语 / 铁律 / 势力 / 通用规则等）
+app.include_router(setting_entries.router, prefix="/api")
+
 # 拆书参考 API（上传参考书反向拆解为创作素材）
 app.include_router(book_dissect.router, prefix="/api")
 
@@ -299,6 +302,10 @@ app.include_router(_project_ai_preference.router, prefix="/api")
 # 项目级去 AI 味提示词（只在重写正文时注入）
 from app.api import deai_prompts as _deai_prompts
 app.include_router(_deai_prompts.router, prefix="/api")
+
+# 项目自定义提示词：正文与规划的写作指导（输出格式不开放），可单条 / 全部恢复默认
+from app.api import project_prompts as _project_prompts
+app.include_router(_project_prompts.router, prefix="/api")
 
 # 章节历史版本：正文被替换前自动留档，可查看 / 恢复
 from app.api import chapter_versions as _chapter_versions

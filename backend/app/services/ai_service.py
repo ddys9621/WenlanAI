@@ -12,6 +12,7 @@ from anthropic import AsyncAnthropic
 from app.config import settings as app_settings
 from app.logger import get_logger
 from app.services.generation_trace import current_trace, new_call_id
+from app.utils.outbound_guard import OutboundBlockedError, OutboundGuard, blocked_cause, guarded_async_client
 import httpx
 import json
 
@@ -578,6 +579,8 @@ class AIService:
     analysis_model: Optional[str] = None
     # 编辑器行内补全专用模型（用户设置 completion_model，由 get_user_ai_service 注入）；None = 跟随 default_model
     completion_model: Optional[str] = None
+    # 出站守卫（普通用户的服务实例才有）：HTTP 客户端每个新连接只允许连公网 / 运维白名单，见 utils/outbound_guard
+    outbound_guard: Optional[OutboundGuard] = None
 
     def __init__(
         self,
@@ -595,6 +598,7 @@ class AIService:
         default_presence_penalty: Optional[float] = None,
         analysis_model: Optional[str] = None,
         sampling_enabled: Optional[bool] = None,
+        outbound_guard: Optional[OutboundGuard] = None,
     ):
         """
         初始化AI客户端（优化并发性能）
@@ -609,7 +613,9 @@ class AIService:
             reasoning_enabled: 是否启用思考/推理，为None时使用全局配置
             reasoning_effort: 统一思考强度档位 / OpenAI reasoning_effort，为None时使用全局配置
             thinking_budget_tokens: Anthropic 思考预算，为None时按档位自动换算
+            outbound_guard: 出站守卫（普通用户传 outbound_guard_for(user)）；None = 不限制
         """
+        self.outbound_guard = outbound_guard
         # 保存用户设置或使用全局配置
         # provider 先归一化（custom 等 OpenAI 兼容标识 → "openai"），
         # 否则下方 `api_provider == "openai"` 判断会把用户 key/base_url 全部丢弃
@@ -666,19 +672,7 @@ class AIService:
         openai_key = api_key if api_provider == "openai" else app_settings.openai_api_key
         if openai_key:
             try:
-                limits = httpx.Limits(
-                    max_keepalive_connections=50,
-                    max_connections=100,
-                    keepalive_expiry=30.0
-                )
-                
-                http_client = httpx.AsyncClient(
-                    timeout=httpx.Timeout(connect=60.0, read=180.0, write=60.0, pool=60.0),
-                    limits=limits,
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                    }
-                )
+                http_client = self._new_http_client()
                 
                 client_kwargs = {
                     "api_key": openai_key,
@@ -716,19 +710,7 @@ class AIService:
         anthropic_key = api_key if api_provider == "anthropic" else app_settings.anthropic_api_key
         if anthropic_key:
             try:
-                limits = httpx.Limits(
-                    max_keepalive_connections=50,
-                    max_connections=100,
-                    keepalive_expiry=30.0
-                )
-                
-                http_client = httpx.AsyncClient(
-                    timeout=httpx.Timeout(connect=60.0, read=180.0, write=60.0, pool=60.0),
-                    limits=limits,
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                    }
-                )
+                http_client = self._new_http_client()
                 
                 client_kwargs = {
                     "api_key": anthropic_key,
@@ -751,6 +733,19 @@ class AIService:
             # 只有当用户明确选择Anthropic作为提供商时才警告
             if self.api_provider == "anthropic":
                 logger.warning("⚠️ Anthropic API key未配置，但被设置为当前AI提供商")
+
+    def _new_http_client(self) -> httpx.AsyncClient:
+        """OpenAI / Anthropic 共用的 HTTP 客户端配置；有出站守卫时每个新连接都先校验目标地址。"""
+        kwargs: Dict[str, Any] = {
+            "timeout": httpx.Timeout(connect=60.0, read=180.0, write=60.0, pool=60.0),
+            "limits": httpx.Limits(max_keepalive_connections=50, max_connections=100, keepalive_expiry=30.0),
+            "headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            },
+        }
+        if self.outbound_guard is not None:
+            return guarded_async_client(self.outbound_guard, **kwargs)
+        return httpx.AsyncClient(**kwargs)
 
     def _apply_openai_sampling(self, payload: Dict[str, Any], creative: bool = False) -> None:
         """把采样多样性参数写入 OpenAI 兼容请求体（降低"AI 味"/困惑度）。
@@ -1282,6 +1277,9 @@ class AIService:
             
         except Exception as e:
             logger.error(f"❌ Anthropic API调用失败: {str(e)}")
+            blocked = blocked_cause(e)  # SDK 把守卫的拒绝包成了 "Connection error."，还原成真正的原因
+            if blocked is not None:
+                raise OutboundBlockedError(blocked.host) from None
             raise
 
     async def _generate_openai_stream(
@@ -1536,6 +1534,9 @@ class AIService:
         except Exception as e:
             logger.error(f"❌ Anthropic流式API调用失败: {str(e)}")
             logger.error(f"  - 错误类型: {type(e).__name__}")
+            blocked = blocked_cause(e)
+            if blocked is not None:
+                raise OutboundBlockedError(blocked.host) from None
             raise
     
     async def generate_text_with_mcp(
@@ -1753,6 +1754,7 @@ def create_user_ai_service(
     presence_penalty: Optional[float] = None,
     analysis_model: Optional[str] = None,
     sampling_enabled: Optional[bool] = None,
+    outbound_guard: Optional[OutboundGuard] = None,
 ) -> AIService:
     """
     根据用户设置创建AI服务实例
@@ -1771,6 +1773,7 @@ def create_user_ai_service(
         frequency_penalty: 频率惩罚（OpenAI 兼容；抑制重复用词）
         presence_penalty: 存在惩罚（OpenAI 兼容；鼓励新词/话题）
         sampling_enabled: 采样多样性开关（关 = 上面三项一律不传，模型不支持时用）
+        outbound_guard: 出站守卫（普通用户传 outbound_guard_for(user)）；None = 不限制
         
     Returns:
         AIService实例
@@ -1790,4 +1793,5 @@ def create_user_ai_service(
         default_presence_penalty=presence_penalty,
         analysis_model=analysis_model,
         sampling_enabled=sampling_enabled,
+        outbound_guard=outbound_guard,
     )

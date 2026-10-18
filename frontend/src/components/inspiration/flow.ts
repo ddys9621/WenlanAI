@@ -1,7 +1,7 @@
 /** 灵感模式 - 流程步骤映射与纯工具函数（无组件、无副作用） */
 
 import type { GenerationArtifacts, GenerationNodeKey } from './useProjectGeneration';
-import type { OptionGenerationStep, Step } from './types';
+import type { OptionGenerationStep, Step, WizardState } from './types';
 
 export const FLOW_STEPS = ['idea', 'title', 'description', 'theme', 'genre', 'perspective', 'confirm'] as const;
 export type FlowStep = (typeof FLOW_STEPS)[number];
@@ -56,6 +56,23 @@ export function getStepChipStatus(index: number, activeIndex: number, currentSte
   if (index < activeIndex) return 'done';
   if (index === activeIndex) return 'current';
   return 'upcoming';
+}
+
+const GENERATION_ORDER: GenerationNodeKey[] = ['worldBuilding', 'characters', 'outline', 'volumes'];
+
+/**
+ * 确认页上「上一次创建中断」的信息：失败原因 + 续跑环节。
+ * 续跑只看项目是否已建成、不看进度（续跑时节点进度从 0 起，请求一发出就被拒也会停在 0）：
+ * 项目在就从失败环节（没标失败就是第一个未完成环节）继续，绝不再建一个重复项目。
+ */
+export function getInterruption(
+  state: Pick<WizardState, 'generationError' | 'projectId' | 'generationSteps'>,
+): { message: string | null; resumeNode: GenerationNodeKey | null } {
+  const steps = state.generationSteps;
+  const resumeNode = state.projectId
+    ? GENERATION_ORDER.find((key) => steps[key] === 'error') ?? GENERATION_ORDER.find((key) => steps[key] !== 'completed') ?? null
+    : null;
+  return { message: state.generationError, resumeNode };
 }
 
 /** 书名统一带一层《》：AI 返回的候选常常自带书名号，避免出现《《x》》 */

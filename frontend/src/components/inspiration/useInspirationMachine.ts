@@ -1,6 +1,6 @@
 /** 灵感模式状态机 Hook - 封装 reducer + API 副作用 */
 
-import { useReducer, useCallback } from 'react';
+import { useReducer, useCallback, type Dispatch } from 'react';
 import { toast } from 'sonner';
 import {
   inspirationApi,
@@ -12,7 +12,15 @@ import {
 import { runAIJob } from '../../store/aiJobsStore';
 import { wizardReducer } from './reducer';
 import { createInitialState } from './types';
-import type { GenerationApiContext, OptionGenerationStep, RefinementContext, Step, WizardData } from './types';
+import type {
+  GenerationApiContext,
+  OptionGenerationStep,
+  RefinementContext,
+  Step,
+  WizardAction,
+  WizardData,
+  WizardState,
+} from './types';
 
 const REGENERATE_OPTIONS = new Set(['重新生成', '让AI重新生成']);
 const CUSTOM_INPUT_OPTIONS = new Set(['我自己输入书名', '我自己输入']);
@@ -109,6 +117,60 @@ async function requestQuickGenerate(data: InspirationQuickRequest): Promise<Insp
     connect: (options) => inspirationApi.quickGenerateStream(data, options),
   });
   return (job.result as InspirationQuickResult | null) ?? { title: '', description: '', theme: '', genre: [], error: '补全失败' };
+}
+
+/**
+ * 快速生成：用已有信息调用 quickGenerate 补全缺失字段，直接跳到确认。
+ * 加载与失败都停在当前步骤：以前固定切到 loading_title，失败后流程被甩回「书名」，
+ * 再「自己写」会覆盖已选的书名并从简介起重走一遍；现在失败只提示原因，原候选照常可选。
+ */
+export async function runQuickGenerate(
+  state: Pick<WizardState, 'wizardData' | 'currentStep'>,
+  dispatch: Dispatch<WizardAction>,
+  request: (data: InspirationQuickRequest) => Promise<InspirationQuickResult> = requestQuickGenerate,
+): Promise<void> {
+  const data = state.wizardData;
+  if (!data.title && !data.description && !data.theme) {
+    toast.warning('请至少提供标题、简介或主题中的一项');
+    return;
+  }
+  dispatch({ type: 'API_LOADING', payload: state.currentStep });
+  try {
+    const result = await request({
+      title: data.title,
+      description: data.description,
+      theme: data.theme,
+      genre: data.genre,
+      narrative_perspective: data.narrative_perspective,
+    });
+    if (result.error) {
+      throw new Error(result.error);
+    }
+    // 视角缺失时兜底为第三人称：readyToGenerate 依赖它，缺了创建流程会卡在 0%
+    const completed = {
+      title: result.title || data.title || '',
+      description: result.description || data.description || '',
+      theme: result.theme || data.theme || '',
+      genre: result.genre?.length ? result.genre : data.genre || [],
+      narrative_perspective: result.narrative_perspective || data.narrative_perspective || '第三人称',
+    };
+    dispatch({ type: 'SET_WIZARD_DATA', payload: completed });
+    dispatch({
+      type: 'API_SUCCESS',
+      payload: {
+        nextStep: 'confirm',
+        aiMessage: {
+          type: 'ai',
+          content: `已为你快速补全所有信息：\n\n📖 书名：${completed.title}\n📝 简介：${completed.description}\n🎨 主题：${completed.theme}\n🏷️ 类型：${completed.genre.join('、')}\n👁️ 视角：${completed.narrative_perspective}\n\n请确认是否开始创建项目？`,
+          options: ['✅ 确认创建', '🔄 重新开始'],
+        },
+      },
+    });
+  } catch (error) {
+    const reason = error instanceof Error && error.message ? error.message : '请重试';
+    toast.error(`智能补全失败：${reason}`);
+    dispatch({ type: 'API_IDLE' });
+  }
 }
 
 export function useInspirationMachine() {
@@ -345,52 +407,10 @@ export function useInspirationMachine() {
   }, [state.selectedOptions]);
 
   /** 快速生成：用已有信息调用 quickGenerate 补全缺失字段，直接跳到确认 */
-  const quickGenerate = useCallback(async () => {
-    const data = state.wizardData;
-    if (!data.title && !data.description && !data.theme) {
-      toast.warning('请至少提供标题、简介或主题中的一项');
-      return;
-    }
-    dispatch({ type: 'API_LOADING', payload: 'loading_title' });
-    try {
-      const result = await requestQuickGenerate({
-        title: data.title,
-        description: data.description,
-        theme: data.theme,
-        genre: data.genre,
-        narrative_perspective: data.narrative_perspective,
-      });
-      if (result.error) {
-        throw new Error(result.error);
-      }
-      // 视角缺失时兜底为第三人称：readyToGenerate 依赖它，缺了创建流程会卡在 0%
-      const completed = {
-        title: result.title || data.title || '',
-        description: result.description || data.description || '',
-        theme: result.theme || data.theme || '',
-        genre: result.genre?.length ? result.genre : data.genre || [],
-        narrative_perspective: result.narrative_perspective || data.narrative_perspective || '第三人称',
-      };
-      dispatch({ type: 'SET_WIZARD_DATA', payload: completed });
-      dispatch({
-        type: 'API_SUCCESS',
-        payload: {
-          nextStep: 'confirm',
-          aiMessage: {
-            type: 'ai',
-            content: `已为你快速补全所有信息：\n\n📖 书名：${completed.title}\n📝 简介：${completed.description}\n🎨 主题：${completed.theme}\n🏷️ 类型：${completed.genre.join('、')}\n👁️ 视角：${completed.narrative_perspective}\n\n请确认是否开始创建项目？`,
-            options: ['✅ 确认创建', '🔄 重新开始'],
-          },
-        },
-      });
-    } catch {
-      toast.error('快速生成失败，请重试');
-      dispatch({
-        type: 'API_ERROR',
-        payload: { error: '快速生成失败，请重试' },
-      });
-    }
-  }, [state.wizardData]);
+  const quickGenerate = useCallback(
+    () => runQuickGenerate({ wizardData: state.wizardData, currentStep: state.currentStep }, dispatch),
+    [state.wizardData, state.currentStep],
+  );
 
   /** 重置 */
   const reset = useCallback(() => {

@@ -155,6 +155,12 @@ class VolumeExportData(BaseModel):
     review_status: Optional[str] = None
 
 
+class PromptOverrideExportData(BaseModel):
+    """项目自定义提示词（只导出改过的条目）"""
+    prompt_key: str
+    content: str
+
+
 class ProjectExportData(BaseModel):
     """项目完整导出数据"""
     version: str = "2.1.0"
@@ -175,6 +181,7 @@ class ProjectExportData(BaseModel):
     # 2.1.0 起：故事账本（分析记录 / 章节档案 / 伏笔 / 状态信号 / 作者修正 / 时间轴 / 因果 / 关系 / 已知信息 / 层级摘要），
     # 导入后不用整本书重新分析；结构见 services/ledger_transfer.py
     ledger: Optional[Dict[str, Any]] = None
+    prompt_overrides: List[PromptOverrideExportData] = []
 
 
 class ImportValidationResult(BaseModel):

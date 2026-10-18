@@ -10,6 +10,7 @@ from pydantic import AnyUrl
 
 from app.logger import get_logger
 from app.mcp.server_config import TRANSPORT_SSE, TRANSPORT_STREAMABLE_HTTP
+from app.utils.outbound_guard import OutboundBlockedError, OutboundGuard, mcp_http_client_factory
 
 logger = get_logger(__name__)
 
@@ -32,6 +33,7 @@ class HTTPMCPClient:
         env: Optional[Dict[str, str]] = None,
         timeout: float = 60.0,
         transport: str = TRANSPORT_STREAMABLE_HTTP,
+        guard: Optional[OutboundGuard] = None,
     ):
         """
         初始化HTTP MCP客户端
@@ -42,6 +44,7 @@ class HTTPMCPClient:
             env: 环境变量（用于API Key等）
             timeout: 超时时间（秒）
             transport: 远程传输方式，TRANSPORT_STREAMABLE_HTTP（默认）或 TRANSPORT_SSE
+            guard: 出站守卫（插件主人是普通用户时）；None = 不限制
         """
         if transport not in (TRANSPORT_STREAMABLE_HTTP, TRANSPORT_SSE):
             raise ValueError(f"不支持的 transport: {transport}")
@@ -52,6 +55,7 @@ class HTTPMCPClient:
         self.env = env or {}
         self.timeout = timeout
         self.transport = transport
+        self.guard = guard
         
         # 如果env中有API Key，添加到headers
         if 'API_KEY' in self.env:
@@ -70,19 +74,22 @@ class HTTPMCPClient:
         self._connect_error: Optional[BaseException] = None
 
     def _open_transport(self):
-        """按 transport 创建 SDK 传输上下文（headers 在此真正下发）"""
+        """按 transport 创建 SDK 传输上下文（headers 在此真正下发）；有守卫时 SDK 的 httpx 客户端每个连接都过守卫"""
+        extra = {"httpx_client_factory": mcp_http_client_factory(self.guard)} if self.guard is not None else {}
         if self.transport == TRANSPORT_SSE:
             return sse_client(
                 self.url,
                 headers=self.headers,
                 timeout=self.timeout,
                 sse_read_timeout=_SSE_READ_TIMEOUT_SECONDS,
+                **extra,
             )
         return streamablehttp_client(
             self.url,
             headers=self.headers,
             timeout=timedelta(seconds=self.timeout),
             sse_read_timeout=timedelta(seconds=_SSE_READ_TIMEOUT_SECONDS),
+            **extra,
         )
     
     async def _run_connection(self, ready: asyncio.Event, closing: asyncio.Event):
@@ -118,6 +125,13 @@ class HTTPMCPClient:
             if self._runner is not None and not self._runner.done():
                 # 上一次连接已断开但守护任务仍在收尾，先等它退出
                 await self._shutdown_runner()
+
+            if self.guard is not None:
+                # 先查一遍给出清楚的原因（SDK 里的拦截会被它的 TaskGroup 包成看不懂的 ExceptionGroup）
+                try:
+                    await self.guard.precheck(self.url)
+                except OutboundBlockedError as e:
+                    raise MCPError(f"连接MCP服务器失败: {e}") from e
 
             logger.info(f"🔗 连接到MCP服务器: {self.url} ({self.transport})")
             self._ready = asyncio.Event()

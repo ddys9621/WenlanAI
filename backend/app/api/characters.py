@@ -10,6 +10,7 @@ from app.models.character import Character
 from app.models.relationship import Organization, OrganizationMember
 from app.services.character_rename_service import propagate_character_rename
 from app.schemas.character import (
+    CharacterBatchGenerateRequest,
     CharacterCreate,
     CharacterUpdate,
     CharacterResponse,
@@ -19,6 +20,7 @@ from app.schemas.character import (
 from app.api.ai_jobs import job_sse_response
 from app.services.ai_jobs import AIJobConflictError, ai_jobs, job_session_factory
 from app.services.ai_service import AIService
+from app.services.character_batch_service import batch_title, make_character_batch_runner
 from app.services.character_generation_service import make_character_runner
 from app.logger import get_logger
 from app.api.settings import get_user_ai_service
@@ -347,6 +349,46 @@ async def generate_character_stream(
             runner=runner,
             cancel_message="已停止生成角色",
             meta={"role_type": request.role_type, "enable_mcp": request.enable_mcp},
+        )
+    except AIJobConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return job_sse_response(job)
+
+
+@router.post("/batch-generate-stream", summary="AI 批量生成角色与组织（后台任务 + SSE 事件流）")
+async def batch_generate_characters_stream(
+    request: CharacterBatchGenerateRequest,
+    http_request: Request,
+    db: AsyncSession = Depends(get_db),
+    user_ai_service: AIService = Depends(get_user_ai_service)
+):
+    """启动后台任务并从头流式输出其事件：start → stage（每批一个）/ reference / tool_call / llm / progress → result(本次新建名单) → done。
+
+    已有角色 / 组织进上下文；每批生成完就落库，中途停止 / 失败时已完成的批次保留。
+    同项目已有批量生成在跑 → 409。生成逻辑见 services/character_batch_service.py。
+    """
+    user_id = getattr(http_request.state, "user_id", None)
+    project = await verify_project_access(request.project_id, user_id, db)
+    runner = make_character_batch_runner(
+        user_id=user_id,
+        project_id=project.id,
+        request=request,
+        ai_service=user_ai_service,
+        session_factory=job_session_factory(user_id),
+    )
+    try:
+        job = await ai_jobs.start(
+            kind="character_batch_generate",
+            title=batch_title(request.character_count, request.organization_count),
+            user_id=user_id,
+            project_id=project.id,
+            runner=runner,
+            cancel_message="已停止批量生成；已完成的批次已保存",
+            meta={
+                "character_count": request.character_count,
+                "organization_count": request.organization_count,
+                "enable_mcp": request.enable_mcp,
+            },
         )
     except AIJobConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))

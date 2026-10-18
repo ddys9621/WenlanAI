@@ -21,8 +21,9 @@ import { normalizeAnalysisData, type NormalizedAnalysisData } from '@/utils/chap
 import type { MemoryAnnotation } from '@/utils/annotationSegments';
 import { readDomSelection, resolveSelection, type TextSelection } from '@/utils/selectionOffsets';
 import type { Chapter, ChapterCanGenerateResponse, ChapterGenerateRequest } from '@/types';
-import { OTHER_JOB_KINDS, WRITE_JOB_KINDS, useChapterWriteJobs } from '@/hooks/useChapterWriteJobs';
-import { AIJobBanner } from '@/components/ai-job/AIJobBanner';
+import { useChapterWriteJobs } from '@/hooks/useChapterWriteJobs';
+import { useAIJobsStore } from '@/store/aiJobsStore';
+import type { CandidateAdoptResult } from '@/types/writing';
 import AnnotatedText from '@/components/AnnotatedText';
 import MemorySidebar from '@/components/MemorySidebar';
 import { useAssistantDataChange, useAssistantDetail } from '@/hooks/useAssistantPage';
@@ -262,6 +263,15 @@ export default function ChapterAnalysis() {
     setReaderTab('content');
   };
 
+  // 勾了「采用后自动分析」：展开「本章档案」看进度，跑完档案在原地出来
+  const afterAdopted = (result: CandidateAdoptResult) => {
+    afterContentReplaced();
+    if (!result.analysis_job_id) return;
+    setSidebarTab('archive');
+    setSidebarOpen(true);
+    void jobs.followAnalysis(result.chapter, result.analysis_job_id);
+  };
+
   // 编辑器自动保存 / 改标题：只把字数、状态、标题同步给章节列表（列表不带正文）
   const onContentSaved = useCallback((saved: Chapter) => {
     setDetail((d) => (d && d.id === saved.id
@@ -295,6 +305,7 @@ export default function ChapterAnalysis() {
   const streamPanelVisible = Boolean(jobs.streamState && !jobs.panelHidden && jobs.streamState.chapterId === selectedId);
   const { batchStatus, batchRunning, streamBusy } = jobs;
   const selectedSummary = sorted.find((c) => c.id === selectedId);
+  const selectedAnalysisJob = selectedId ? jobs.analysisJobOf(selectedId) : undefined;
   const keyword = search.trim();
   const visibleChapters = keyword
     ? sorted.filter((c) => c.title.includes(keyword) || String(c.chapter_number) === keyword.replace(/^第|章$/g, ''))
@@ -401,9 +412,6 @@ export default function ChapterAnalysis() {
           </div>
         </section>
       )}
-
-      {/* 后台 AI 任务横幅：分析 / 场景 / 仿写常驻；正文任务在面板不可见（后台运行 / 看别的章）时也进横幅 */}
-      <AIJobBanner projectId={projectId} kinds={streamPanelVisible ? OTHER_JOB_KINDS : [...WRITE_JOB_KINDS, ...OTHER_JOB_KINDS]} />
 
       {sorted.length === 0 ? (
         <section className="hh-panel flex flex-col items-center px-6 py-14 text-center">
@@ -587,6 +595,8 @@ export default function ChapterAnalysis() {
                           loading={narrativeLoading}
                           hasContent={Boolean(detail.content?.trim())}
                           analyzing={jobs.analyzingChapterIds.has(detail.id)}
+                          progress={selectedAnalysisJob?.progress}
+                          onShowProgress={selectedAnalysisJob ? () => useAIJobsStore.getState().openModal(selectedAnalysisJob.id) : undefined}
                           onAnalyze={() => selectedSummary && void jobs.handleAnalyze(selectedSummary)}
                           onChanged={() => loadAnalysis(detail.id)}
                         />
@@ -624,7 +634,7 @@ export default function ChapterAnalysis() {
                       key={`${detail.id}-${candidatesVersion}`}
                       chapter={detail}
                       focusCandidateId={focusCandidateId}
-                      onAdopted={afterContentReplaced}
+                      onAdopted={afterAdopted}
                       onChanged={() => void refreshChapters()}
                     />
                   ) : (

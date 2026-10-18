@@ -10,6 +10,7 @@ import os
 import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.api.auth import mark_config_password_superseded
 from app.database import get_db, init_db
 from app.models.user import User
 from app.user_manager import user_manager
@@ -303,6 +304,7 @@ async def reset_password(
             username=target_user.username,
             password=data.new_password
         )
+        await mark_config_password_superseded(user_id)
         
         logger.info(f"管理员 {admin.user_id} 重置了用户 {user_id} 的密码")
         

@@ -280,8 +280,10 @@ async def delete_project(
         
         # SQLite 没开外键级联：分析记录、章节档案、伏笔、状态信号、时间轴等账本表要手动清
         from app.services.chapter_purge_service import purge_project_ledger
+        from app.services.project_prompts import reset_overrides as reset_prompt_overrides
 
         await purge_project_ledger(db, project_id)
+        await reset_prompt_overrides(db, project_id)
 
         await db.delete(project)
         await db.commit()

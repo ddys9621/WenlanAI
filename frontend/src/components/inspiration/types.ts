@@ -84,6 +84,8 @@ export interface WizardState {
   progressMessage: string;
   generationSteps: GenerationSteps;
   generationMeta: GenerationMeta;
+  /** 上一轮创建 / 续跑中断的原因；开始新一轮、重新确认创建、重新开始时清空 */
+  generationError: string | null;
   refinementContexts: Partial<Record<OptionGenerationStep, RefinementContext>>;
   retryContext: RetryContext | null;
 }
@@ -98,6 +100,7 @@ export type WizardAction =
   | { type: 'RESTART' }
   | { type: 'RETRY' }
   | { type: 'API_LOADING'; payload: Step }
+  | { type: 'API_IDLE' }
   | { type: 'API_SUCCESS'; payload: { nextStep: Step; aiMessage: Omit<Message, 'id'> } }
   | { type: 'API_ERROR'; payload: { error: string; retryContext?: RetryContext; options?: string[] } }
   | { type: 'RECORD_REFINEMENT_RESULT'; payload: { step: OptionGenerationStep; hint?: string; options: string[] } }
@@ -132,6 +135,7 @@ export const createInitialState = (): WizardState => ({
   progressMessage: '',
   generationSteps: { worldBuilding: 'pending', characters: 'pending', outline: 'pending', volumes: 'pending' },
   generationMeta: { startedAt: null, lastUpdateAt: null, elapsedSec: 0, chunks: 0, stallLevel: 'none' },
+  generationError: null,
   refinementContexts: {},
   retryContext: null,
 });

@@ -473,6 +473,46 @@ export interface GenerateCharacterRequest {
   selected_plugins?: string[];
 }
 
+/** 项目内 AI 批量生成角色与组织（POST /api/characters/batch-generate-stream）：人物 0-10、组织 0-5，合计至少 1 个 */
+export interface CharacterBatchGenerateRequest {
+  project_id: string;
+  character_count: number;
+  organization_count: number;
+  requirements?: string;
+  enable_mcp?: boolean;
+  selected_plugins?: string[];
+}
+
+/** 批量生成的结果（任务 result 事件的 data）：只含本次新建的名单，列表靠刷新取 */
+export interface CharacterBatchResult {
+  message: string;
+  characters: number;
+  organizations: number;
+  relationships: number;
+  memberships: number;
+  created: { id: string; name: string; is_organization: boolean; role_type?: string | null }[];
+  /** 和已有角色 / 组织重名而没建的名字 */
+  skipped: string[];
+}
+
+/** 谋篇页 AI 生成总纲（POST /api/projects/{id}/story-outlines/generate-stream）：视角 / 章数 / 字数留空按项目设置 */
+export interface StoryOutlineGenerateRequest {
+  narrative_perspective?: string;
+  chapter_count?: number;
+  target_words?: number;
+  requirements?: string;
+  enable_mcp?: boolean;
+  selected_plugins?: string[];
+}
+
+/** 谋篇页 AI 生成总纲的结果：新总纲存成活跃版本，旧版本保留；stale = 标「上游已改」的卷纲 + 章纲条数 */
+export interface StoryOutlineGenerateResult {
+  message: string;
+  outline: Outline;
+  previous_versions: number;
+  stale: number;
+}
+
 // 向导API响应类型
 export interface GenerateCharactersResponse {
   message?: string;
@@ -1034,6 +1074,42 @@ export interface WorldRuleUpdate {
 export interface WorldRuleListResponse {
   total: number;
   items: WorldRule[];
+}
+
+// 世界设定条目类型（术语 / 铁律 / 势力 / 通用规则等，与世界规则的境界·装备·地图三类互补）
+export type SettingEntryCategory = 'term' | 'law' | 'faction' | 'rule' | 'other';
+
+export interface SettingEntry {
+  id: string;
+  project_id: string;
+  category: SettingEntryCategory | string;
+  title: string;
+  summary?: string;
+  content?: string;
+  order_index: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SettingEntryCreate {
+  category: string;
+  title: string;
+  summary?: string;
+  content?: string;
+  order_index?: number;
+}
+
+export interface SettingEntryUpdate {
+  category?: string;
+  title?: string;
+  summary?: string;
+  content?: string;
+  order_index?: number;
+}
+
+export interface SettingEntryListResponse {
+  total: number;
+  items: SettingEntry[];
 }
 
 // ============================================

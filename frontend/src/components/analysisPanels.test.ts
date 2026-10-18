@@ -139,6 +139,28 @@ describe('ChapterArchivePanel', () => {
     const stale = renderToStaticMarkup(h(ChapterArchivePanel, { ...base, data: normalizeAnalysisData({ ...PAYLOAD, is_stale: true }) }))
     expect(stale).toContain('正文在分析之后改过')
   })
+
+  it('分析中（如采用候选稿后自动分析）：不说「还没分析」，显示进度和「查看进度」', () => {
+    const html = renderToStaticMarkup(h(ChapterArchivePanel, {
+      ...base, data: null, analyzing: true, progress: { message: '模型分析章节中…', pct: 20 }, onShowProgress: () => undefined,
+    }))
+    expect(html).toContain('模型分析章节中…')
+    expect(html).toContain('width:20%')
+    expect(html).toContain('查看进度')
+    expect(html).toContain('分析完会自动刷新')
+    expect(html).not.toContain('本章还没分析')
+  })
+
+  it('重新分析中：「分析中」提示替代过期 / 失败提示，旧档案照常显示', () => {
+    const html = renderToStaticMarkup(h(ChapterArchivePanel, {
+      ...base, analyzing: true, data: normalizeAnalysisData({ ...PAYLOAD, is_stale: true, task: { status: 'failed', message: '截断' } }),
+    }))
+    expect(html).toContain('正在分析本章')
+    expect(html).not.toContain('正文在分析之后改过')
+    expect(html).not.toContain('最近一次分析失败')
+    expect(html).not.toContain('查看进度')
+    expect(html).toContain('林尘拿到玉佩')
+  })
 })
 
 describe('分析状态点', () => {

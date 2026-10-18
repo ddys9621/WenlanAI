@@ -3,15 +3,18 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { wizardStreamApi } from '../../services/api';
+import { runWizardJob, type WizardJobKind } from '../../store/wizardJob';
 import type {
   ApiError,
   Character,
+  GenerateCharactersResponse,
   GenerateOutlineResponse,
   Outline,
   WizardVolumesResponse,
   WorldBuildingResponse,
 } from '../../types';
-import type { WizardAction, WizardData } from './types';
+import type { SSEClientOptions } from '../../utils/sseClient';
+import type { GenerationSteps, GenStepStatus, WizardAction, WizardData } from './types';
 import type { MCPSelectorValue } from '../MCPSelector';
 import type { KbSourceChoice } from '../../types/knowledge';
 import { kbChoicePayload } from '../../utils/knowledge';
@@ -94,8 +97,21 @@ const mapProgress = (
 const getNodeRange = (preset: StageProgressPreset, node: GenerationNodeKey): [number, number] =>
   preset[node] || [0, 100];
 
-const getOutlineFromResponse = (response: GenerateOutlineResponse) =>
-  response.outline || response.outlines?.[0] || null;
+const getOutlineFromResponse = (response: GenerateOutlineResponse | null) =>
+  response?.outline || response?.outlines?.[0] || null;
+
+const nodeStatus = (node: GenerationNodeKey, status: GenStepStatus) =>
+  ({ [node]: status }) as Partial<GenerationSteps>;
+
+/** 一个生成节点对应的后台任务 */
+interface NodeJob<T> {
+  kind: WizardJobKind;
+  title: string;
+  projectId?: string;
+  /** 节点开始时进度条上的文案 */
+  startMessage: string;
+  connect: (options: SSEClientOptions<T>) => Promise<unknown>;
+}
 
 export function useProjectGeneration({ dispatch, mcpSettings, kbChoice }: UseProjectGenerationOptions) {
   const [artifacts, setArtifacts] = useState<GenerationArtifacts>(EMPTY_ARTIFACTS);
@@ -158,101 +174,83 @@ export function useProjectGeneration({ dispatch, mcpSettings, kbChoice }: UsePro
     });
   }, [dispatch, dispatchIfActive, isRunActive]);
 
+  /**
+   * 一个节点 = 一个后台任务（断线按 lastSeq 续上）：标为进行中，后端 0-100 的进度映射到本节点在总进度条上的区间。
+   * 失败 / 停止直接 reject，由 runFromNode 统一把当前节点标成失败。
+   */
+  const runNodeJob = useCallback(<T>(
+    node: GenerationNodeKey,
+    preset: StageProgressPreset,
+    runId: number,
+    job: NodeJob<T>,
+  ): Promise<T> => {
+    dispatchIfActive(runId, { type: 'GEN_STEP_UPDATE', payload: nodeStatus(node, 'processing') });
+    dispatchIfActive(runId, {
+      type: 'GEN_PROGRESS',
+      payload: { progress: getNodeRange(preset, node)[0], message: job.startMessage },
+    });
+    return runWizardJob<T>({
+      kind: job.kind,
+      title: job.title,
+      projectId: job.projectId,
+      connect: job.connect,
+      onProgress: (message, progress) => {
+        dispatchIfActive(runId, {
+          type: 'GEN_PROGRESS',
+          payload: { progress: mapProgress(preset, node, progress), message },
+        });
+      },
+    });
+  }, [dispatchIfActive]);
+
   const runWorldBuilding = useCallback(async (
     data: WizardData,
     preset: StageProgressPreset,
     runId: number,
     existingProjectId?: string,
   ) => {
-    dispatchIfActive(runId, { type: 'GEN_STEP_UPDATE', payload: { worldBuilding: 'processing' } });
-    dispatchIfActive(runId, {
-      type: 'GEN_PROGRESS',
-      payload: {
-        progress: getNodeRange(preset, 'worldBuilding')[0],
-        message: existingProjectId ? '正在重生成世界观...' : '正在生成世界观...',
-      },
-    });
+    const result = await runNodeJob<WorldBuildingResponse>('worldBuilding', preset, runId, existingProjectId
+      ? {
+          kind: 'wizard_world_building',
+          title: '向导：重新生成世界构建',
+          projectId: existingProjectId,
+          startMessage: '正在重生成世界观...',
+          connect: (options) => wizardStreamApi.regenerateWorldBuildingStream(
+            existingProjectId,
+            { enable_mcp: mcpEnabled, selected_plugins: mcpPlugins },
+            options,
+          ),
+        }
+      : {
+          kind: 'wizard_world_building',
+          title: '向导：生成世界构建',
+          startMessage: '正在生成世界观...',
+          connect: (options) => wizardStreamApi.generateWorldBuildingStream(
+            {
+              title: data.title,
+              description: data.description,
+              theme: data.theme,
+              genre: data.genre.join('、'),
+              narrative_perspective: data.narrative_perspective,
+              target_words: 100000,
+              chapter_count: 30,
+              character_count: 5,
+              enable_mcp: mcpEnabled,
+              selected_plugins: mcpPlugins,
+              ...kbChoicePayload(kbChoice),
+            },
+            options,
+          ),
+        });
 
-    const result = existingProjectId
-      ? await wizardStreamApi.regenerateWorldBuildingStream(
-          existingProjectId,
-          {
-            enable_mcp: mcpEnabled,
-            selected_plugins: mcpPlugins,
-          },
-          {
-            onProgress: (message, progress) => {
-              if (!isRunActive(runId)) return;
-              dispatch({
-                type: 'GEN_PROGRESS',
-                payload: {
-                  progress: mapProgress(preset, 'worldBuilding', progress),
-                  message,
-                },
-              });
-            },
-            onResult: (response) => {
-              if (!isRunActive(runId)) return;
-              setArtifacts((current) => ({
-                ...current,
-                worldBuilding: response as WorldBuildingResponse,
-              }));
-              dispatch({ type: 'GEN_STEP_UPDATE', payload: { worldBuilding: 'completed' } });
-            },
-            onError: (error) => {
-              if (!isRunActive(runId)) return;
-              dispatch({ type: 'GEN_STEP_UPDATE', payload: { worldBuilding: 'error' } });
-              throw new Error(error);
-            },
-          },
-        )
-      : await wizardStreamApi.generateWorldBuildingStream(
-          {
-            title: data.title,
-            description: data.description,
-            theme: data.theme,
-            genre: data.genre.join('、'),
-            narrative_perspective: data.narrative_perspective,
-            target_words: 100000,
-            chapter_count: 30,
-            character_count: 5,
-            enable_mcp: mcpEnabled,
-            selected_plugins: mcpPlugins,
-            ...kbChoicePayload(kbChoice),
-          },
-          {
-            onProgress: (message, progress) => {
-              if (!isRunActive(runId)) return;
-              dispatch({
-                type: 'GEN_PROGRESS',
-                payload: {
-                  progress: mapProgress(preset, 'worldBuilding', progress),
-                  message,
-                },
-              });
-            },
-            onResult: (response) => {
-              if (!isRunActive(runId)) return;
-              setArtifacts((current) => ({
-                ...current,
-                worldBuilding: response as WorldBuildingResponse,
-              }));
-              dispatch({ type: 'GEN_STEP_UPDATE', payload: { worldBuilding: 'completed' } });
-            },
-            onError: (error) => {
-              if (!isRunActive(runId)) return;
-              dispatch({ type: 'GEN_STEP_UPDATE', payload: { worldBuilding: 'error' } });
-              throw new Error(error);
-            },
-          },
-        );
-
-    if (result?.project_id && isRunActive(runId)) {
-      dispatch({ type: 'GEN_PROJECT_CREATED', payload: result.project_id });
+    if (isRunActive(runId)) {
+      setArtifacts((current) => ({ ...current, worldBuilding: result }));
+      dispatch({ type: 'GEN_STEP_UPDATE', payload: { worldBuilding: 'completed' } });
+      if (result?.project_id) dispatch({ type: 'GEN_PROJECT_CREATED', payload: result.project_id });
     }
 
-    return result as WorldBuildingResponse;
-  }, [dispatch, dispatchIfActive, isRunActive, mcpEnabled, mcpPlugins, kbChoice]);
+    return result;
+  }, [dispatch, isRunActive, mcpEnabled, mcpPlugins, kbChoice, runNodeJob]);
 
   const runCharacters = useCallback(async (
     projectId: string,
@@ -261,61 +259,39 @@ export function useProjectGeneration({ dispatch, mcpSettings, kbChoice }: UsePro
     worldBuilding: WorldBuildingResponse | null,
     runId: number,
   ) => {
-    dispatchIfActive(runId, { type: 'GEN_STEP_UPDATE', payload: { characters: 'processing' } });
-    dispatchIfActive(runId, {
-      type: 'GEN_PROGRESS',
-      payload: {
-        progress: getNodeRange(preset, 'characters')[0],
-        message: '正在生成角色...',
-      },
+    const result = await runNodeJob<GenerateCharactersResponse>('characters', preset, runId, {
+      kind: 'wizard_characters',
+      title: '向导：生成角色',
+      projectId,
+      startMessage: '正在生成角色...',
+      connect: (options) => wizardStreamApi.generateCharactersStream(
+        {
+          project_id: projectId,
+          count: 5,
+          world_context: worldBuilding
+            ? {
+                time_period: worldBuilding.time_period || '',
+                location: worldBuilding.location || '',
+                atmosphere: worldBuilding.atmosphere || '',
+                rules: worldBuilding.rules || '',
+              }
+            : undefined,
+          theme: data.theme,
+          genre: data.genre.join('、'),
+          enable_mcp: mcpEnabled,
+          selected_plugins: mcpPlugins,
+        },
+        options,
+      ),
     });
 
-    const result = await wizardStreamApi.generateCharactersStream(
-      {
-        project_id: projectId,
-        count: 5,
-        world_context: worldBuilding
-          ? {
-              time_period: worldBuilding.time_period || '',
-              location: worldBuilding.location || '',
-              atmosphere: worldBuilding.atmosphere || '',
-              rules: worldBuilding.rules || '',
-            }
-          : undefined,
-        theme: data.theme,
-        genre: data.genre.join('、'),
-        enable_mcp: mcpEnabled,
-        selected_plugins: mcpPlugins,
-      },
-      {
-        onProgress: (message, progress) => {
-          if (!isRunActive(runId)) return;
-          dispatch({
-            type: 'GEN_PROGRESS',
-            payload: {
-              progress: mapProgress(preset, 'characters', progress),
-              message,
-            },
-          });
-        },
-        onResult: (response) => {
-          if (!isRunActive(runId)) return;
-          setArtifacts((current) => ({
-            ...current,
-            characters: (response as { characters?: Character[] }).characters || [],
-          }));
-          dispatch({ type: 'GEN_STEP_UPDATE', payload: { characters: 'completed' } });
-        },
-        onError: (error) => {
-          if (!isRunActive(runId)) return;
-          dispatch({ type: 'GEN_STEP_UPDATE', payload: { characters: 'error' } });
-          throw new Error(error);
-        },
-      },
-    );
-
-    return (result as { characters?: Character[] }).characters || [];
-  }, [dispatch, dispatchIfActive, isRunActive, mcpEnabled, mcpPlugins]);
+    const characters: Character[] = result?.characters || [];
+    if (isRunActive(runId)) {
+      setArtifacts((current) => ({ ...current, characters }));
+      dispatch({ type: 'GEN_STEP_UPDATE', payload: { characters: 'completed' } });
+    }
+    return characters;
+  }, [dispatch, isRunActive, mcpEnabled, mcpPlugins, runNodeJob]);
 
   const runOutline = useCallback(async (
     projectId: string,
@@ -323,101 +299,54 @@ export function useProjectGeneration({ dispatch, mcpSettings, kbChoice }: UsePro
     preset: StageProgressPreset,
     runId: number,
   ) => {
-    dispatchIfActive(runId, { type: 'GEN_STEP_UPDATE', payload: { outline: 'processing' } });
-    dispatchIfActive(runId, {
-      type: 'GEN_PROGRESS',
-      payload: {
-        progress: getNodeRange(preset, 'outline')[0],
-        message: '正在生成故事大纲...',
-      },
+    const response = await runNodeJob<GenerateOutlineResponse>('outline', preset, runId, {
+      kind: 'wizard_outline',
+      title: '向导：生成故事大纲',
+      projectId,
+      startMessage: '正在生成故事大纲...',
+      connect: (options) => wizardStreamApi.generateCompleteOutlineStream(
+        {
+          project_id: projectId,
+          chapter_count: 30,
+          narrative_perspective: data.narrative_perspective,
+          target_words: 100000,
+          enable_mcp: mcpEnabled,
+          selected_plugins: mcpPlugins,
+        },
+        options,
+      ),
     });
 
-    const response = await wizardStreamApi.generateCompleteOutlineStream(
-      {
-        project_id: projectId,
-        chapter_count: 30,
-        narrative_perspective: data.narrative_perspective,
-        target_words: 100000,
-        enable_mcp: mcpEnabled,
-        selected_plugins: mcpPlugins,
-      },
-      {
-        onProgress: (message, progress) => {
-          if (!isRunActive(runId)) return;
-          dispatch({
-            type: 'GEN_PROGRESS',
-            payload: {
-              progress: mapProgress(preset, 'outline', progress),
-              message,
-            },
-          });
-        },
-        onResult: (result) => {
-          if (!isRunActive(runId)) return;
-          const typed = result as GenerateOutlineResponse;
-          const outline = getOutlineFromResponse(typed);
-          setArtifacts((current) => ({
-            ...current,
-            outline,
-          }));
-          dispatch({ type: 'GEN_STEP_UPDATE', payload: { outline: 'completed' } });
-        },
-        onError: (error) => {
-          if (!isRunActive(runId)) return;
-          dispatch({ type: 'GEN_STEP_UPDATE', payload: { outline: 'error' } });
-          throw new Error(error);
-        },
-      },
-    );
-
-    return getOutlineFromResponse(response as GenerateOutlineResponse);
-  }, [dispatch, dispatchIfActive, isRunActive, mcpEnabled, mcpPlugins]);
+    const outline = getOutlineFromResponse(response);
+    if (isRunActive(runId)) {
+      setArtifacts((current) => ({ ...current, outline }));
+      dispatch({ type: 'GEN_STEP_UPDATE', payload: { outline: 'completed' } });
+    }
+    return outline;
+  }, [dispatch, isRunActive, mcpEnabled, mcpPlugins, runNodeJob]);
 
   const runVolumes = useCallback(async (
     projectId: string,
     preset: StageProgressPreset,
     runId: number,
   ) => {
-    dispatchIfActive(runId, { type: 'GEN_STEP_UPDATE', payload: { volumes: 'processing' } });
-    dispatchIfActive(runId, {
-      type: 'GEN_PROGRESS',
-      payload: {
-        progress: getNodeRange(preset, 'volumes')[0],
-        message: '正在生成卷纲...',
-      },
+    const response = await runNodeJob<WizardVolumesResponse>('volumes', preset, runId, {
+      kind: 'wizard_volumes',
+      title: '向导：生成卷纲',
+      projectId,
+      startMessage: '正在生成卷纲...',
+      connect: (options) => wizardStreamApi.generateVolumesStream(
+        { project_id: projectId, chapter_count: DEFAULT_CHAPTER_COUNT },
+        options,
+      ),
     });
 
-    const response = await wizardStreamApi.generateVolumesStream(
-      {
-        project_id: projectId,
-        chapter_count: DEFAULT_CHAPTER_COUNT,
-      },
-      {
-        onProgress: (message, progress) => {
-          if (!isRunActive(runId)) return;
-          dispatch({
-            type: 'GEN_PROGRESS',
-            payload: {
-              progress: mapProgress(preset, 'volumes', progress),
-              message,
-            },
-          });
-        },
-        onResult: (result) => {
-          if (!isRunActive(runId)) return;
-          setArtifacts((current) => ({ ...current, volumes: result as WizardVolumesResponse }));
-          dispatch({ type: 'GEN_STEP_UPDATE', payload: { volumes: 'completed' } });
-        },
-        onError: (error) => {
-          if (!isRunActive(runId)) return;
-          dispatch({ type: 'GEN_STEP_UPDATE', payload: { volumes: 'error' } });
-          throw new Error(error);
-        },
-      },
-    );
-
-    return response as WizardVolumesResponse;
-  }, [dispatch, dispatchIfActive, isRunActive]);
+    if (isRunActive(runId)) {
+      setArtifacts((current) => ({ ...current, volumes: response }));
+      dispatch({ type: 'GEN_STEP_UPDATE', payload: { volumes: 'completed' } });
+    }
+    return response;
+  }, [dispatch, isRunActive, runNodeJob]);
 
   const runFromNode = useCallback(async (
     startNode: GenerationNodeKey,
@@ -454,6 +383,8 @@ export function useProjectGeneration({ dispatch, mcpSettings, kbChoice }: UsePro
       }));
     }
 
+    // 正在跑的环节：失败时把它标红，确认页从这里续跑（清理下游数据算作下一环节的准备工作）
+    let activeNode: GenerationNodeKey = startNode;
     try {
       let projectId = existingProjectId || '';
       let worldBuilding = startNode === 'worldBuilding' ? null : artifacts.worldBuilding;
@@ -464,6 +395,7 @@ export function useProjectGeneration({ dispatch, mcpSettings, kbChoice }: UsePro
         projectId = worldBuilding?.project_id || projectId;
 
         if (existingProjectId) {
+          activeNode = 'characters';
           await cleanupDownstreamData(projectId, getNodeRange(preset, 'characters')[0] - 8, runId);
           if (!isRunActive(runId)) return;
           dispatch({ type: 'GEN_STEP_UPDATE', payload: { characters: 'pending', outline: 'pending', volumes: 'pending' } });
@@ -487,6 +419,7 @@ export function useProjectGeneration({ dispatch, mcpSettings, kbChoice }: UsePro
       }
 
       if (startNode === 'worldBuilding' || startNode === 'characters') {
+        activeNode = 'characters';
         await runCharacters(projectId, data, preset, worldBuilding, runId);
         if (!isRunActive(runId)) return;
       }
@@ -497,10 +430,12 @@ export function useProjectGeneration({ dispatch, mcpSettings, kbChoice }: UsePro
       }
 
       if (startNode !== 'volumes') {
+        activeNode = 'outline';
         await runOutline(projectId, data, preset, runId);
         if (!isRunActive(runId)) return;
       }
 
+      activeNode = 'volumes';
       await runVolumes(projectId, preset, runId);
       if (!isRunActive(runId)) return;
 
@@ -510,6 +445,7 @@ export function useProjectGeneration({ dispatch, mcpSettings, kbChoice }: UsePro
       if (!isRunActive(runId)) return;
       const apiError = error as ApiError;
       const message = apiError.response?.data?.detail || apiError.message || '未知错误';
+      dispatch({ type: 'GEN_STEP_UPDATE', payload: nodeStatus(activeNode, 'error') });
       toast.error(`创建项目失败：${message}`);
       dispatch({ type: 'GEN_ERROR', payload: message });
     } finally {

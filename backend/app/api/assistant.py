@@ -13,12 +13,16 @@ from app.api.ai_jobs import job_sse_response
 from app.api.deps import verify_request_project
 from app.api.settings import get_user_ai_service, load_or_create_settings
 from app.database import get_db
-from app.models.assistant import AssistantFieldCandidate, AssistantMessage, AssistantRun, AssistantSession, AssistantTeamSetting
+from app.models.assistant import (
+    AssistantEntityCandidate, AssistantFieldCandidate, AssistantMessage, AssistantRun, AssistantSession,
+    AssistantTeamSetting,
+)
 from app.schemas.assistant import (
     AssistantAnswerRequest, AssistantContextRequest, AssistantPage, AssistantSendRequest, AssistantTeamModelRequest,
 )
 from app.services import assistant_agent_service as agent
 from app.services import assistant_candidate_service as cands
+from app.services import assistant_entity_candidate_service as entity_cands
 from app.services import assistant_context as budgeting
 from app.services import cocreation_team as team
 from app.services.project_ai_preference import load_project_ai_preference, resolve_override_values
@@ -27,6 +31,7 @@ from app.services.ai_jobs import AIJobConflictError, ai_jobs, job_session_factor
 from app.services.ai_service import AIService
 from app.services.assistant_checks_service import project_checks as compute_checks
 from app.services.assistant_fields import FieldError
+from app.services.assistant_entity_candidate_service import EntityError
 from app.services.assistant_persistence import WRITE_ATTEMPTS
 
 router = APIRouter(prefix="/projects/{project_id}/assistant", tags=["智能助笔"])
@@ -238,6 +243,50 @@ async def undo_field_candidate(project_id: str, candidate_id: str, request: Requ
 @router.post("/candidates/{candidate_id}/reject", summary="不用这份候选")
 async def reject_field_candidate(project_id: str, candidate_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     return await _decide(project_id, candidate_id, request, db, cands.reject_candidate, "rejected")
+
+
+async def _entity_candidate(db: AsyncSession, project_id: str, candidate_id: str) -> AssistantEntityCandidate:
+    candidate = (await db.execute(
+        select(AssistantEntityCandidate).where(AssistantEntityCandidate.id == candidate_id)
+        .execution_options(populate_existing=True)
+    )).scalar_one_or_none()
+    if candidate is None or candidate.project_id != project_id:
+        raise HTTPException(status_code=404, detail="新建候选不存在")
+    return candidate
+
+
+async def _decide_entity(project_id: str, candidate_id: str, request: Request, db: AsyncSession, action, done: str) -> dict:
+    """应用 / 放弃新建候选：提交后读回核对（同一 SQLite 连接，别的请求收尾时的回滚可能冲掉这次写入）。"""
+    await verify_request_project(request, project_id, db)
+    for _attempt in range(WRITE_ATTEMPTS):
+        candidate = await _entity_candidate(db, project_id, candidate_id)
+        try:
+            await action(db, candidate)
+        except EntityError as exc:
+            await db.rollback()
+            raise HTTPException(status_code=exc.status_code, detail=str(exc))
+        view = entity_cands.entity_candidate_view(candidate)
+        await db.commit()
+        if await db.scalar(select(AssistantEntityCandidate.status).where(AssistantEntityCandidate.id == candidate_id)) == done:
+            return view
+        db.expire_all()
+    raise HTTPException(status_code=503, detail="这次操作没能写进数据库（被同时进行的其他操作打断），请重试")
+
+
+@router.get("/entity-candidates/{candidate_id}", summary="查看新建候选")
+async def get_entity_candidate(project_id: str, candidate_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    await verify_request_project(request, project_id, db)
+    return entity_cands.entity_candidate_view(await _entity_candidate(db, project_id, candidate_id))
+
+
+@router.post("/entity-candidates/{candidate_id}/apply", summary="应用新建候选（真正建档）")
+async def apply_entity_candidate(project_id: str, candidate_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    return await _decide_entity(project_id, candidate_id, request, db, entity_cands.apply_entity_candidate, "applied")
+
+
+@router.post("/entity-candidates/{candidate_id}/reject", summary="不用这份新建候选")
+async def reject_entity_candidate(project_id: str, candidate_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    return await _decide_entity(project_id, candidate_id, request, db, entity_cands.reject_entity_candidate, "rejected")
 
 
 @router.get("/checks", summary="核对清单：本书现在需要注意的事项")

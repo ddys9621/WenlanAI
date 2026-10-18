@@ -17,6 +17,10 @@ interface Props {
   /** 本章有正文（没有正文不给分析按钮） */
   hasContent: boolean
   analyzing: boolean
+  /** 分析中的进度（来自后台任务；批量写作流水线里的分析没有） */
+  progress?: { message: string; pct: number } | null
+  /** 打开任务弹窗看分步过程 */
+  onShowProgress?: () => void
   onAnalyze: () => void
   /** 档案被作者改过 / 采用或忽略建议之后：让父组件重新拉分析结果 */
   onChanged: () => void
@@ -37,7 +41,27 @@ function Banner({ tone, children, action }: { tone: 'red' | 'gold' | 'gray'; chi
   )
 }
 
-export function ChapterArchivePanel({ chapterId, data, loading, hasContent, analyzing, onAnalyze, onChanged }: Props) {
+function AnalyzingNotice({ progress, onShowProgress }: Pick<Props, 'progress' | 'onShowProgress'>) {
+  return (
+    <div className="mb-3 border border-brand/30 bg-brand/[0.04] px-3 py-2.5 text-xs leading-5 text-content-secondary">
+      <div className="flex items-center gap-2">
+        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-brand" />
+        <span className="min-w-0 flex-1 truncate font-medium text-content">{progress?.message || '正在分析本章…'}</span>
+        {onShowProgress && (
+          <button onClick={onShowProgress} className="shrink-0 text-brand hover:underline">查看进度</button>
+        )}
+      </div>
+      {progress && (
+        <div className="hh-progress mt-2">
+          <div className="hh-progress-bar" style={{ width: `${progress.pct}%` }} />
+        </div>
+      )}
+      <p className="mt-1.5 text-[11px] text-content-tertiary">分析完会自动刷新这里的档案、人物状态和正文标注。</p>
+    </div>
+  )
+}
+
+export function ChapterArchivePanel({ chapterId, data, loading, hasContent, analyzing, progress, onShowProgress, onAnalyze, onChanged }: Props) {
   const [editing, setEditing] = useState(false)
   const [summary, setSummary] = useState('')
   const [endState, setEndState] = useState('')
@@ -53,6 +77,7 @@ export function ChapterArchivePanel({ chapterId, data, loading, hasContent, anal
   ) : null
 
   if (!data) {
+    if (analyzing) return <AnalyzingNotice progress={progress} onShowProgress={onShowProgress} />
     return (
       <div className="py-8 text-center text-xs leading-6 text-content-tertiary">
         <p>本章还没分析。</p>
@@ -85,18 +110,24 @@ export function ChapterArchivePanel({ chapterId, data, loading, hasContent, anal
 
   return (
     <div>
-      {data.task?.status === 'failed' && (
-        <Banner tone="red" action={analyzeButton}>
-          <p className="font-medium">最近一次分析失败</p>
-          <p>{data.task.message}</p>
-          {data.analyzed && <p className="opacity-80">之前的分析结果仍在用。</p>}
-        </Banner>
-      )}
-      {data.task?.status !== 'failed' && (data.is_stale || digest?.stale) && (
-        <Banner tone="gold" action={analyzeButton}>正文在分析之后改过，下面的档案与状态可能过期。</Banner>
-      )}
-      {data.task?.status === 'completed' && data.task.message && (
-        <Banner tone="gray">{data.task.message}</Banner>
+      {analyzing ? (
+        <AnalyzingNotice progress={progress} onShowProgress={onShowProgress} />
+      ) : (
+        <>
+          {data.task?.status === 'failed' && (
+            <Banner tone="red" action={analyzeButton}>
+              <p className="font-medium">最近一次分析失败</p>
+              <p>{data.task.message}</p>
+              {data.analyzed && <p className="opacity-80">之前的分析结果仍在用。</p>}
+            </Banner>
+          )}
+          {data.task?.status !== 'failed' && (data.is_stale || digest?.stale) && (
+            <Banner tone="gold" action={analyzeButton}>正文在分析之后改过，下面的档案与状态可能过期。</Banner>
+          )}
+          {data.task?.status === 'completed' && data.task.message && (
+            <Banner tone="gray">{data.task.message}</Banner>
+          )}
+        </>
       )}
 
       <section className="hh-subpanel mb-3 p-3">

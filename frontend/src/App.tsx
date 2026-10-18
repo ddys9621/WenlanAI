@@ -1,7 +1,7 @@
 import { lazy, Suspense } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { AppLayout } from '@/components/layout/AppLayout'
-import { ProtectedRoute } from '@/components/ProtectedRoute'
+import { AdminRoute, ProtectedRoute } from '@/components/ProtectedRoute'
 import { PageLoading } from '@/components/ui/PageLoading'
 
 // 页面懒加载
@@ -10,12 +10,14 @@ const ProjectList = lazy(() => import('@/pages/ProjectList'))
 const ProjectDetail = lazy(() => import('@/pages/ProjectDetail'))
 const WorldSetting = lazy(() => import('@/pages/WorldSetting'))
 const WorldRules = lazy(() => import('@/pages/WorldRules'))
+const SettingEntries = lazy(() => import('@/pages/SettingEntries'))
 const Outline = lazy(() => import('@/pages/Outline'))
 const Characters = lazy(() => import('@/pages/Characters'))
 const Relationships = lazy(() => import('@/pages/Relationships'))
 const Organizations = lazy(() => import('@/pages/Organizations'))
 const ChapterAnalysis = lazy(() => import('@/pages/ChapterAnalysis'))
 const WritingStyles = lazy(() => import('@/pages/WritingStyles'))
+const ProjectPrompts = lazy(() => import('@/pages/ProjectPrompts'))
 const Memories = lazy(() => import('@/pages/Memories'))
 const Settings = lazy(() => import('@/pages/Settings'))
 const MCPPlugins = lazy(() => import('@/pages/MCPPlugins'))
@@ -45,7 +47,7 @@ export default function App() {
             <Route path="/knowledge/:sourceId" element={<KnowledgeSource />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="/mcp-plugins" element={<MCPPlugins />} />
-            <Route path="/user-management" element={<UserManagement />} />
+            <Route path="/user-management" element={<AdminRoute><UserManagement /></AdminRoute>} />
           </Route>
 
           {/* 项目详情 - 带项目子布局 */}
@@ -53,6 +55,7 @@ export default function App() {
             <Route index element={<Navigate to="world-setting" replace />} />
             <Route path="world-setting" element={<WorldSetting />} />
             <Route path="world-rules" element={<WorldRules />} />
+            <Route path="setting-entries" element={<SettingEntries />} />
             <Route path="world-map" element={<WorldMap />} />
             <Route path="outline/*" element={<Outline />} />
             <Route path="characters" element={<Characters />} />
@@ -62,6 +65,7 @@ export default function App() {
             <Route path="chapters" element={<Navigate to="../chapter-analysis" replace />} />
             <Route path="chapter-analysis" element={<ChapterAnalysis />} />
             <Route path="writing-styles" element={<WritingStyles />} />
+            <Route path="prompts" element={<ProjectPrompts />} />
             <Route path="memories" element={<Memories />} />
             <Route path="knowledge" element={<ProjectKnowledge />} />
             <Route path="reference-packs" element={<Navigate to="../knowledge" replace />} />

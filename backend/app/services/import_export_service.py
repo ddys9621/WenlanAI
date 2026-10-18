@@ -28,10 +28,12 @@ from app.schemas.import_export import (
     WorldRuleExportData,
     VolumeExportData,
     ChapterOutlineExportData,
+    PromptOverrideExportData,
     ImportValidationResult,
     ImportResult
 )
 from app.logger import get_logger
+from app.services import project_prompts
 from app.services.ledger_transfer import export_ledger, import_ledger, ledger_statistics
 from app.services.volume_planning import loads_threads, loads_units
 
@@ -153,6 +155,11 @@ class ImportExportService:
         ledger = await export_ledger(db, project_id)
         logger.info(f"导出故事账本: {ledger_statistics(ledger)}")
 
+        prompt_overrides = [
+            PromptOverrideExportData(prompt_key=key, content=content)
+            for key, content in (await project_prompts.load_overrides(db, project_id)).items()
+        ]
+
         export_data = ProjectExportData(
             version=ImportExportService.SUPPORTED_VERSION,
             export_time=datetime.utcnow().isoformat(),
@@ -169,6 +176,7 @@ class ImportExportService:
             volumes=volumes,
             chapter_outlines=chapter_outlines,
             ledger=ledger,
+            prompt_overrides=prompt_overrides,
         )
 
         logger.info(f"项目导出完成: {project_id}")
@@ -548,6 +556,7 @@ class ImportExportService:
             "world_rules": len(data.get("world_rules", [])),
             "volumes": len(data.get("volumes") or []),
             "chapter_outlines": len(data.get("chapter_outlines", [])),
+            "prompt_overrides": len(data.get("prompt_overrides") or []),
             **ledger_statistics(data.get("ledger")),
         }
         if version and version != ImportExportService.SUPPORTED_VERSION and not data.get("ledger"):
@@ -707,6 +716,10 @@ class ImportExportService:
             # 导入故事账本（章节 / 角色 / 卷 / 章纲都已建好；没有账本段时只清掉章纲里指向旧伏笔的编号）
             await db.flush()
             statistics.update(await import_ledger(db, new_project.id, data.get("ledger")))
+
+            statistics["prompt_overrides"] = await ImportExportService._import_prompt_overrides(
+                new_project, data.get("prompt_overrides") or [], db
+            )
 
             # 提交事务
             await db.commit()
@@ -955,6 +968,25 @@ class ImportExportService:
             db.add(style)
             count += 1
 
+        return count
+
+    @staticmethod
+    async def _import_prompt_overrides(project: Project, overrides_data: List[Dict], db: AsyncSession) -> int:
+        """导入自定义提示词：已下线的条目、变量写错的跳过（跟随系统默认），不让整个导入失败。"""
+        count = 0
+        for item in overrides_data:
+            key = str(item.get("prompt_key") or "")
+            content = str(item.get("content") or "").strip()
+            try:
+                errors = project_prompts.validate(key, content)
+            except KeyError:
+                logger.warning(f"导入自定义提示词：跳过已下线的条目 {key}")
+                continue
+            if errors:
+                logger.warning(f"导入自定义提示词：跳过 {key}（{'；'.join(errors)}）")
+                continue
+            if await project_prompts.save_override(db, project, key, content) is not None:
+                count += 1
         return count
 
     @staticmethod

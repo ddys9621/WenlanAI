@@ -34,6 +34,29 @@ interface ApplyTarget {
   original_text: string | null
 }
 
+const AUTO_ANALYZE_KEY = 'wenlan-candidate-auto-analyze'
+
+type StorageLike = Pick<Storage, 'getItem' | 'setItem'>
+
+const browserStorage = (): StorageLike | null => (typeof localStorage === 'undefined' ? null : localStorage)
+
+/** 候选稿面板「采用后自动分析本章」：记住上次的勾选（本机） */
+export function loadAutoAnalyze(storage: StorageLike | null = browserStorage()): boolean {
+  try {
+    return storage?.getItem(AUTO_ANALYZE_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+export function saveAutoAnalyze(value: boolean, storage: StorageLike | null = browserStorage()): void {
+  try {
+    storage?.setItem(AUTO_ANALYZE_KEY, value ? '1' : '0')
+  } catch {
+    /* 写不进 localStorage：仅本次生效 */
+  }
+}
+
 /** 采用后正文会变成什么样；选段对不上（采用会被拒绝）返回 null */
 export function candidateApplyPreview(content: string, candidate: ApplyTarget, text: string): string | null {
   if (candidate.mode === 'append') {

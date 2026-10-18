@@ -12,6 +12,7 @@ import { AIJobError, runAIJob, useAIJob, useAIJobsStore, useRunningAIJobs, waitF
 import type { SSEClientOptions } from '@/utils/sseClient';
 import { countBatchTargets, describeBatchEvent, selectBatchChapters } from '@/utils/chapterBatch';
 import type { Chapter, ChapterBatchEvent, ChapterBatchResult, ChapterGenerateRequest } from '@/types';
+import type { AIJobState } from '@/types/ai_job';
 
 export interface StreamState {
   chapterId: string;
@@ -37,10 +38,8 @@ interface BatchStatusState {
 
 type WriteJobKind = 'chapter_generate' | 'chapter_regenerate';
 
-/** 页面自带面板承担正文任务；横幅只兜底其它任务，面板隐藏（后台运行）时才把正文任务也放进横幅 */
-export const WRITE_JOB_KINDS = ['chapter_generate', 'chapter_regenerate'];
-/** chapter_batch = 服务端批量（页面有批量进度条；横幅兜底展示，刷新 / 切页回来也能看到） */
-export const OTHER_JOB_KINDS = ['chapter_analyze', 'chapter_imitate', 'chapter_batch'];
+/** 页面自带面板承担正文任务；后台运行 / 看别的章时只在章节目录（转圈）和顶栏「AI 任务」托盘里显示 */
+const WRITE_JOB_KINDS = ['chapter_generate', 'chapter_regenerate'];
 
 const abortError = () => new DOMException('Request aborted', 'AbortError');
 
@@ -206,7 +205,7 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
 
   const closeStreamPanel = useCallback(() => resetStreamView(), [resetStreamView]);
 
-  /** 后台运行：收起面板，任务继续；顶部横幅 / 托盘可再打开 */
+  /** 后台运行：收起面板，任务继续；顶栏托盘可再打开 */
   const hideStreamPanel = useCallback(() => setPanelHidden(true), []);
 
   const cancelBatch = useCallback(() => {
@@ -407,6 +406,18 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
     }
   }, [projectId, chapters, confirmUnanalyzedPrevious, refreshChapters]);
 
+  const settleAnalysis = useCallback((chapter: Pick<Chapter, 'id' | 'title'>) => (job: AIJobState) => {
+    if (job.status === 'done') {
+      const warning = (job.result as { warning?: string | null } | null)?.warning;
+      if (warning) toast.warning(`「${chapter.title}」分析完成，但${warning}`);
+      else toast.success(`「${chapter.title}」分析完成`);
+    } else if (job.status === 'error' && useAIJobsStore.getState().openJobId !== job.id) {
+      toast.error(job.error || `「${chapter.title}」分析失败`);
+    }
+    // 失败也刷新：目录里的分析状态点要变成「分析失败」，侧栏显示原因（之前的结果仍保留）
+    void refreshChapters().then(() => onWrittenRef.current?.(chapter.id));
+  }, [refreshChapters]);
+
   /** 触发分析（通用后台任务 + 弹窗：阶段 / 模型进度可见，可后台运行） */
   const handleAnalyze = useCallback(async (chapter: Chapter) => {
     if (!projectId) return;
@@ -417,20 +428,26 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
         projectId,
         meta: { chapter_id: chapter.id },
         connect: (options) => chapterApi.analyzeChapterStream(chapter.id, options),
-        onSettled: (job) => {
-          if (job.status === 'done') {
-            const warning = (job.result as { warning?: string | null } | null)?.warning;
-            if (warning) toast.warning(`「${chapter.title}」分析完成，但${warning}`);
-            else toast.success(`「${chapter.title}」分析完成`);
-          }
-          // 失败也刷新：目录里的分析状态点要变成「分析失败」，侧栏显示原因（之前的结果仍保留）
-          void refreshChapters().then(() => onWrittenRef.current?.(chapter.id));
-        },
+        onSettled: settleAnalysis(chapter),
       });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '分析启动失败');
     }
-  }, [projectId, refreshChapters]);
+  }, [projectId, settleAnalysis]);
+
+  /** 接上服务端已排上的分析（采用候选稿时勾了「采用后自动分析」）：进托盘、目录转圈、侧栏出进度，结束同手动分析 */
+  const followAnalysis = useCallback(async (chapter: Pick<Chapter, 'id' | 'title'>, jobId: string) => {
+    const store = useAIJobsStore.getState();
+    try {
+      await store.attach(jobId);
+    } catch {
+      toast.error('分析已在后台开始，但没能接上进度；稍后刷新页面查看结果');
+      return;
+    }
+    store.onSettled(jobId, settleAnalysis(chapter));
+  }, [settleAnalysis]);
+
+  const analysisJobOf = (chapterId: string) => runningAnalyses.find((j) => j.meta.chapter_id === chapterId);
 
   const analyzingChapterIds = new Set<string>([
     ...analyzingIds,
@@ -451,6 +468,7 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
     streamBusy,
     isGenerating: (chapterId: string) => streamState?.chapterId === chapterId && !streamDone,
     analyzingChapterIds,
+    analysisJobOf,
     startStream,
     startBatch,
     cancelStream,
@@ -458,6 +476,7 @@ export function useChapterWriteJobs({ projectId, chapters, refreshChapters, onCh
     closeStreamPanel,
     hideStreamPanel,
     handleAnalyze,
+    followAnalysis,
     confirmUnanalyzedPrevious,
   };
 }

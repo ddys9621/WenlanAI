@@ -21,7 +21,7 @@ from app.mcp.server_config import ServerConfigError, parse_server_config
 from app.services.mcp_plugin_service import upsert_plugin
 from app.services.mcp_test_service import mcp_test_service
 from app.logger import get_logger
-from app.api.deps import require_login
+from app.api.deps import ensure_allowed_url, require_login
 
 logger = get_logger(__name__)
 
@@ -75,6 +75,7 @@ async def create_plugin(
     
     if existing:
         raise HTTPException(status_code=400, detail=f"插件名已存在: {data.plugin_name}")
+    ensure_allowed_url(user, data.server_url)
     
     # 创建插件数据
     plugin_data = data.model_dump()
@@ -150,6 +151,7 @@ async def create_plugin_simple(
             plugin_data = parse_server_config(plugin_name, server_config)
         except ServerConfigError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        ensure_allowed_url(user, plugin_data.get("server_url"))
         
         plugin = await upsert_plugin(
             db, user.user_id, plugin_data,
@@ -213,6 +215,7 @@ async def update_plugin(
     
     # 更新字段
     update_data = data.model_dump(exclude_unset=True)
+    ensure_allowed_url(user, update_data.get("server_url"))
     for key, value in update_data.items():
         setattr(plugin, key, value)
     

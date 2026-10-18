@@ -1,17 +1,17 @@
 import { useState, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { Plus, Sparkles, Pencil, Trash2, X, Loader2, Building, Users, UserPlus, UserMinus } from 'lucide-react';
+import { Plus, Sparkles, Pencil, Trash2, X, Loader2, Building, Users, UserPlus, UserMinus, WandSparkles } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 import { useStore } from '@/store';
 import { useCharacterSync } from '@/store/hooks';
 import { useAIJobsStore, useRunningAIJobs } from '@/store/aiJobsStore';
 import { characterApi, organizationApi } from '@/services/api';
-import { AIJobBanner } from '@/components/ai-job/AIJobBanner';
 import { MCPSelector } from '@/components/MCPSelector';
 import { KbReferenceHint } from '@/components/knowledge/KbReferenceHint';
 import { useProjectKbLink } from '@/hooks/useProjectKbLink';
-import type { Character, GenerateCharacterRequest } from '@/types';
+import type { Character, CharacterBatchResult, GenerateCharacterRequest } from '@/types';
+import { CAST_BATCH_JOB_KIND, CAST_BATCH_LIMITS, castBatchTitle, clampCastCount } from '@/utils/castBatch';
 import { ROLE_OPTIONS, getRoleDisplayName, normalizeRoleType } from '@/utils/characterRole';
 
 interface FormData {
@@ -52,6 +52,10 @@ export default function Characters() {
   const [showGenOrgModal, setShowGenOrgModal] = useState(false);
   const [genOrgForm, setGenOrgForm] = useState({ name: '', requirements: '' });
   const generatingOrg = useRunningAIJobs(currentProject?.id, ['organization_generate']).length > 0;
+  const [showBatchModal, setShowBatchModal] = useState(false);
+  const [batchForm, setBatchForm] = useState({ characters: 3, organizations: 1, requirements: '' });
+  const batchTotal = batchForm.characters + batchForm.organizations;
+  const generatingBatch = useRunningAIJobs(currentProject?.id, [CAST_BATCH_JOB_KIND]).length > 0;
 
   const filteredCharacters = characters.filter(c => {
     if (filter === 'character') return !c.is_organization;
@@ -259,12 +263,45 @@ export default function Characters() {
     }
   };
 
+  /** AI 批量生成角色与组织：通用后台任务，先组织后人物、每批落库（弹窗逐批看进度；停止 / 失败时已完成的批次保留） */
+  const handleBatchGenerate = async () => {
+    if (!currentProject || batchTotal < 1) return;
+    const projectId = currentProject.id;
+    const { characters: characterCount, organizations: organizationCount } = batchForm;
+    setShowBatchModal(false);
+    try {
+      await startJob<CharacterBatchResult>({
+        kind: CAST_BATCH_JOB_KIND,
+        title: castBatchTitle(characterCount, organizationCount),
+        projectId,
+        meta: { character_count: characterCount, organization_count: organizationCount },
+        connect: (options) => characterApi.batchGenerateStream({
+          project_id: projectId,
+          character_count: characterCount,
+          organization_count: organizationCount,
+          requirements: batchForm.requirements.trim() || undefined,
+          enable_mcp: enableMcp,
+          selected_plugins: selectedPlugins,
+        }, options),
+        onSettled: (job) => {
+          // 停止 / 失败时前面的批次也已落库，都要刷新；任务结束时已切到别的项目就不刷，免得把这个项目的角色写进别的项目的列表
+          if (useStore.getState().currentProject?.id === projectId) void refreshCharacters(projectId);
+          if (job.status !== 'done') return;
+          toast.success((job.result as CharacterBatchResult | null)?.message || 'AI 批量生成完成');
+          setBatchForm((f) => ({ ...f, requirements: '' }));
+        },
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'AI 批量生成失败');
+    }
+  };
+
   const EmptyIcon = filter === 'organization' ? Building : Users;
   const emptyTitle = filter === 'organization' ? '还没有组织' : filter === 'character' ? '还没有人物' : '还没有角色与组织';
   const emptyHint =
     filter === 'organization'
-      ? '点击右上角「添加组织」手动创建，或用「AI 生成组织」让 AI 根据世界观设计一个势力。'
-      : '点击右上角「添加角色」手动创建，或用「AI 生成角色」让 AI 根据项目设定生成人物。';
+      ? '点击右上角「添加组织」手动创建，或用「AI 生成组织」「AI 批量生成」让 AI 根据世界观设计势力。'
+      : '点击右上角「添加角色」手动创建，或用「AI 生成角色」「AI 批量生成」让 AI 根据项目设定生成人物。';
 
   return (
     <div className="animate-fade-in space-y-6">
@@ -276,6 +313,10 @@ export default function Characters() {
           </p>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2.5">
+          <button onClick={() => setShowBatchModal(true)} disabled={generatingBatch} className="hh-btn-secondary">
+            {generatingBatch ? <Loader2 className="h-4 w-4 animate-spin" /> : <WandSparkles className="h-4 w-4 text-brand" />}
+            AI 批量生成
+          </button>
           <button onClick={() => setShowGenOrgModal(true)} disabled={generatingOrg} className="hh-btn-ghost">
             {generatingOrg ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
             AI 生成组织
@@ -294,9 +335,6 @@ export default function Characters() {
           </button>
         </div>
       </section>
-
-      {/* 后台 AI 任务横幅：通用弹窗最小化后在这里看进度 / 重新打开 / 停止 */}
-      <AIJobBanner projectId={currentProject?.id} />
 
       <div className="inline-flex border border-surface-border bg-white/60 p-1">
         {([
@@ -511,6 +549,84 @@ export default function Characters() {
               <button onClick={handleGenerateOrg} disabled={generatingOrg} className="hh-btn-primary">
                 {generatingOrg ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
                 {generatingOrg ? '生成中...' : '开始生成'}
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+
+      {showBatchModal && createPortal(
+        <div className="hh-modal-mask">
+          <div className="hh-modal max-w-[560px]" role="dialog" aria-modal="true">
+            <div className="hh-modal-head">
+              <div className="min-w-0">
+                <p className="hh-eyebrow">AI 生成</p>
+                <h2 className="mt-2 text-xl font-semibold tracking-tight text-content">AI 批量生成角色与组织</h2>
+                <p className="mt-1 text-sm leading-6 text-content-secondary">
+                  AI 会参考世界观、世界规则和已有的 {charCount} 个人物 · {orgCount} 个组织：新角色不和已有的重名，会和已有人物建立关系、加入已有组织。
+                </p>
+              </div>
+              <button onClick={() => setShowBatchModal(false)} className="hh-icon-btn-plain -mr-2 -mt-1" aria-label="关闭">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="hh-modal-body space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="hh-label">人物数量（0-{CAST_BATCH_LIMITS.characters}）</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={CAST_BATCH_LIMITS.characters}
+                    value={batchForm.characters}
+                    onChange={e => setBatchForm(p => ({ ...p, characters: clampCastCount(e.target.value, CAST_BATCH_LIMITS.characters) }))}
+                    className="hh-field"
+                  />
+                </div>
+                <div>
+                  <label className="hh-label">组织数量（0-{CAST_BATCH_LIMITS.organizations}）</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={CAST_BATCH_LIMITS.organizations}
+                    value={batchForm.organizations}
+                    onChange={e => setBatchForm(p => ({ ...p, organizations: clampCastCount(e.target.value, CAST_BATCH_LIMITS.organizations) }))}
+                    className="hh-field"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="hh-label">要求（可选）</label>
+                <textarea
+                  value={batchForm.requirements}
+                  onChange={e => setBatchForm(p => ({ ...p, requirements: e.target.value }))}
+                  placeholder="如：补几位主角所在宗门的师兄弟，再加一个和宗门敌对的魔道势力"
+                  rows={3}
+                  className="hh-textarea"
+                />
+              </div>
+              <p className="text-xs leading-5 text-content-tertiary">
+                先生成组织再生成人物，每批最多 3 个，生成一批存一批；中途停止或失败时，已完成的批次会保留。生成在后台进行，弹窗可以最小化，顶栏「AI 任务」里随时查看或停止。
+              </p>
+              <MCPSelector
+                value={{ enable: enableMcp, selected: selectedPlugins }}
+                onChange={({ enable, selected }) => {
+                  setEnableMcp(enable);
+                  setSelectedPlugins(selected);
+                }}
+              />
+              {currentProject?.id && (
+                <KbReferenceHint projectId={currentProject.id} link={kbLink} />
+              )}
+            </div>
+            <div className="hh-modal-foot">
+              <button onClick={() => setShowBatchModal(false)} className="hh-btn-ghost">
+                取消
+              </button>
+              <button onClick={handleBatchGenerate} disabled={generatingBatch || batchTotal < 1} className="hh-btn-primary">
+                {generatingBatch ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                {generatingBatch ? '生成中...' : `开始生成（共 ${batchTotal} 个）`}
               </button>
             </div>
           </div>

@@ -13,6 +13,7 @@ import re
 from typing import Any, Optional
 
 from app.utils.json_cleaner import safe_parse_json
+from app.utils.prompt_template import render_vars
 
 CHAPTERS_PER_VOLUME = 40
 MAX_VOLUMES = 40
@@ -147,18 +148,38 @@ def position_guidance(index: int, size: int, next_title: Optional[str]) -> str:
 
 # ---------------- 提示词 ----------------
 
-SKELETON_TASK = """# 任务：分卷（把总纲扩写成卷纲骨架）
+SKELETON_GUIDE = "\n".join((
+    f"- {STORY_RULE}",
+    "- 每卷是一个完整的故事阶段：换一个新的局面（新的舞台、对手层级或目标之一），赌注逐卷抬高，人物关系有看得见的推进",
+    "- 卷末要有这一卷最大的高潮和一个让人想看下一卷的钩子；最后一卷收束全书主线",
+    f"- {ABILITY_RULE}",
+    f"- {NAME_RULE}",
+    f"- {UPSTREAM_RULE}",
+))
+
+DETAIL_GUIDE = "\n".join((
+    f"- 剧情单元 = 一件完整的事：写清起因 → 经过（阻碍、选择、代价）→ 结果，以及结果怎样引出下一件事；{STORY_RULE}",
+    "- 单元章数按事件大小定：大事长、小事短，不要切成等长的块；章号必须连续覆盖第 {start}-{end} 章",
+    "- 节奏要有起伏：紧张的单元之后可以安排一段缓和（日常、感情、群像、收获整理），本卷最大的高潮放在卷末",
+    "- threads 写本卷要推进的感情线、支线、伏笔，每条写清本卷推进到哪一步；不必每个单元都出现",
+    f"- {ABILITY_RULE}",
+    f"- {NAME_RULE}",
+    f"- {UPSTREAM_RULE}",
+))
+
+CHAPTERS_GUIDE = "\n".join((
+    "- 按单元故事里实际发生的事件和场景顺序分章；每章都要让局面、关系或信息至少一项发生变化，不要原地打转，也不要为了凑章数把一句话的小事拆成一章",
+    "- plot_points 用自然段写清：谁在什么处境下做了什么、别人怎样回应、结果如何（200-400 字）",
+    "- key_events 3-6 条，按发生顺序；最后一条是章末落点，通常留下一个未闭合的问题或新的变化；单元最后一章收束这件事并引出下一件事",
+    f"- {ABILITY_RULE}",
+))
+
+SKELETON_HEAD = """# 任务：分卷（把总纲扩写成卷纲骨架）
 请为第 {start}-{end} 章规划 {count} 卷左右（全书共 {total} 章）。卷数和每卷章数是参考，按故事阶段的实际大小来分。
 {fixed}
-# 写法
-- {story_rule}
-- 每卷是一个完整的故事阶段：换一个新的局面（新的舞台、对手层级或目标之一），赌注逐卷抬高，人物关系有看得见的推进
-- 卷末要有这一卷最大的高潮和一个让人想看下一卷的钩子；最后一卷收束全书主线
-- {ability_rule}
-- {name_rule}
-- {upstream_rule}
+"""
 
-# 输出（纯 JSON 数组，不要 markdown）
+SKELETON_OUTPUT = """# 输出（纯 JSON 数组，不要 markdown）
 [
   {{
     "title": "卷名（4-12 字）",
@@ -171,19 +192,12 @@ SKELETON_TASK = """# 任务：分卷（把总纲扩写成卷纲骨架）
   }}
 ]"""
 
-DETAIL_TASK = """# 任务：细化第 {number} 卷《{title}》的卷纲（第 {start}-{end} 章）
+DETAIL_HEAD = """# 任务：细化第 {number} 卷《{title}》的卷纲（第 {start}-{end} 章）
 把本卷故事拆成若干剧情单元，并编排本卷要推进的线索。
 
-# 写法
-- 剧情单元 = 一件完整的事：写清起因 → 经过（阻碍、选择、代价）→ 结果，以及结果怎样引出下一件事；{story_rule}
-- 单元章数按事件大小定：大事长、小事短，不要切成等长的块；章号必须连续覆盖第 {start}-{end} 章
-- 节奏要有起伏：紧张的单元之后可以安排一段缓和（日常、感情、群像、收获整理），本卷最大的高潮放在卷末
-- threads 写本卷要推进的感情线、支线、伏笔，每条写清本卷推进到哪一步；不必每个单元都出现
-- {ability_rule}
-- {name_rule}
-- {upstream_rule}
+"""
 
-# 输出（纯 JSON 对象，不要 markdown）
+DETAIL_OUTPUT = """# 输出（纯 JSON 对象，不要 markdown）
 {{
   "units": [
     {{"title": "单元名（4-12 字）", "chapter_start": {start}, "chapter_end": {sample_end}, "story": "这件事的经过（自然段 150-400 字）", "turn": "单元结束时局面怎样变化（30-80 字）"}}
@@ -191,22 +205,19 @@ DETAIL_TASK = """# 任务：细化第 {number} 卷《{title}》的卷纲（第 {
   "threads": ["感情线：……本卷推进到……", "伏笔：……"]
 }}"""
 
-CHAPTERS_TASK = """# 任务：把剧情单元 {index}《{title}》展开为第 {start}-{end} 章的章纲（共 {count} 章）
+CHAPTERS_HEAD = """# 任务：把剧情单元 {index}《{title}》展开为第 {start}-{end} 章的章纲（共 {count} 章）
 单元全程是第 {unit_start}-{unit_end} 章，本次只写第 {start}-{end} 章。
 
-# 写法
-- 按单元故事里实际发生的事件和场景顺序分章；每章都要让局面、关系或信息至少一项发生变化，不要原地打转，也不要为了凑章数把一句话的小事拆成一章
-- plot_points 用自然段写清：谁在什么处境下做了什么、别人怎样回应、结果如何（200-400 字）
-- key_events 3-6 条，按发生顺序；最后一条是章末落点，通常留下一个未闭合的问题或新的变化；单元最后一章收束这件事并引出下一件事
-- {ability_rule}
-- {pov_rule}
+"""
+
+CHAPTERS_RULES = """- {pov_rule}
 - 人名只能使用【本书角色】里的名字；characters_involved / pov 不得出现新名字；有【世界地图】时 scene 尽量用图上的地点名
 - 章节契约：entry_state 承接上一章的 exit_state（本次第一章承接【上一章结尾】）；exit_state = 章末落点完成后停在哪；
   forbidden 1-3 条本章绝不能发生 / 揭晓的事（通常是后面章节才发生的关键事件）
 - narrative_tasks：resolve = 本章回收的旧伏笔（promise_id 填【当前未回收的伏笔】里的编号如 P3，how 写怎么回收）；advance = 顺带推进的旧伏笔；
-  plant = 新埋的伏笔（payoff_after = 计划多少章后回收）；没有合适的就留空
+  plant = 新埋的伏笔（payoff_after = 计划多少章后回收）；没有合适的就留空"""
 
-# 输出（纯 JSON 数组，{count} 个对象，chapter_number 从 {start} 到 {end}，不要 markdown）
+CHAPTERS_OUTPUT = """# 输出（纯 JSON 数组，{count} 个对象，chapter_number 从 {start} 到 {end}，不要 markdown）
 [
   {{
     "chapter_number": {start},
@@ -225,28 +236,36 @@ CHAPTERS_TASK = """# 任务：把剧情单元 {index}《{title}》展开为第 {
 ]"""
 
 
-def _common() -> dict[str, str]:
-    return {"story_rule": STORY_RULE, "ability_rule": ABILITY_RULE, "name_rule": NAME_RULE, "upstream_rule": UPSTREAM_RULE}
+def _with_guide(head: str, guide: str, output: str) -> str:
+    guide = guide.strip()
+    return f"{head}# 写法\n{guide}\n\n{output}" if guide else f"{head}{output}"
 
 
-def render_skeleton_task(*, total_chapters: int, start_chapter: int, volume_count: int, fixed_text: str) -> str:
+def render_skeleton_task(
+    *, total_chapters: int, start_chapter: int, volume_count: int, fixed_text: str, guide: Optional[str] = None,
+) -> str:
     fixed = f"\n# 已确认、不要改动的前几卷\n{fixed_text}\n" if fixed_text else ""
-    return SKELETON_TASK.format(start=start_chapter, end=total_chapters, total=total_chapters, count=volume_count,
-                                fixed=fixed, **_common())
+    head = SKELETON_HEAD.format(start=start_chapter, end=total_chapters, total=total_chapters, count=volume_count,
+                                fixed=fixed)
+    return _with_guide(head, SKELETON_GUIDE if guide is None else guide, SKELETON_OUTPUT.format(start=start_chapter))
 
 
-def render_detail_task(volume: dict) -> str:
+def render_detail_task(volume: dict, *, guide: Optional[str] = None) -> str:
     start, end = int(volume["chapter_start"]), int(volume["chapter_end"])
-    return DETAIL_TASK.format(number=volume.get("volume_number"), title=volume.get("title") or "", start=start, end=end,
-                              sample_end=min(end, start + 7), **_common())
+    head = DETAIL_HEAD.format(number=volume.get("volume_number"), title=volume.get("title") or "", start=start, end=end)
+    text = render_vars(DETAIL_GUIDE if guide is None else guide, {"start": start, "end": end})
+    return _with_guide(head, text, DETAIL_OUTPUT.format(start=start, sample_end=min(end, start + 7)))
 
 
-def render_chapters_task(unit: dict, start: int, end: int, pov_rule: str, default_words: int = 3000) -> str:
-    return CHAPTERS_TASK.format(
-        index=unit.get("index"), title=unit.get("title") or "", start=start, end=end, count=end - start + 1,
-        unit_start=unit.get("chapter_start"), unit_end=unit.get("chapter_end"), pov_rule=pov_rule, words=default_words,
-        ability_rule=ABILITY_RULE,
-    )
+def render_chapters_task(
+    unit: dict, start: int, end: int, pov_rule: str, default_words: int = 3000, *, guide: Optional[str] = None,
+) -> str:
+    head = CHAPTERS_HEAD.format(index=unit.get("index"), title=unit.get("title") or "", start=start, end=end,
+                                count=end - start + 1, unit_start=unit.get("chapter_start"), unit_end=unit.get("chapter_end"))
+    text = (CHAPTERS_GUIDE if guide is None else guide).strip()
+    rules = CHAPTERS_RULES.format(pov_rule=pov_rule)
+    output = CHAPTERS_OUTPUT.format(count=end - start + 1, start=start, end=end, words=default_words)
+    return f"{head}# 写法\n{text}\n{rules}\n\n{output}" if text else f"{head}# 写法\n{rules}\n\n{output}"
 
 
 # ---------------- 解析 ----------------

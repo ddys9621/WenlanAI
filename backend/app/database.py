@@ -18,8 +18,8 @@ logger = get_logger(__name__)
 # database -> app.models -> model -> database 的循环导入。
 from app.models.analysis_task import AnalysisTask  # noqa: F401
 from app.models.assistant import (  # noqa: F401
-    AssistantContextSetting, AssistantFieldCandidate, AssistantMessage, AssistantRun, AssistantSession,
-    AssistantSessionSummary, AssistantTeamSetting,
+    AssistantContextSetting, AssistantEntityCandidate, AssistantFieldCandidate, AssistantMessage, AssistantRun,
+    AssistantSession, AssistantSessionSummary, AssistantTeamSetting,
 )
 from app.models.book_dissect_task import BookDissectTask  # noqa: F401
 from app.models.book_dissect_chapter_fact import BookDissectChapterFact  # noqa: F401
@@ -44,6 +44,7 @@ from app.models.volume import Volume  # noqa: F401
 from app.models.project import Project  # noqa: F401
 from app.models.project_default_style import ProjectDefaultStyle  # noqa: F401
 from app.models.project_ai_preference import ProjectAIPreference  # noqa: F401
+from app.models.project_prompt import ProjectPromptOverride  # noqa: F401
 from app.models.reference_pack import ReferencePack  # noqa: F401
 from app.models.relationship import (  # noqa: F401
     CharacterRelationship,
@@ -53,6 +54,7 @@ from app.models.relationship import (  # noqa: F401
 )
 from app.models.relationship_event import RelationshipEvent  # noqa: F401
 from app.models.settings import Settings  # noqa: F401
+from app.models.setting_entry import SettingEntry  # noqa: F401
 from app.models.story_outline import StoryOutline  # noqa: F401
 from app.models.system_setting import SystemSetting  # noqa: F401
 from app.models.timeline_event import TimelineEvent  # noqa: F401

@@ -20,6 +20,8 @@ import {
   Library,
   ChevronRight,
   Map as MapIcon,
+  ScrollText,
+  Shapes,
   Sparkles,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
@@ -48,6 +50,7 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
     items: [
       { label: '世界设定', icon: Globe, path: 'world-setting' },
       { label: '世界规则', icon: Shield, path: 'world-rules' },
+      { label: '设定条目', icon: Shapes, path: 'setting-entries' },
       { label: '世界地图', icon: MapIcon, path: 'world-map' },
       { label: '角色与组织', icon: Users, path: 'characters' },
       { label: '关系管理', icon: GitBranch, path: 'relationships' },
@@ -64,6 +67,7 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
     items: [
       { label: '章节写作', icon: BookOpen, path: 'chapter-analysis' },
       { label: '写作风格', icon: Palette, path: 'writing-styles' },
+      { label: '提示词', icon: ScrollText, path: 'prompts' },
       { label: '仿写参考', icon: Library, path: 'knowledge' },
       { label: '故事账本', icon: Brain, path: 'memories' },
     ],

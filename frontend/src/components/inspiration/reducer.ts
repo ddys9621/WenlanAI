@@ -130,6 +130,7 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
         // 上一次创建失败后 progress 会停在中途，不清零会挡住重新创建的自动启动
         progress: 0,
         progressMessage: '',
+        generationError: null,
       };
 
     // ---- 重新开始 ----
@@ -139,6 +140,10 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
     // ---- API 状态 ----
     case 'API_LOADING':
       return { ...state, currentStep: action.payload, loading: true };
+
+    // 本次请求作废（如智能补全失败）：只停止加载，步骤与已有候选原样保留
+    case 'API_IDLE':
+      return { ...state, loading: false };
 
     case 'API_SUCCESS':
       return {
@@ -203,6 +208,7 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
         progress: 0,
         progressMessage: '开始创建项目...',
         loading: true,
+        generationError: null,
         generationMeta: {
           startedAt: Date.now(),
           lastUpdateAt: Date.now(),
@@ -285,6 +291,7 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
         currentStep: 'confirm',
         loading: false,
         progressMessage: action.payload,
+        generationError: action.payload,
         generationMeta: {
           startedAt: null,
           lastUpdateAt: null,

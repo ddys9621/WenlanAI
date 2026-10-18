@@ -6,7 +6,7 @@ import inspect
 import re
 from typing import Any, Dict, Iterable, Optional
 
-from sqlalchemy import and_, delete, or_, select, update
+from sqlalchemy import and_, delete, literal_column, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.logger import get_logger
@@ -706,7 +706,7 @@ class NarrativeStateService:
 
     @staticmethod
     def _prefer_involved(rows: list, involved_ids: Optional[set[str]], limit: int) -> list:
-        """和本章人物有关的排前面（同等按章号倒序），再用其余近事补满。"""
+        """和本章人物有关的先入选（同等按章号倒序），再用其余近事补满；入选的按原查询顺序返回（同章不被拆开）。"""
         if not involved_ids:
             return rows[:limit]
 
@@ -716,7 +716,13 @@ class NarrativeStateService:
 
         hits = [r for r in rows if touches(r)]
         rest = [r for r in rows if not touches(r)]
-        return (hits + rest)[:limit]
+        picked = {id(r) for r in (hits + rest)[:limit]}
+        return [r for r in rows if id(r) in picked]
+
+    @staticmethod
+    def _chronological(items: Iterable[Any], attr: str = "chapter_number") -> list:
+        """按章序（旧 → 新）列出；同章保持查询里的先后。"""
+        return sorted(items, key=lambda item: getattr(item, attr, None) or 0)
 
     async def _get_recent_causal_links(
         self,
@@ -761,7 +767,9 @@ class NarrativeStateService:
                 )
             )
 
-        result = await db.execute(query.order_by(RelationshipEvent.chapter_number.desc()).limit(8))
+        result = await db.execute(
+            query.order_by(RelationshipEvent.chapter_number.desc(), literal_column("relationship_events.rowid")).limit(8)
+        )
         return list(result.scalars().all())
 
     async def _get_recent_timeline_events(
@@ -777,7 +785,7 @@ class NarrativeStateService:
                 TimelineEvent.project_id == project_id,
                 TimelineEvent.chapter_number < current_chapter,
             )
-            .order_by(TimelineEvent.chapter_number.desc())
+            .order_by(TimelineEvent.chapter_number.desc(), literal_column("timeline_events.rowid"))
             .limit(self.RECENT_POOL if involved_ids else 8)
         )
         return self._prefer_involved(list(result.scalars().all()), involved_ids, 8)
@@ -806,7 +814,7 @@ class NarrativeStateService:
         return list(info_result.scalars().all())
 
     def _format_causal_links(self, items: Iterable[ChapterCausalLink]) -> str:
-        items = list(items)
+        items = self._chronological(items)
         if not items:
             return "【因果链账本】\n暂无可用因果链\n"
 
@@ -856,7 +864,7 @@ class NarrativeStateService:
     def _format_relationship_events(
         self, items: Iterable[RelationshipEvent], names: Optional[dict[str, str]] = None,
     ) -> str:
-        items = list(items)
+        items = self._chronological(items)
         if not items:
             return "【关系动态】\n暂无最近关系变化\n"
 
@@ -877,7 +885,7 @@ class NarrativeStateService:
         return "\n".join(lines) + "\n"
 
     def _format_timeline_events(self, items: Iterable[TimelineEvent]) -> str:
-        items = list(items)
+        items = self._chronological(items)
         if not items:
             return "【全局时间轴】\n暂无最近时间轴事件\n"
 
@@ -891,7 +899,7 @@ class NarrativeStateService:
         return "\n".join(lines) + "\n"
 
     def _format_known_info(self, pov_character_name: Optional[str], items: Iterable[CharacterKnownInfo]) -> str:
-        items = list(items)
+        items = self._chronological(items, "learned_in_chapter")
         if not pov_character_name:
             return "【视角信息边界】\n本章未指定 POV，默认按公共信息与前文共识处理\n"
         if not items:

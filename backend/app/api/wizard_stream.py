@@ -20,10 +20,14 @@ from app.models.writing_style import WritingStyle
 from app.models.project_default_style import ProjectDefaultStyle
 from app.services.knowledge.kb_context import traced_kb_context
 from app.services.knowledge.kb_links import set_project_link
+from app.services import outline_review_service as outline_review
 from app.services.ai_service import AIService
+from app.services.generation_trace import begin_stage
 from app.services.platform_presets import normalize_longform_settings
+from app.services.project_prompts import load_overrides as load_prompt_overrides
 from app.services.prompt_service import prompt_service
 from app.logger import get_logger
+from app.utils.json_cleaner import clean_and_parse_json
 from app.utils.prompt_safety import quote_untrusted
 from app.utils.role_type import normalize_role_type, is_protagonist_role
 from app.utils.sse_response import SSEResponse, create_sse_response
@@ -358,20 +362,10 @@ async def world_building_generator(
                 yield await SSEResponse.send_progress("✅ 二次修复成功", 84)
             except Exception as repair_err:
                 logger.error(f"[世界观生成] LLM 二次格式修复仍失败: {repair_err}")
-                # 最终兜底：保留原始内容预览，避免用户重试时完全丢失生成结果
-                preview = (accumulated_text or "").strip()
-                if len(preview) > 1500:
-                    preview = preview[:1500] + "...(已截断)"
-                fallback_rules = (
-                    f"AI返回格式错误，请重试。\n\n原始内容预览：\n{preview}"
-                    if preview else "AI返回格式错误，请重试"
-                )
-                world_data = {
-                    "time_period": "AI返回格式错误，请重试",
-                    "location": "AI返回格式错误，请重试",
-                    "atmosphere": "AI返回格式错误，请重试",
-                    "rules": fallback_rules,
-                }
+                # 按失败结束、一行不写：以前把「AI返回格式错误」占位文本当成功写进项目——新建时建出设定全是占位的项目，
+                # 重新生成时覆盖作者原有的世界观（灵感模式随后还会清空并重跑下游）。原始输出仍在任务的内容日志里可查看。
+                yield await SSEResponse.send_error("AI 返回的世界观格式不正确（自动修复后仍无法解析），请重试")
+                return
         # 保存到数据库
         yield await SSEResponse.send_progress("保存到数据库...", 90)
         
@@ -1305,12 +1299,36 @@ async def _save_high_level_outline(
     return outline
 
 
+async def _save_outline_version(project_id: str, data: dict, db: AsyncSession) -> tuple[StoryOutline, int, int]:
+    """谋篇页重新生成总纲：存成新的活跃版本，旧版本保留（取消活跃，可在谋篇页切回）；
+    替换了原有总纲时把卷纲 / 章纲标「上游已改」。返回 (新总纲, 原有版本数, 标上游已改的条数)。"""
+    existing = (await db.execute(select(StoryOutline).where(StoryOutline.project_id == project_id))).scalars().all()
+    for old in existing:
+        old.is_active = False
+    outline = StoryOutline(
+        project_id=project_id,
+        title=f"故事大纲（第{len(existing) + 1}版）" if existing else "故事大纲",
+        content=json.dumps(data, ensure_ascii=False),
+        order_index=max((o.order_index or 0 for o in existing), default=0) + 1,
+        is_active=True,
+    )
+    db.add(outline)
+    stale = await outline_review.mark_project_outlines(db, project_id, "总纲已由 AI 重新生成") if existing else 0
+    return outline, len(existing), stale
+
+
 async def outline_generator(
     data: Dict[str, Any],
     db: AsyncSession,
-    user_ai_service: AIService
+    user_ai_service: AIService,
+    *,
+    as_new_version: bool = False,
 ) -> AsyncGenerator[str, None]:
-    """大纲生成流式生成器 - 生成高层故事大纲（不再生成章节）"""
+    """大纲生成流式生成器 - 生成高层故事大纲（不再生成章节）
+
+    默认（向导第 3 步）整体替换项目的总纲并推进向导进度。as_new_version=True（谋篇页「AI 生成」）：
+    存成新的活跃版本、旧版本保留，已有卷纲 / 章纲标「上游已改」，不动向导进度；模型输出解析不出来就报错，原有总纲不动。
+    """
     try:
         yield await SSEResponse.send_progress("开始生成高层故事大纲...", 5)
         
@@ -1326,6 +1344,7 @@ async def outline_generator(
         user_id = data.get("user_id")  # 从中间件注入
 
         # 获取项目信息
+        stage = begin_stage("context", "读取项目设定与角色")
         yield await SSEResponse.send_progress("加载项目信息...", 10)
         result = await db.execute(
             select(Project).where(Project.id == project_id)
@@ -1369,10 +1388,12 @@ async def outline_generator(
             f"- {char.name} ({'组织' if char.is_organization else '角色'}, {char.role_type}): {char.personality[:100] if char.personality else '暂无描述'}"
             for char in other_characters
         ])
+        stage.done(characters=len(characters), protagonists=len(protagonists))
         
         # MCP工具增强：收集大纲设计参考资料
         mcp_reference_materials = ""
         if enable_mcp and user_id:
+            stage = begin_stage("mcp", "MCP 工具检索参考资料")
             try:
                 yield await SSEResponse.send_progress("🔍 尝试使用MCP工具收集参考资料...", 18)
                 
@@ -1431,6 +1452,7 @@ async def outline_generator(
                 )
 
                 if tool_calls_made > 0:
+                    stage.done(tool_calls=tool_calls_made, raw_chars=raw_chars)
                     yield await SSEResponse.send_progress(
                         f"✅ MCP工具调用成功（{tool_calls_made}次，收集{raw_chars}字符）",
                         25
@@ -1441,10 +1463,12 @@ async def outline_generator(
                         f"⚠️ [wizard_outline] MCP强制模式下工具未触发 "
                         f"user_id={user_id} plugins={selected_plugins}"
                     )
+                    stage.skip("模型没有调用工具（可能不支持）")
                     yield await SSEResponse.send_progress("⚠️ MCP工具未触发（可能模型不支持）", 25)
                     
             except Exception as e:
                 logger.warning(f"MCP工具调用失败（降级处理）: {e}")
+                stage.skip(f"工具暂时不可用：{str(e)[:80]}")
                 yield await SSEResponse.send_progress("⚠️ MCP工具暂时不可用，使用基础模式", 25)
         
         # 准备生成高层大纲
@@ -1452,6 +1476,7 @@ async def outline_generator(
 
         # 【修改】只查询现有世界规则,不再生成(规则已在世界观阶段生成)
         from app.services.world_rule_service import world_rule_service
+        stage = begin_stage("references", "检索世界规则与仿写参考")
         yield await SSEResponse.send_progress("📋 加载世界规则...", 32)
 
         # 构建查询文本（用于智能检索世界规则）
@@ -1470,6 +1495,10 @@ async def outline_generator(
         ref_pack_block = _kb.text
         if _kb.text:
             yield await SSEResponse.send_progress(f"📚 已注入仿写参考《{_kb.source_title}》", 33)
+        if enhanced_world_rules or ref_pack_block:
+            stage.done(world_rules_chars=len(enhanced_world_rules or ""), kb=_kb.source_title or "无")
+        else:
+            stage.skip("没有详细世界规则，也没有对标书")
 
         # 合并 MCP 与拆书参考（保持 MCP 在前，拆书参考紧随其后）；整体当引用数据，其中的指令不执行
         combined_references = mcp_reference_materials or ""
@@ -1482,6 +1511,7 @@ async def outline_generator(
         combined_references = quote_untrusted(combined_references, "参考资料")
 
         # 构建高层大纲提示词（包含 MCP 参考资料、拆书参考包注入和主角信息）
+        prompt_overrides = await load_prompt_overrides(db, project.id)
         prompt = prompt_service.get_complete_outline_prompt(
             title=project.title,
             theme=project.theme or "未设定",
@@ -1497,13 +1527,16 @@ async def outline_generator(
             characters_info=characters_info or "暂无其他角色",
             protagonists_info=protagonists_info,
             requirements=requirements or "",
-            mcp_references=combined_references
+            mcp_references=combined_references,
+            genre_guide=prompt_overrides.get("genre_guide"),
+            elements=prompt_overrides.get("outline_elements"),
         )
         prompt = prompt_service.apply_project_generation_prompt(
             prompt,
             project.generation_prompt or ""
         )
         
+        stage = begin_stage("llm", "模型撰写总纲")
         yield await SSEResponse.send_progress("正在调用AI生成高层大纲...", 35)
         
         # 流式生成高层大纲
@@ -1543,31 +1576,47 @@ async def outline_generator(
             
             # 重新抛出异常，让外层异常处理器处理
             raise stream_error
+        stage.done(content_chars=len(accumulated_text))
         
         # 解析AI响应为高层大纲对象
+        stage = begin_stage("persist", "解析并保存总纲")
         yield await SSEResponse.send_progress("解析AI返回结果...", 75)
         
-        # 使用 _parse_high_level_outline 解析
-        outline_data = _parse_high_level_outline(accumulated_text)
+        if as_new_version:
+            # 谋篇页重新生成：解析不出来就报错，不能拿半截原文顶掉作者正在用的总纲
+            try:
+                outline_data = clean_and_parse_json(accumulated_text, expected_type="object", log_prefix="[总纲生成]")
+            except json.JSONDecodeError:
+                outline_data = None
+            if not isinstance(outline_data, dict) or not (outline_data.get("premise") or outline_data.get("main_plot")):
+                yield await SSEResponse.send_error("模型返回的总纲解析不出梗概和主线，原有总纲没有改动，请重试", 502)
+                return
+        else:
+            # 使用 _parse_high_level_outline 解析
+            outline_data = _parse_high_level_outline(accumulated_text)
         
         # 保存高层大纲到数据库
         yield await SSEResponse.send_progress("保存到数据库...", 85)
         
-        # 使用 _save_high_level_outline 保存
-        outline = await _save_high_level_outline(project_id, outline_data, db)
-        
-        # 更新项目向导状态
-        project.wizard_step = 3
-        project.wizard_status = "incomplete"
+        previous_versions = stale = 0
+        if as_new_version:
+            outline, previous_versions, stale = await _save_outline_version(project_id, outline_data, db)
+        else:
+            # 使用 _save_high_level_outline 保存
+            outline = await _save_high_level_outline(project_id, outline_data, db)
+            
+            # 更新项目向导状态
+            project.wizard_step = 3
+            project.wizard_status = "incomplete"
 
         await db.commit()
         await db.refresh(outline)
         await db.refresh(project)
+        stage.done(title=outline.title)
 
         logger.info(f"故事前提大纲生成完成 - 项目: {project_id}")
 
-        # 发送最终结果（下一步固定为向导步骤 4：卷纲生成，见 volumes_generator）
-        yield await SSEResponse.send_result({
+        result_data = {
             "message": "故事前提大纲生成完成",
             "outline": {
                 "id": outline.id,
@@ -1579,7 +1628,17 @@ async def outline_generator(
                 "updated_at": outline.updated_at.isoformat() if outline.updated_at else None
             },
             "total_chapters": 1,
-        })
+        }
+        if as_new_version:
+            message = f"已生成「{outline.title}」并设为活跃版本"
+            if previous_versions:
+                message += f"，原来的 {previous_versions} 个版本保留在列表里"
+            if stale:
+                message += f"；{stale} 份卷纲 / 章纲已标「上游已改」，请核对后确认"
+            result_data.update(message=message, previous_versions=previous_versions, stale=stale)
+
+        # 发送最终结果（向导：下一步固定为步骤 4 卷纲生成，见 volumes_generator）
+        yield await SSEResponse.send_result(result_data)
         
         yield await SSEResponse.send_progress("完成!", 100, "success")
         yield await SSEResponse.send_done()

@@ -2,13 +2,13 @@
  * 全局 AI 任务 store：任务注册表 + SSE 订阅所有权 + 断线重连
  *
  * 设计要点：
- * - SSE 订阅由 store 拥有而不是页面：页面卸载 / 切路由 / 关弹窗都不会断流，托盘与横幅在任何页面都能看到进度
+ * - SSE 订阅由 store 拥有而不是页面：页面卸载 / 切路由 / 关弹窗都不会断流，顶栏托盘在任何页面都能看到进度
  * - 通用事件（progress / stage / tool_call / reference / llm / content / result / done / error）归约进 AIJobState；
  *   场景级事件（partial / bridges / meta …）通过 subscribe 原样交给页面
  * - 连接层中断（刷新 / 代理掐断）≠ 任务失败：用 lastSeq 重连 /api/ai-jobs/{id}/events
  * - 托盘 × （dismiss）同时让后端移除该终态任务：否则刷新后 syncFromServer 会把保留期内的它同步回来
  * - 监听者 / 定时器不放进 zustand state（避免无意义的重渲染）
- * - 横幅 / 托盘 / 页面列表通过摘要选择器订阅（AIJobSummary + 判等），正文 content 事件不会让它们重渲染
+ * - 托盘 / 页面列表通过摘要选择器订阅（AIJobSummary + 判等），正文 content 事件不会让它们重渲染
  */
 import { useMemo, useRef, useSyncExternalStore } from 'react';
 import { toast } from 'sonner';
@@ -360,7 +360,7 @@ function useSummaries(selector: (state: JobsState) => AIJobSummary[]): AIJobSumm
   return useSyncExternalStore(useAIJobsStore.subscribe, getSnapshot, getSnapshot);
 }
 
-/** 某项目正在运行的任务摘要（横幅 / 页面列表用）；kinds 可选过滤。只在摘要变化时触发重渲染 */
+/** 某项目正在运行的任务摘要（页面列表 / 按钮状态用）；kinds 可选过滤。只在摘要变化时触发重渲染 */
 export function useRunningAIJobs(projectId?: string | null, kinds?: readonly string[]): AIJobSummary[] {
   const kindKey = kinds?.join('|') ?? '';
   const selector = useMemo(() => {

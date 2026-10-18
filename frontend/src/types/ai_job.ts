@@ -155,7 +155,7 @@ export interface AIJobState {
 }
 
 /**
- * 任务摘要：横幅 / 托盘 / 页面列表只需要这些字段。
+ * 任务摘要：托盘 / 页面列表只需要这些字段。
  * 不含 content / stages / toolCalls / references / result，正文任务每秒几十条 content 事件就不会触发它们重渲染。
  */
 export type AIJobSummary = Pick<
@@ -172,6 +172,8 @@ const AI_JOB_KIND_LABELS: Record<string, string> = {
   chapter_batch: '批量写作',
   character_generate: '角色生成',
   organization_generate: '组织生成',
+  character_batch_generate: '批量生成角色与组织',
+  story_outline_generate: '总纲生成',
   chapter_generate: '正文生成',
   chapter_regenerate: '去 AI 味重写',
   chapter_analyze: '章节分析',

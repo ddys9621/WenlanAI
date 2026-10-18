@@ -8,7 +8,9 @@ import { useOutlineSync } from '@/store/hooks'
 import { useVolumeSync, useChapterOutlineSync } from '@/store/plotHooks'
 import { useAssistantDataChange } from '@/hooks/useAssistantPage'
 import type { AssistantDataChange } from '@/store/assistantStore'
-import { wizardStreamApi, chapterOutlineApi } from '@/services/api'
+import { useAIJobsStore, useRunningAIJobs } from '@/store/aiJobsStore'
+import { outlineApi, chapterOutlineApi } from '@/services/api'
+import { OUTLINE_BUSY_KINDS, OUTLINE_JOB_KIND, outlineGenerationDefaults, outlineGenerationPayload } from '@/utils/outlineGeneration'
 import { VolumesView } from '@/components/outline/VolumesView'
 import { MCPSelector } from '@/components/MCPSelector'
 import { KbCitationChips } from '@/components/knowledge/KbCitationChips'
@@ -17,7 +19,7 @@ import { useKbCitations } from '@/hooks/useKbCitations'
 import { useProjectKbLink } from '@/hooks/useProjectKbLink'
 import { Modal as UiModal, type ModalSize } from '@/components/ui/Modal'
 import type {
-  Outline, OutlineCreate, OutlineUpdate, Volume,
+  Outline, OutlineCreate, OutlineUpdate, Volume, Project, StoryOutlineGenerateResult,
   ChapterOutline, ChapterOutlineCreate, ChapterOutlineUpdate,
   ChapterOutlineBatchCreateRequest, NarrativeTasks,
 } from '@/types'
@@ -107,7 +109,23 @@ export default function OutlinePage() {
         </div>
       ) : (
         <>
-          {activeTab === 'outlines' && <OutlinesView outlines={outlines} projectId={projectId} createOutline={createOutline} updateOutline={updateOutline} deleteOutline={deleteOutline} activateOutline={activateOutline} refreshOutlines={refreshOutlines} />}
+          {activeTab === 'outlines' && (
+            <OutlinesView
+              outlines={outlines}
+              projectId={projectId}
+              project={currentProject}
+              createOutline={createOutline}
+              updateOutline={updateOutline}
+              deleteOutline={deleteOutline}
+              activateOutline={activateOutline}
+              refreshOutlines={refreshOutlines}
+              onPlanChanged={() => {
+                if (!projectId) return
+                void refreshVolumes(projectId)
+                void refreshChapterOutlines(projectId)
+              }}
+            />
+          )}
           {activeTab === 'volumes' && (
             <VolumesView
               projectId={projectId}
@@ -159,21 +177,27 @@ function EmptyBlock({ icon: Icon, title, hint }: { icon: React.ElementType; titl
 }
 
 // ==================== Tab 1: 故事大纲 ====================
-function OutlinesView({ outlines, projectId, createOutline, updateOutline, deleteOutline, activateOutline, refreshOutlines }: {
+export function OutlinesView({ outlines, projectId, project, createOutline, updateOutline, deleteOutline, activateOutline, refreshOutlines, onPlanChanged }: {
   outlines: Outline[]
   projectId?: string
+  /** 生成表单的视角 / 章数 / 字数默认取项目设置 */
+  project?: Project | null
   createOutline: (data: OutlineCreate) => Promise<Outline>
   updateOutline: (id: string, data: OutlineUpdate) => Promise<Outline>
   deleteOutline: (id: string) => Promise<void>
   activateOutline: (id: string) => Promise<Outline>
   refreshOutlines: () => Promise<Outline[]>
+  /** AI 生成了新总纲：已有卷纲 / 章纲会被标「上游已改」，刷新它们 */
+  onPlanChanged: () => void
 }) {
   const [showModal, setShowModal] = useState(false)
   const [editing, setEditing] = useState<Outline | null>(null)
   const [form, setForm] = useState({ title: '', premise: '', main_plot: '', golden_finger: '', selling_points: '', power_system: '', main_tropes: '', ultimate_goal: '', opening_hook: '' })
-  const [generating, setGenerating] = useState(false)
+  const startJob = useAIJobsStore((s) => s.start)
+  // 本项目在跑总纲生成（含向导正在生成总纲）：按钮禁用态由全局任务 store 派生，刷新 / 切页回来仍正确
+  const generating = useRunningAIJobs(projectId, OUTLINE_BUSY_KINDS).length > 0
   const [showGenModal, setShowGenModal] = useState(false)
-  const [genForm, setGenForm] = useState({ narrative_perspective: '第三人称', chapter_count: 30, target_words: 100000, requirements: '' })
+  const [genForm, setGenForm] = useState(() => outlineGenerationDefaults(project))
   const [genEnableMcp, setGenEnableMcp] = useState(false)
   const [genPlugins, setGenPlugins] = useState<string[]>([])
   const kbLink = useProjectKbLink(projectId)
@@ -197,28 +221,36 @@ function OutlinesView({ outlines, projectId, createOutline, updateOutline, delet
     setEditing(o); setForm(f); setShowModal(true);
   }
 
+  /** 打开生成表单：视角 / 章数 / 字数按项目当前设置重填，额外要求保留上次没提交的 */
+  const openGenerate = () => {
+    setGenForm((f) => ({ ...outlineGenerationDefaults(project), requirements: f.requirements }))
+    setShowGenModal(true)
+  }
+
+  /** AI 生成总纲：交给通用后台任务（弹窗展示阶段 / 参考 / 生成内容；可最小化、可停止、刷新后可重连） */
   const handleAIGenerate = async () => {
     if (!projectId) return
-    setGenerating(true)
     setShowGenModal(false)
+    const payload = outlineGenerationPayload(genForm, { enable: genEnableMcp, selected: genPlugins })
     try {
-      await wizardStreamApi.generateCompleteOutlineStream(
-        {
-          project_id: projectId,
-          narrative_perspective: genForm.narrative_perspective,
-          chapter_count: genForm.chapter_count,
-          target_words: genForm.target_words,
-          requirements: genForm.requirements.trim() || undefined,
-          enable_mcp: genEnableMcp,
-          selected_plugins: genPlugins,
+      await startJob<StoryOutlineGenerateResult>({
+        kind: OUTLINE_JOB_KIND,
+        title: 'AI 生成总纲',
+        projectId,
+        connect: (options) => outlineApi.generateStream(projectId, payload, options),
+        onSettled: (job) => {
+          if (job.status !== 'done') return
+          toast.success((job.result as StoryOutlineGenerateResult | null)?.message || '总纲已生成')
+          setGenForm((f) => ({ ...f, requirements: '' }))
+          // 任务结束时已切到别的项目就不刷新，免得把这个项目的总纲 / 卷纲写进别的项目的列表
+          if (useStore.getState().currentProject?.id !== projectId) return
+          void refreshOutlines()
+          onPlanChanged()
         },
-        {
-          onProgress: (msg) => { toast.info(msg, { id: 'outline-gen' }) },
-          onResult: () => { toast.success('故事大纲生成完成', { id: 'outline-gen' }); refreshOutlines() },
-          onError: (err) => { toast.error(`生成失败: ${err}`, { id: 'outline-gen' }) },
-        }
-      )
-    } catch { toast.error('AI 生成故事大纲失败') } finally { setGenerating(false) }
+      })
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'AI 生成总纲失败')
+    }
   }
 
   const handleSubmit = async () => {
@@ -270,7 +302,7 @@ function OutlinesView({ outlines, projectId, createOutline, updateOutline, delet
           </p>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2.5">
-          <button onClick={() => setShowGenModal(true)} disabled={generating} className="hh-btn-secondary">
+          <button onClick={openGenerate} disabled={generating || !projectId} className="hh-btn-secondary">
             {generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4 text-brand" />}
             AI 生成
           </button>
@@ -339,6 +371,12 @@ function OutlinesView({ outlines, projectId, createOutline, updateOutline, delet
           )}
         >
           <div className="space-y-5">
+            <p className="text-sm leading-6 text-content-secondary">
+              {outlines.length > 0
+                ? `生成的总纲存成新版本并设为活跃，现有 ${outlines.length} 个版本保留在列表里、可随时切回；已有的卷纲 / 章纲会标「上游已改」，提醒你核对。`
+                : '生成的总纲设为活跃版本，作为分卷、细化卷纲和章纲的依据。'}
+              生成在后台进行，弹窗可以最小化，顶栏「AI 任务」里随时查看或停止。
+            </p>
             <div className="grid gap-4 sm:grid-cols-3">
               <div>
                 <label className="hh-label">叙事视角</label>
@@ -350,11 +388,11 @@ function OutlinesView({ outlines, projectId, createOutline, updateOutline, delet
               </div>
               <div>
                 <label className="hh-label">章节数</label>
-                <input type="number" value={genForm.chapter_count} onChange={e => setGenForm(f => ({ ...f, chapter_count: Number(e.target.value) }))} className="hh-field" />
+                <input type="number" min={1} value={genForm.chapter_count} onChange={e => setGenForm(f => ({ ...f, chapter_count: Number(e.target.value) }))} className="hh-field" />
               </div>
               <div>
                 <label className="hh-label">目标字数</label>
-                <input type="number" value={genForm.target_words} onChange={e => setGenForm(f => ({ ...f, target_words: Number(e.target.value) }))} className="hh-field" />
+                <input type="number" min={1} value={genForm.target_words} onChange={e => setGenForm(f => ({ ...f, target_words: Number(e.target.value) }))} className="hh-field" />
               </div>
             </div>
             <div>

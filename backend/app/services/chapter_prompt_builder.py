@@ -15,11 +15,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Mapping, Optional
 
 from app.services.context_budget import ContextSection, budget_report, clip_text, fit_sections, render_sections
 from app.services.prompt_service import CHAPTER_OUTPUT_INSTRUCTION, CHAPTER_STYLE_RULES, PromptService
 from app.utils.prompt_safety import UNTRUSTED_DATA_RULE, quote_untrusted
+from app.utils.prompt_template import render_vars
 
 DEFAULT_BUDGET_CHARS = 36_000
 CONTINUATION_TAIL_CHARS = 1500
@@ -40,6 +41,8 @@ PRIORITY_RULES = """## 写作优先级（冲突时按这个顺序取舍，只在
 CLOSING_HEAD = "落笔前再看一眼：段落短、对话多、叙述用主角的口气、环境两句带过、书面词换成嘴上的词、"
 IMITATION_CLOSING_HEAD = "落笔前再看一眼：句式、段落和对话比例按参考文风来，人名、地名和设定都用本书的，不照抄参考里的句子、"
 IMITATION_STYLE_TITLE = "## 参考文风（仿写参考开启：文风以这里为准，下面「网文大白话」里和它冲突的条目以参考文风为准）"
+# 首行原文是"（重点，和章纲同等重要）"——与写作优先级冲突，system 里换成干净的标题
+CHAPTER_STYLE_TEMPLATE = "## 叙事与文风要求：网文大白话\n" + CHAPTER_STYLE_RULES.strip().split("\n", 1)[1]
 CLOSING_TAILS = {
     "hook": "结尾停在钩子上。",
     "none": "结尾收在一个具体的收束场景上，不留钩子、不预告后事。",
@@ -49,6 +52,7 @@ CLOSING_TAILS = {
 LEDGER_ORDER: tuple[str, ...] = (
     "narrative_promises", "causal_chains", "timeline_events", "relationship_dynamics", "affiliation_dynamics",
 )
+RELEVANT_HISTORY_TITLE = "相关旧事（更早章节的事，按章序；当时的状态可能已经变了，以「出场角色与状态」为准）"
 
 
 @dataclass
@@ -88,6 +92,7 @@ class ChapterPromptInput:
     target_word_count: int = 3000
     word_soft_range: float = 0.10
     budget_chars: int = DEFAULT_BUDGET_CHARS
+    prompt_overrides: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -99,34 +104,45 @@ class ChapterPrompt:
     report: dict[str, Any]
 
 
-def build_chapter_closing(hook_policy: str, imitation_style: bool = False) -> str:
+def chapter_prompt_defaults(genre: str, narrative_perspective: str) -> dict[str, str]:
+    perspective = (narrative_perspective or "").strip() or "第三人称"
+    return {
+        "chapter_persona": SYSTEM_PERSONA,
+        "chapter_style": CHAPTER_STYLE_TEMPLATE,
+        "chapter_closing": CLOSING_HEAD,
+        "chapter_priority": PRIORITY_RULES,
+        "genre_guide": PromptService._resolve_genre_guide(genre or "").strip(),
+        "perspective_guide": PromptService._resolve_perspective_guide(perspective).strip(),
+    }
+
+
+def build_chapter_closing(hook_policy: str, imitation_style: bool = False, head: Optional[str] = None) -> str:
     tail = CLOSING_TAILS.get(hook_policy or "hook", CLOSING_TAILS["hook"])
-    head = IMITATION_CLOSING_HEAD if imitation_style else CLOSING_HEAD
-    return f"{head}{tail}\n\n{CHAPTER_OUTPUT_INSTRUCTION}"
+    lead = IMITATION_CLOSING_HEAD if imitation_style else (CLOSING_HEAD if head is None else head.strip())
+    return f"{lead}{tail}\n\n{CHAPTER_OUTPUT_INSTRUCTION}"
 
 
 def _system_prompt(inp: ChapterPromptInput) -> str:
     perspective = (inp.narrative_perspective or "").strip() or "第三人称"
-    style_rules = CHAPTER_STYLE_RULES.format(
-        narrative_perspective=perspective,
-        perspective_boundary_clause=PromptService._build_perspective_boundary_clause(perspective),
-    )
-    # 首行原文是"（重点，和章纲同等重要）"——与写作优先级冲突，system 里换成干净的标题
-    style_body = style_rules.strip().split("\n", 1)[1] if "\n" in style_rules.strip() else ""
+    texts = {**chapter_prompt_defaults(inp.genre, perspective), **inp.prompt_overrides}
+    style = render_vars(texts["chapter_style"], {
+        "narrative_perspective": perspective,
+        "perspective_boundary_clause": PromptService._build_perspective_boundary_clause(perspective),
+    })
     imitation_style = (inp.imitation_style or "").strip()
     parts = [
-        SYSTEM_PERSONA,
-        PromptService._resolve_perspective_guide(perspective).strip(),
-        PromptService._resolve_genre_guide(inp.genre or "").strip(),
+        texts["chapter_persona"],
+        texts["perspective_guide"],
+        texts["genre_guide"],
         f"{IMITATION_STYLE_TITLE}\n{imitation_style}" if imitation_style else "",
-        "## 叙事与文风要求：网文大白话\n" + style_body,
-        inp.platform_block.strip(),
-        inp.style_content.strip(),
-        PRIORITY_RULES,
+        style,
+        inp.platform_block,
+        inp.style_content,
+        texts["chapter_priority"],
         UNTRUSTED_DATA_RULE,
         f"## 输出\n{CHAPTER_OUTPUT_INSTRUCTION}",
     ]
-    return "\n\n".join(p for p in parts if p)
+    return "\n\n".join(text for text in (p.strip() for p in parts) if text)
 
 
 def _setting_text(inp: ChapterPromptInput) -> str:
@@ -192,14 +208,16 @@ def _quote_reference_section(sections: list[ContextSection]) -> list[ContextSect
 
 
 def build_chapter_prompt(inp: ChapterPromptInput) -> ChapterPrompt:
-    closing = build_chapter_closing(inp.hook_policy, imitation_style=bool((inp.imitation_style or "").strip()))
+    closing = build_chapter_closing(inp.hook_policy, imitation_style=bool((inp.imitation_style or "").strip()),
+                                    head=inp.prompt_overrides.get("chapter_closing"))
     task = _task_text(inp, closing)
     budget = max(inp.budget_chars - len(task), 4_000)
     sections = fit_sections([
         ContextSection("setting", "作品设定", _setting_text(inp), priority=8, max_chars=3_500, min_chars=600),
         ContextSection("story_so_far", "前情脉络", inp.story_so_far, priority=6, max_chars=4_500, min_chars=800, keep="tail"),
         ContextSection("recent_summaries", "近期剧情", inp.recent_summaries, priority=7, max_chars=3_500, min_chars=600, keep="tail"),
-        ContextSection("relevant_history", "相关旧事", inp.relevant_history, priority=4, max_chars=2_500, min_chars=500),
+        ContextSection("relevant_history", RELEVANT_HISTORY_TITLE, inp.relevant_history, priority=4, max_chars=2_500,
+                       min_chars=500),
         ContextSection("characters", "出场角色与状态", _characters_text(inp), priority=9, max_chars=5_000, min_chars=1_500),
         ContextSection("world_map", "地图与方位", inp.world_map, priority=4, max_chars=1_200, min_chars=300),
         ContextSection("ledger", "叙事账本", _ledger_text(inp), priority=5, max_chars=3_500, min_chars=800),

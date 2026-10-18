@@ -78,10 +78,10 @@ async def mark_project_volumes(db: AsyncSession, project_id: str, reason: str) -
 
 
 async def mark_project_outlines(db: AsyncSession, project_id: str, reason: str) -> int:
-    """总纲改了：全部卷纲与章纲标「上游已改」。"""
-    await mark_project_volumes(db, project_id, reason)
+    """总纲改了：全部卷纲与章纲标「上游已改」；返回标记的卷纲 + 章纲条数。"""
+    volumes = await mark_project_volumes(db, project_id, reason)
     ids = (await db.execute(select(ChapterOutline.id).where(ChapterOutline.project_id == project_id))).scalars().all()
-    return await mark_stale(db, ids, reason)
+    return volumes + await mark_stale(db, ids, reason)
 
 
 def outline_warnings(outline: Any) -> list[str]:

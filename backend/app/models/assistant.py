@@ -82,6 +82,30 @@ class AssistantFieldCandidate(Base):
     decided_at = Column(DateTime, nullable=True)
 
 
+class AssistantEntityCandidate(Base):
+    """新建对象候选（角色 / 组织 / 设定条目）：工具只记下要新建的内容，作者「应用」才真正建行。
+
+    与 AssistantFieldCandidate（改既有字段）互补：这张表管「从无到有创建新对象」，
+    payload_json 存拟建对象的各字段；应用后 created_entity_id 记下新建行的 id。
+    """
+    __tablename__ = "assistant_entity_candidates"
+
+    id = Column(String(36), primary_key=True, default=_id)
+    project_id = Column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    session_id = Column(String(36), nullable=True, index=True)
+    run_id = Column(String(36), nullable=True, index=True)
+    entity_type = Column(String(30), nullable=False, comment="character / organization / setting_entry")
+    payload_json = Column(Text, nullable=True, comment="拟新建对象的各字段（JSON）")
+    label = Column(String(300), nullable=False, comment="展示用标题，如 新建角色「秦尘」")
+    page = Column(String(60), nullable=True, comment="应用后可去查看的页面")
+    reason = Column(Text, nullable=True)
+    status = Column(String(20), nullable=False, default="candidate", index=True,
+                    comment="candidate / applied / rejected")
+    created_entity_id = Column(String(36), nullable=True, comment="应用后新建行的 id")
+    created_at = Column(DateTime, default=utcnow)
+    decided_at = Column(DateTime, nullable=True)
+
+
 class AssistantTeamSetting(Base):
     __tablename__ = "assistant_team_settings"
     __table_args__ = (UniqueConstraint("project_id", "member_id", name="uq_assistant_team_member"),)

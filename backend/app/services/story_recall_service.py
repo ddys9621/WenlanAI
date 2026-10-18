@@ -2,7 +2,7 @@
 
 1. 前情脉络：层级摘要（卷 / 单元），每段章节取能覆盖它的最高一级
 2. 近期衔接：最近 N 章 + 层级摘要没覆盖到的章（含中间的空洞）的档案摘要；缺档案的章用章纲兜底并注明「未分析」；
-   末尾附上一章的章末状态
+   末尾附上一章的章末状态（上一章分析过却没记，如整章回忆，就退到最近记过的那章）
 3. 最近全文：最近 2 章正文（衔接口吻与动作）
 4. 相关旧事（远程回忆）：只在近程窗口之外找与本章人物 / 地点 / 关键词有关的旧事件、旧因果、旧档案，
    按「人物命中 + 语义相似 + 关键词 + 重要度 + 新近度」打分，同一章最多 2 条，按章序排在预算内
@@ -180,6 +180,19 @@ async def long_range_recall(
     return "\n".join(lines), kept
 
 
+def _end_state_line(digests: dict, last_number: int) -> str:
+    """上一章的章末状态；上一章分析过却没记（整章回忆 / 往事，没回到现在）时退到最近记过的那章，上一章没分析就不退。"""
+    last = digests.get(last_number)
+    if last is None:
+        return ""
+    if (last.end_state or "").strip():
+        return f"上一章（第{last_number}章）结束时：{last.end_state}"
+    recorded = [n for n in sorted(digests, reverse=True) if n < last_number and (digests[n].end_state or "").strip()]
+    if not recorded:
+        return ""
+    return f"上一章（第{last_number}章）没记章末状态；第{recorded[0]}章结束时：{digests[recorded[0]].end_state}"
+
+
 async def build_story_context(
     db: AsyncSession,
     project_id: str,
@@ -219,7 +232,7 @@ async def build_story_context(
                          key=lambda row: row.chapter_number)[-RECENT_SUMMARY_MAX:]
         last_number = previous[-1].chapter_number
         digests = await digests_by_number(
-            db, project_id, numbers=[row.chapter_number for row in targets] + [last_number],
+            db, project_id, numbers=[row.chapter_number for row in [*targets, *full_rows]],
         )
         missing_outline_ids = [row.chapter_outline_id for row in targets
                                if row.chapter_number not in digests and row.chapter_outline_id]
@@ -238,9 +251,9 @@ async def build_story_context(
                 lines.append(f"第{row.chapter_number}章《{row.title}》：{digest.summary}")
             elif outline_text.get(row.chapter_outline_id):
                 lines.append(f"第{row.chapter_number}章《{row.title}》（未分析，按章纲）：{clip_text(outline_text[row.chapter_outline_id], 150)}")
-        last = digests.get(last_number)
-        if last is not None and (last.end_state or "").strip():
-            lines.append(f"上一章（第{last_number}章）结束时：{last.end_state}")
+        end_line = _end_state_line(digests, last_number)
+        if end_line:
+            lines.append(end_line)
         if lines:
             parts["recent_summary"] = "【近期章节概要】\n" + "\n".join(lines)
 

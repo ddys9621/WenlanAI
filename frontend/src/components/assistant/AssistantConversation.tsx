@@ -15,14 +15,16 @@ import { assistantApi } from '@/services/api';
 import { AIJobError, runAIJob, useAIJobsStore, waitForAIJob } from '@/store/aiJobsStore';
 import { emitAssistantData, pageContextOf, useAssistantStore, type AssistantDataChange } from '@/store/assistantStore';
 import type {
-  AssistantAnswer, AssistantChapterCandidateRef, AssistantContextUsage, AssistantFieldCandidate, AssistantMember, AssistantMessageView,
-  AssistantPageContext, AssistantPreview, AssistantProgress, AssistantRunResult, AssistantSessionView, AssistantTeam,
+  AssistantAnswer, AssistantChapterCandidateRef, AssistantContextUsage, AssistantEntityCandidate, AssistantFieldCandidate,
+  AssistantMember, AssistantMessageView, AssistantPageContext, AssistantPreview, AssistantProgress, AssistantRunResult,
+  AssistantSessionView, AssistantTeam,
 } from '@/types/assistant';
 import { appendQuote, appendRequest } from '@/utils/assistantText';
 import { mentionMember, questionCardKey } from '@/utils/cocreation';
 import { formatTokens } from '@/utils/contextUsage';
 import type { SSEClientOptions, SSEMessage } from '@/utils/sseClient';
 import { AuthorQuestionCard } from './AuthorQuestionCard';
+import { EntityCandidateCard } from './EntityCandidateCard';
 import { FieldCandidateCard } from './FieldCandidateCard';
 import { ContextMeter, MemberAvatar, PlanCard, ProgressStrip, TeamBar, TeamSettings } from './CocreationParts';
 
@@ -175,6 +177,9 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
     } else if (m.type === 'candidate' && m.candidate) {
       const candidate = m.candidate as AssistantFieldCandidate;
       setView((prev) => (prev ? { ...prev, candidates: [...prev.candidates.filter((c) => c.id !== candidate.id), candidate] } : prev));
+    } else if (m.type === 'entity_candidate' && m.candidate) {
+      const candidate = m.candidate as AssistantEntityCandidate;
+      setView((prev) => (prev ? { ...prev, entity_candidates: [...prev.entity_candidates.filter((c) => c.id !== candidate.id), candidate] } : prev));
     } else if (m.type === 'chapter_candidate' && m.candidate) {
       const item = m.candidate as AssistantChapterCandidateRef;
       pendingRef.current.data.push({ entity: 'chapter_candidate', chapterId: item.chapter_id, targetId: item.id });
@@ -330,7 +335,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
     setView((prev) => (prev ? {
       ...prev,
       messages: [...prev.messages, {
-        id: `pending-${Date.now()}`, role: 'user', content: message, created_at: null, run_id: null, steps: [], candidates: [], chapter_candidates: [],
+        id: `pending-${Date.now()}`, role: 'user', content: message, created_at: null, run_id: null, steps: [], candidates: [], entity_candidates: [], chapter_candidates: [],
       }],
     } : prev));
     const ok = await runJob(message, (o) => assistantApi.sendStream(projectId, { message, page }, o));
@@ -384,6 +389,9 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
   const candidatesById = useMemo(() => new Map((view?.candidates ?? []).map((c) => [c.id, c])), [view?.candidates]);
   const updateCandidate = (next: AssistantFieldCandidate) =>
     setView((prev) => (prev ? { ...prev, candidates: prev.candidates.map((c) => (c.id === next.id ? next : c)) } : prev));
+  const entityCandidatesById = useMemo(() => new Map((view?.entity_candidates ?? []).map((c) => [c.id, c])), [view?.entity_candidates]);
+  const updateEntityCandidate = (next: AssistantEntityCandidate) =>
+    setView((prev) => (prev ? { ...prev, entity_candidates: prev.entity_candidates.map((c) => (c.id === next.id ? next : c)) } : prev));
   const openChapterCandidate = (item: AssistantChapterCandidateRef) =>
     onNavigate('chapter-analysis', `chapter=${item.chapter_id}&tab=candidates&candidate=${item.id}`);
 
@@ -401,6 +409,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
 
   const renderMessage = (m: AssistantMessageView): ReactNode => {
     const fieldCandidates = m.candidates.map((id) => candidatesById.get(id)).filter((c): c is AssistantFieldCandidate => Boolean(c));
+    const entityCandidates = (m.entity_candidates ?? []).map((id) => entityCandidatesById.get(id)).filter((c): c is AssistantEntityCandidate => Boolean(c));
     const isUser = m.role === 'user';
     return (
       <article key={m.id} className={cn('rounded border px-3 py-2.5', isUser ? 'border-surface-border-light bg-surface-paper' : 'border-surface-border bg-white')}>
@@ -433,6 +442,11 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
         {fieldCandidates.map((c) => (
           <div key={c.id} className="mt-2">
             <FieldCandidateCard projectId={projectId} candidate={c} onChange={updateCandidate} onOpenPage={(p) => onNavigate(p)} />
+          </div>
+        ))}
+        {entityCandidates.map((c) => (
+          <div key={c.id} className="mt-2">
+            <EntityCandidateCard projectId={projectId} candidate={c} onChange={updateEntityCandidate} onOpenPage={(p) => onNavigate(p)} />
           </div>
         ))}
         {m.chapter_candidates.map((item) => <ChapterCandidateLink key={item.id} item={item} onOpen={openChapterCandidate} />)}

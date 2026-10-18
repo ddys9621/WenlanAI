@@ -15,12 +15,13 @@ from app.user_manager import User
 from app.logger import get_logger
 from app.config import settings as app_settings
 from app.services.ai_service import AIService, create_user_ai_service
-from app.api.deps import require_login
+from app.api.deps import ensure_allowed_url, require_login
 from app.services.project_ai_preference import (
     PROJECT_HEADER,
     load_project_ai_preference,
     merge_ai_overrides,
 )
+from app.utils.outbound_guard import OutboundGuard, guarded_async_client, outbound_guard_for
 
 logger = get_logger(__name__)
 
@@ -85,7 +86,7 @@ async def get_user_ai_service(
     pref = await load_project_ai_preference(db, request.headers.get(PROJECT_HEADER), user.user_id)
     if pref is not None:
         logger.debug(f"用户 {user.user_id} 项目 {pref.project_id} 启用 AI 偏好覆盖: model={pref.llm_model!r}")
-    service = create_user_ai_service(**merge_ai_overrides(settings, pref))
+    service = create_user_ai_service(**merge_ai_overrides(settings, pref), outbound_guard=outbound_guard_for(user))
     # 分析模型只取全局设置（项目偏好只换主模型和参数）；章节分析 / 实体抽取 / 剧情摘要走它
     analysis_model = (getattr(settings, "analysis_model", None) or "").strip()
     if analysis_model and hasattr(service, "analysis_model"):
@@ -130,6 +131,7 @@ async def save_settings(
     
     # 准备数据
     settings_dict = data.model_dump(exclude_unset=True)
+    ensure_allowed_url(user, settings_dict.get("api_base_url"))
     
     if settings:
         # 更新现有设置
@@ -173,6 +175,7 @@ async def update_settings(
     
     # 更新设置
     update_data = data.model_dump(exclude_unset=True)
+    ensure_allowed_url(user, update_data.get("api_base_url"))
     for key, value in update_data.items():
         setattr(settings, key, value)
     
@@ -206,7 +209,9 @@ async def delete_settings(
     return {"message": "设置已删除", "user_id": user.user_id}
 
 
-async def _fetch_provider_models(api_key: str, api_base_url: str, provider: str) -> Dict[str, Any]:
+async def _fetch_provider_models(
+    api_key: str, api_base_url: str, provider: str, guard: Optional[OutboundGuard] = None,
+) -> Dict[str, Any]:
     """按接口配置拉模型列表：OpenAI 兼容 GET {base}/models（Bearer）；Anthropic GET {base}/v1/models（x-api-key）。
 
     /settings/models（设置页填表时用传入值）与 /settings/saved-models（项目内用已保存值）共用此实现。
@@ -215,12 +220,14 @@ async def _fetch_provider_models(api_key: str, api_base_url: str, provider: str)
         api_key: API 密钥
         api_base_url: API 基础 URL
         provider: API 提供商 (openai, anthropic, azure, custom)
+        guard: 出站守卫（普通用户）；指向内网的地址按连接失败返回 400
 
     Returns:
         {"provider", "models": [{"value","label","description"}], "count"}
     """
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        client = guarded_async_client(guard, timeout=10.0) if guard else httpx.AsyncClient(timeout=10.0)
+        async with client:
             if provider == "openai" or provider == "azure" or provider == "custom":
                 # OpenAI 兼容接口获取模型列表
                 url = f"{api_base_url.rstrip('/')}/models"
@@ -330,10 +337,11 @@ async def _fetch_provider_models(api_key: str, api_base_url: str, provider: str)
 async def get_available_models(
     api_key: str,
     api_base_url: str,
-    provider: str = "openai"
+    provider: str = "openai",
+    user: User = Depends(require_login),
 ):
     """从**传入**的 API 配置获取模型列表（设置页填表未保存也能拉）。"""
-    return await _fetch_provider_models(api_key, api_base_url, provider)
+    return await _fetch_provider_models(api_key, api_base_url, provider, guard=outbound_guard_for(user))
 
 
 @router.get("/saved-models")
@@ -345,7 +353,9 @@ async def get_saved_models(
     settings = await load_or_create_settings(db, user.user_id)
     if not settings.api_key:
         raise HTTPException(status_code=400, detail="尚未在「设置」中配置 API Key")
-    return await _fetch_provider_models(settings.api_key, settings.api_base_url or "", settings.api_provider or "openai")
+    return await _fetch_provider_models(
+        settings.api_key, settings.api_base_url or "", settings.api_provider or "openai", guard=outbound_guard_for(user),
+    )
 
 
 class ApiTestRequest(BaseModel):
@@ -358,7 +368,7 @@ class ApiTestRequest(BaseModel):
 
 
 @router.post("/test")
-async def test_api_connection(data: ApiTestRequest):
+async def test_api_connection(data: ApiTestRequest, user: User = Depends(require_login)):
     """
     测试 API 连接和配置是否正确
     
@@ -384,7 +394,8 @@ async def test_api_connection(data: ApiTestRequest):
             api_base_url=api_base_url,
             default_model=llm_model,
             default_temperature=0.7,
-            default_max_tokens=data.max_tokens
+            default_max_tokens=data.max_tokens,
+            outbound_guard=outbound_guard_for(user),
         )
         
         # 发送简单的测试请求

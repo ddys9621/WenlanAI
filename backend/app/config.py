@@ -97,6 +97,12 @@ class Settings(BaseSettings):
     # 自定义向量模型（需事先放进 embedding 目录，如 BAAI/bge-small-zh-v1.5）；空 = 内置 MiniLM
     embedding_model: str = ""
 
+    # 出站地址守卫（防 SSRF，见 app/utils/outbound_guard.py）：普通用户自填的 AI 接口地址、MCP 服务器只能连公网；
+    # 管理员不受限（桌面版、单机自用登录的就是管理员，本机模型 / 本地 MCP 照常用），上面三个 *_BASE_URL 自动放行。
+    # 局域网多人自用、确需让普通用户连内网服务：把 host 或 host:port 写进白名单（JSON 数组），或整体关掉
+    outbound_guard_enabled: bool = True
+    outbound_allowed_hosts: list[str] = []
+
     # 以下参数暂不使用（保留以备将来需要）
     # API max_tokens 乘数：根据目标字数计算 max_tokens 上限（中文约 1字≈1token）
     chapter_max_tokens_factor: float = 1.3  # 目标字数 * 1.3（暂不使用，避免截断）

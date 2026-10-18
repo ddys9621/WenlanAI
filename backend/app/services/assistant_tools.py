@@ -15,7 +15,7 @@ from typing import Any, Callable, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.assistant import AssistantFieldCandidate
+from app.models.assistant import AssistantEntityCandidate, AssistantFieldCandidate
 from app.models.chapter import Chapter
 from app.models.chapter_candidate import ChapterCandidate
 from app.models.chapter_outline import ChapterOutline
@@ -26,6 +26,7 @@ from app.models.story_outline import StoryOutline
 from app.models.world_map import WorldMapLocation
 from app.models.volume import Volume
 from app.services import assistant_candidate_service as cands
+from app.services import assistant_entity_candidate_service as entities
 from app.services import assistant_fields as fields
 from app.services import cocreation_team as team
 from app.services import volume_service as volumes
@@ -38,9 +39,9 @@ from app.services.story_progress import progress_snapshot
 from app.services.writing_assistant_service import SELECTION_SKILLS, SKILL_LABELS, execute_skill
 
 PAGES = {
-    "world-setting": "世界设定", "world-rules": "世界规则", "world-map": "世界地图", "characters": "角色与组织",
-    "relationships": "关系管理", "outline": "谋篇（总纲 / 卷纲 / 章纲）", "chapter-analysis": "章节写作",
-    "writing-styles": "写作风格", "memories": "故事账本",
+    "world-setting": "世界设定", "world-rules": "世界规则", "setting-entries": "世界设定条目", "world-map": "世界地图",
+    "characters": "角色与组织", "relationships": "关系管理", "outline": "谋篇（总纲 / 卷纲 / 章纲）",
+    "chapter-analysis": "章节写作", "writing-styles": "写作风格", "memories": "故事账本",
 }
 
 TOOLS: dict[str, tuple[str, str, str]] = {
@@ -51,6 +52,17 @@ TOOLS: dict[str, tuple[str, str, str]] = {
     "read_field": ("读取内容", "读取某一项的当前完整内容（修改前必须先读取这一项）", '{"field_id": "...", "target_id": "..."}'),
     "propose_edit": ("准备修改候选", "为某一项生成修改候选：value 是完整的新内容（列表类字段给字符串数组），作者确认后才写入",
                      '{"field_id": "...", "target_id": "...", "value": "完整新内容", "reason": "为什么这样改"}'),
+    "propose_character": ("新建角色", "为本书新建一个角色（人物）生成候选，作者在对话里确认后才真正建档；name 必填，其余可留空",
+                          '{"name": "角色名", "role_type": "protagonist|supporting|antagonist（可选）", "age": "可选", '
+                          '"gender": "可选", "personality": "性格（可选）", "background": "背景故事（可选）", '
+                          '"appearance": "外貌（可选）", "speech_style": "说话风格（可选）", "reason": "为什么加（可选）"}'),
+    "propose_organization": ("新建组织", "为本书新建一个组织 / 势力生成候选，作者确认后才真正建档；name 必填，其余可留空",
+                             '{"name": "组织名", "organization_type": "类型（可选）", "organization_purpose": "宗旨（可选）", '
+                             '"personality": "组织特性（可选）", "background": "背景（可选）", "reason": "为什么加（可选）"}'),
+    "propose_setting_entry": ("新建设定条目", "为本书新建一条世界设定（术语 / 铁律 / 势力 / 规则等，不属于境界·装备·地图三类）"
+                              "生成候选，作者确认后才建档；分条存、各自独立容量，别再往「世界规则」单字段里堆。title 必填",
+                              '{"title": "条目名", "category": "term|law|faction|rule|other（可选）", '
+                              '"summary": "一句话简述（可选）", "content": "详细设定（可选）", "reason": "为什么加（可选）"}'),
     "manuscript": ("处理正文", "处理某一章的正文：continue 续写 / rewrite 改写选段 / polish 润色选段 / review 核对本章 / query 查前文；"
                               "改写、润色只能处理作者在该章正文里选中的那段；修改类结果是候选稿",
                    '{"chapter_number": 1, "skill": "continue", "instruction": "具体要求"}'),
@@ -99,6 +111,7 @@ class ToolContext:
     member_id: str = team.DEFAULT_MEMBER
     model: Optional[str] = None
     plans: list = field(default_factory=list)
+    entity_candidates: list = field(default_factory=list)
 
 
 @dataclass
@@ -228,6 +241,46 @@ async def _propose_edit(ctx: ToolContext, args: dict) -> ToolOutcome:
     ctx.emit({"type": "candidate", "candidate": view})
     return ToolOutcome(True, f"为「{view['label']}」准备了修改候选",
                        "修改候选已生成，正在等作者在对话里比较后决定是否应用；现在还没有写入，不要说已经改好了。")
+
+
+async def _propose_entity(ctx: ToolContext, args: dict, entity_type: str) -> ToolOutcome:
+    reason = _text(args, "reason", 1000, required=False)
+    made: list = []
+
+    async def write() -> None:
+        for stale in made:  # 上次提交被别的请求回滚了：丢掉旧对象，重建一份
+            if stale in ctx.db:
+                ctx.db.expunge(stale)
+        made.append(await entities.create_entity_candidate(
+            ctx.db, project_id=ctx.project_id, session_id=ctx.session_id, run_id=ctx.run_id,
+            entity_type=entity_type, payload=args, reason=reason,
+        ))
+
+    async def verify() -> bool:
+        return bool(await ctx.db.scalar(
+            select(AssistantEntityCandidate.id).where(AssistantEntityCandidate.id == made[-1].id)))
+
+    try:
+        await write_verified(ctx.db, write, verify, "新建对象候选")
+    except PersistError as exc:
+        raise ToolError(str(exc))
+    view = entities.entity_candidate_view(made[-1])
+    ctx.entity_candidates.append(view)
+    ctx.emit({"type": "entity_candidate", "candidate": view})
+    return ToolOutcome(True, f"为「{view['label']}」准备了新建候选",
+                       "新建候选已生成，正在等作者在对话里确认后才真正建档；现在还没有建，不要说已经建好了。")
+
+
+async def _propose_character(ctx: ToolContext, args: dict) -> ToolOutcome:
+    return await _propose_entity(ctx, args, "character")
+
+
+async def _propose_organization(ctx: ToolContext, args: dict) -> ToolOutcome:
+    return await _propose_entity(ctx, args, "organization")
+
+
+async def _propose_setting_entry(ctx: ToolContext, args: dict) -> ToolOutcome:
+    return await _propose_entity(ctx, args, "setting_entry")
 
 
 async def _manuscript(ctx: ToolContext, args: dict) -> ToolOutcome:
@@ -466,7 +519,9 @@ async def _write_chapters(ctx: ToolContext, args: dict) -> ToolOutcome:
 
 HANDLERS = {
     "search_project": _search_project, "list_fields": _list_fields, "read_field": _read_field,
-    "propose_edit": _propose_edit, "manuscript": _manuscript, "open_page": _open_page,
+    "propose_edit": _propose_edit, "propose_character": _propose_character,
+    "propose_organization": _propose_organization, "propose_setting_entry": _propose_setting_entry,
+    "manuscript": _manuscript, "open_page": _open_page,
     "project_status": _project_status, "ask_author": _ask_author, "story_progress": _story_progress,
     "kb_search": _kb_search, "kb_read": _kb_read,
     "plan_volumes": _plan_volumes, "detail_volume": _detail_volume, "plan_chapters": _plan_chapters,
@@ -486,7 +541,7 @@ async def execute_tool(ctx: ToolContext, name: str, args: Any) -> ToolOutcome:
         return ToolOutcome(False, f"{tool_label(name)}：参数格式不对", "args 应是 JSON 对象。")
     try:
         outcome = await handler(ctx, args)
-    except (ToolError, fields.FieldError, ValueError, volumes.VolumeConflictError) as exc:
+    except (ToolError, fields.FieldError, entities.EntityError, ValueError, volumes.VolumeConflictError) as exc:
         return ToolOutcome(False, f"{tool_label(name)}：{exc}", f"这一步没有成功：{exc}")
     outcome.data = outcome.data[:DATA_LIMIT]
     return outcome

@@ -4,7 +4,6 @@ import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 import { volumeApi } from '@/services/api'
 import { useAIJobsStore, useRunningAIJobs } from '@/store/aiJobsStore'
-import { AIJobBanner } from '@/components/ai-job/AIJobBanner'
 import { KbCitationChips } from '@/components/knowledge/KbCitationChips'
 import { Modal } from '@/components/ui/Modal'
 import { useKbCitations } from '@/hooks/useKbCitations'
@@ -171,7 +170,6 @@ export function VolumesView({
 
   return (
     <section className="hh-panel space-y-4 p-6">
-      <AIJobBanner projectId={projectId} kinds={[JOB_KIND]} />
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           <h2 className="text-lg font-semibold tracking-tight text-content">卷纲</h2>

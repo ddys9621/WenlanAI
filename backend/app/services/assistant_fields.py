@@ -1,7 +1,8 @@
 """全局智能助笔 · 可修改内容目录（参考岚笺 assistant-field-catalog：静态白名单，不开放任意字段 / 删除 / 密钥）。
 
-每一项 = 字段（field_id）+ 目标（target_id，所属对象）：作品设定、人物、组织、章纲、故事前提、地图地点。
-读写都在这里校验类型与长度；写入时补上与手动编辑相同的连带处理（改故事前提 → 章纲标「上游已改」，改地点 → 地图版本号前移）。
+每一项 = 字段（field_id）+ 目标（target_id，所属对象）：作品设定、人物、组织、章纲、故事前提、地图地点、世界设定条目。
+读写都在这里校验类型与长度；写入时补上与手动编辑相同的连带处理（改故事前提 → 章纲标「上游已改」，改地点 → 地图版本号前移，
+改设定条目 → 向量索引重同步）。
 """
 from __future__ import annotations
 
@@ -12,13 +13,17 @@ from typing import Any, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.logger import get_logger
 from app.models.character import Character
 from app.models.chapter_outline import ChapterOutline
 from app.models.project import Project
+from app.models.setting_entry import SETTING_CATEGORIES, SettingEntry
 from app.models.story_outline import StoryOutline
 from app.models.world_map import WorldMapLocation
 from app.services import outline_review_service as outline_review
 from app.services.world_map_service import load_map
+
+logger = get_logger(__name__)
 
 
 class FieldError(Exception):
@@ -44,15 +49,18 @@ class FieldSpec:
     max_items: int = 30
     page: str = ""
     group: str = ""
+    choices: tuple[str, ...] = ()  # 非空 = 文字字段只能取这些值（如设定条目分类）
+    required: bool = False  # 文字字段不能清空（如设定条目名称）
 
 
 ENTITY_PAGES = {
     "project": "world-setting", "character": "characters", "organization": "characters",
     "chapter_outline": "outline", "story_outline": "outline", "location": "world-map",
+    "setting_entry": "setting-entries",
 }
 ENTITY_GROUPS = {
     "project": "设定", "character": "人物", "organization": "组织", "chapter_outline": "谋篇",
-    "story_outline": "谋篇", "location": "地图",
+    "story_outline": "谋篇", "location": "地图", "setting_entry": "设定条目",
 }
 
 
@@ -89,6 +97,10 @@ _SPECS = [
     _spec("story_outline", "content", "故事前提", max_length=50000),
     _spec("location", "description", "地点档案", max_length=4000),
     _spec("location", "region", "所属区域", max_length=100),
+    _spec("setting_entry", "title", "名称", max_length=200, required=True),
+    _spec("setting_entry", "category", "分类", max_length=50, choices=SETTING_CATEGORIES),
+    _spec("setting_entry", "summary", "简述", max_length=2000),
+    _spec("setting_entry", "content", "详细设定", max_length=20000),
 ]
 FIELD_SPECS: dict[str, FieldSpec] = {s.id: s for s in _SPECS}
 LIST_LIMIT = 60
@@ -106,6 +118,8 @@ def _target_label(entity: str, obj: Any) -> str:
         return f"第{obj.chapter_number}章章纲《{obj.title}》"
     if entity == "story_outline":
         return f"故事大纲《{obj.title}》"
+    if entity == "setting_entry":
+        return f"设定条目「{obj.title}」"
     return f"地点「{obj.name}」"
 
 
@@ -131,6 +145,11 @@ async def _entity_rows(db: AsyncSession, project_id: str, entity: str) -> list[A
         return list((await db.execute(
             select(StoryOutline).where(StoryOutline.project_id == project_id)
             .order_by(StoryOutline.is_active.desc(), StoryOutline.order_index)
+        )).scalars().all())
+    if entity == "setting_entry":
+        return list((await db.execute(
+            select(SettingEntry).where(SettingEntry.project_id == project_id)
+            .order_by(SettingEntry.order_index, SettingEntry.created_at)
         )).scalars().all())
     return list((await db.execute(
         select(WorldMapLocation).where(WorldMapLocation.project_id == project_id).order_by(WorldMapLocation.name)
@@ -187,7 +206,7 @@ def spec_of(field_id: str) -> FieldSpec:
 async def load_target(db: AsyncSession, project_id: str, spec: FieldSpec, target_id: str) -> Any:
     model = {
         "project": Project, "character": Character, "organization": Character, "chapter_outline": ChapterOutline,
-        "story_outline": StoryOutline, "location": WorldMapLocation,
+        "story_outline": StoryOutline, "location": WorldMapLocation, "setting_entry": SettingEntry,
     }[spec.entity]
     obj = await db.get(model, target_id) if target_id else None
     owner = getattr(obj, "id" if spec.entity == "project" else "project_id", None) if obj is not None else None
@@ -226,8 +245,12 @@ def normalize_value(spec: FieldSpec, value: Any) -> Any:
     if isinstance(value, bool) or not isinstance(value, (str, int, float)):
         raise FieldError(f"{spec.name}应是一段文字")
     text = str(value).strip()
+    if spec.required and not text:
+        raise FieldError(f"{spec.name}不能为空")
     if len(text) > spec.max_length:
         raise FieldError(f"{spec.name}不超过 {spec.max_length} 字（现在 {len(text)} 字）")
+    if spec.choices and text not in spec.choices:
+        raise FieldError(f"{spec.name}只能是 {'/'.join(spec.choices)}")
     return text
 
 
@@ -245,7 +268,19 @@ async def write_field(db: AsyncSession, project_id: str, field_id: str, target_i
         if world_map is not None:
             world_map.revision = (world_map.revision or 0) + 1
     await db.flush()
+    if changed and spec.entity == "setting_entry":
+        await _sync_setting_entry(obj)
     return normalized
+
+
+async def _sync_setting_entry(entry: Any) -> None:
+    """改了设定条目：向量索引同步成新内容（与页面手动编辑相同的连带处理）；失败只记日志，不影响写入。"""
+    try:
+        from app.services.setting_entry_service import setting_entry_index  # 延迟导入，不把向量依赖拉进导入链
+
+        await setting_entry_index().sync(entry)
+    except Exception as exc:  # noqa: BLE001 - 向量只是增强
+        logger.warning(f"⚠️ 设定条目「{getattr(entry, 'title', '')}」向量重同步失败（不影响修改）：{exc}")
 
 
 def entity_of(field_id: str) -> Optional[str]:

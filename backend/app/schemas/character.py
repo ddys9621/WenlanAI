@@ -1,5 +1,5 @@
 """角色相关的Pydantic模型"""
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 from typing import Optional, List
 from datetime import datetime
 
@@ -97,6 +97,22 @@ class CharacterGenerateRequest(BaseModel):
     requirements: Optional[str] = Field(None, description="特殊要求")
     enable_mcp: bool = Field(False, description="是否启用MCP工具增强（搜索人物原型参考）")
     selected_plugins: List[str] = Field(default_factory=list, description="选择的MCP插件列表")
+
+
+class CharacterBatchGenerateRequest(BaseModel):
+    """项目内 AI 批量生成角色与组织的请求模型（服务层 character_batch_service 与 API 共用）"""
+    project_id: str = Field(..., description="项目ID")
+    character_count: int = Field(3, ge=0, le=10, description="要生成的人物数量")
+    organization_count: int = Field(0, ge=0, le=5, description="要生成的组织数量")
+    requirements: Optional[str] = Field(None, description="作者要求")
+    enable_mcp: bool = Field(False, description="是否启用MCP工具增强（搜索人物原型参考）")
+    selected_plugins: List[str] = Field(default_factory=list, description="选择的MCP插件列表")
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> "CharacterBatchGenerateRequest":
+        if self.character_count + self.organization_count < 1:
+            raise ValueError("人物和组织至少要生成一个")
+        return self
 
 
 class CharacterListResponse(BaseModel):
