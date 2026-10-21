@@ -1,6 +1,6 @@
 """AI 生成单个组织（2026-09-11 从 api/organizations.py 的 generate 端点抽出，供后台任务 runner 调用）。
 
-过程追踪：各步骤用 stage_scope 标注；世界规则语义检索（WorldRuleService）/ MCP 工具调用 / LLM 进度由
+过程追踪：各步骤用 stage_scope 标注；世界规则 / 设定条目语义检索（world_setting_context）/ MCP 工具调用 / LLM 进度由
 共享入口自动上报 reference / tool_call / llm 事件，这里不重复发。
 服务层只抛 ValueError（面向用户的可读提示）或底层异常，由调用方转 HTTP 或任务 error 事件。
 """
@@ -23,6 +23,7 @@ from app.services.ai_jobs import AIJob, Runner
 from app.services.ai_service import AIService
 from app.services.generation_trace import stage_scope
 from app.services.prompt_service import prompt_service
+from app.services.world_setting_context import build_world_context, world_query
 from app.utils.json_cleaner import clean_and_parse_json
 from app.utils.prompt_safety import quote_untrusted
 
@@ -84,18 +85,11 @@ async def generate_organization_for_project(
         if organization_list:
             existing_info += "\n\n已有组织：\n" + "\n".join(organization_list)
 
-        # 详细世界规则（语义检索；WorldRuleService 会自动上报 reference 事件）；失败不中断
-        from app.services.world_rule_service import world_rule_service
-
-        world_rules_summary = ""
-        try:
-            query_text = f"{project.theme or ''} {project.genre or ''} {request.organization_type or ''}"
-            world_rules_summary = await world_rule_service.generate_rules_summary_with_search(
-                db, request.project_id, query_text, limit=10
-            )
-        except Exception as rule_error:  # noqa: BLE001 - 世界规则缺失不影响生成
-            logger.warning("⚠️ [组织生成] 加载世界规则失败: %s", rule_error)
-            world_rules_summary = ""
+        # 详细世界规则 + 设定条目（语义检索；各服务自动上报 reference 事件）；失败不中断
+        world = await build_world_context(
+            db, project, world_query(project, request.organization_type or ""), rule_limit=10, scene="组织生成",
+        )
+        world_rules_summary = world.detail
 
         project_context_parts = [f"""
 项目信息：

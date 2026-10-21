@@ -4,10 +4,12 @@
  * 修改只给候选（内容修改候选 / 章节候选稿），规划给草案卡片（卷纲 / 剧情单元 / 章纲），确认后才写入；
  * 顶部的创作进度告诉作者下一步；需要作者决定时出提问卡；对话保存在服务端，刷新后可续接。
  * 输入框旁的上下文用量表（参照写代码 agent）：上限在团队设置里按项目设，运行中每一步刷新，较早的对话装不下时自动压成前情摘要。
+ * 外观是 AI 助手面板（参照 Claude / ChatGPT）：团队的回复是正文排版，作者的话是浅灰圆角块，输入框和工具条合成一个大框。
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import {
-  Check, ChevronDown, Copy, FilePenLine, Loader2, MessageSquarePlus, PencilLine, Quote, SendHorizontal, Sparkles, Square, TriangleAlert, X,
+  ArrowDown, ArrowUp, Check, ChevronRight, Copy, FilePenLine, ListChecks, Loader2, MapPin, PencilLine, Quote, Sparkles, Square,
+  TriangleAlert, X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
@@ -16,20 +18,37 @@ import { AIJobError, runAIJob, useAIJobsStore, waitForAIJob } from '@/store/aiJo
 import { emitAssistantData, pageContextOf, useAssistantStore, type AssistantDataChange } from '@/store/assistantStore';
 import type {
   AssistantAnswer, AssistantChapterCandidateRef, AssistantContextUsage, AssistantEntityCandidate, AssistantFieldCandidate,
-  AssistantMember, AssistantMessageView, AssistantPageContext, AssistantPreview, AssistantProgress, AssistantRunResult,
-  AssistantSessionView, AssistantTeam,
+  AssistantMember, AssistantMessageView, AssistantPageContext, AssistantPlan, AssistantPreview, AssistantProgress,
+  AssistantRunResult, AssistantSessionView, AssistantTeam,
 } from '@/types/assistant';
 import { appendQuote, appendRequest } from '@/utils/assistantText';
-import { mentionMember, questionCardKey } from '@/utils/cocreation';
+import {
+  changeItems, liveCardOwner, mentionMember, pendingChanges, planEntity, planKey, questionCardKey, type ChangeCards,
+} from '@/utils/cocreation';
 import { formatTokens } from '@/utils/contextUsage';
 import type { SSEClientOptions, SSEMessage } from '@/utils/sseClient';
+import { ChangeList, PendingTray, type DecideChange, type RenderDetail } from './AssistantChanges';
 import { AuthorQuestionCard } from './AuthorQuestionCard';
+import { confirmPlan, entityAction, errorDetail, fieldAction } from './changeActions';
 import { EntityCandidateCard } from './EntityCandidateCard';
 import { FieldCandidateCard } from './FieldCandidateCard';
-import { ContextMeter, MemberAvatar, PlanCard, ProgressStrip, TeamBar, TeamSettings } from './CocreationParts';
+import { ContextMeter, MemberAvatar, MemberPicker, NextStepHint, PlanCard, RichText, TeamSettings } from './CocreationParts';
 
 const MAX_CHARS = 4000;
 const REVIEW_KEY = 'assistant-review-before-send';
+const INPUT_MAX_HEIGHT = 200;
+/** 离底部这么近就算「停在最新处」：新内容来了跟着滚；往上翻着看就不拽回来 */
+const STICK_PX = 80;
+/** 成员回复超过这么长就先折起来（窄抽屉里 300 字就快一屏了，几千字的草稿会占好几屏） */
+const LONG_REPLY = 300;
+
+/** 一条发言带出的卡片（与消息里存的同一组字段） */
+type Attachments = ChangeCards;
+
+const noAttachments = (): Attachments => ({ candidates: [], entity_candidates: [], chapter_candidates: [], plans: [] });
+const attachmentsOf = (m: AssistantMessageView): Attachments => ({
+  candidates: m.candidates, entity_candidates: m.entity_candidates ?? [], chapter_candidates: m.chapter_candidates ?? [], plans: m.plans ?? [],
+});
 
 interface LiveTurn {
   goal: string;
@@ -37,34 +56,37 @@ interface LiveTurn {
   text: string;
   /** 本轮发言的成员（speaker 事件） */
   member?: AssistantMember | null;
-  /** 主编交给成员的事：处理中 / 成员的回复 */
-  delegations: { member: AssistantMember; task: string; content: string }[];
+  /** 发言者这一段提出的卡片（运行中就显示，跑完以服务端存的为准） */
+  cards: Attachments;
+  /** 主编交给成员的事：处理中 / 成员的回复 / 成员提出的卡片 */
+  delegations: { member: AssistantMember; task: string; content: string; cards: Attachments }[];
 }
 
-const newLive = (goal: string, text = ''): LiveTurn => ({ goal, steps: [], text, delegations: [] });
+const newLive = (goal: string, text = ''): LiveTurn => ({ goal, steps: [], text, cards: noAttachments(), delegations: [] });
 
-/** 回复里的 **加粗** 显示成粗体，其余照原样换行 */
-function RichText({ text }: { text: string }) {
-  const parts = text.split(/(\*\*[^*\n]+\*\*)/g);
-  return (
-    <p className="whitespace-pre-wrap break-words text-[13px] leading-7 text-content">
-      {parts.map((part, i) => (part.startsWith('**') && part.endsWith('**') && part.length > 4
-        ? <strong key={i} className="font-semibold">{part.slice(2, -2)}</strong>
-        : <span key={i}>{part}</span>))}
-    </p>
-  );
+/** 运行中推来的卡片挂到提它的人下面：正在处理委托的成员挂到那条委托，否则挂到本轮发言者 */
+function withLiveCard(live: LiveTurn, memberId: unknown, add: (cards: Attachments) => Attachments): LiveTurn {
+  const owner = liveCardOwner(live.delegations, typeof memberId === 'string' ? memberId : undefined);
+  return owner < 0
+    ? { ...live, cards: add(live.cards) }
+    : { ...live, delegations: live.delegations.map((d, i) => (i === owner ? { ...d, cards: add(d.cards) } : d)) };
 }
 
+/** 处理记录：默认收起的一行，展开是一条竖线串起来的步骤；运行中展开 */
 function StepList({ steps, live }: { steps: { label: string; summary?: string; detail?: string; ok: boolean }[]; live?: boolean }) {
   if (!steps.length) return null;
   return (
-    <details className="mt-2 rounded border border-surface-border-light bg-surface-paper px-2.5 py-1.5" open={live}>
-      <summary className="cursor-pointer select-none text-[11px] text-content-tertiary">处理记录 · {steps.length} 步</summary>
-      <ol className="mt-1 space-y-0.5">
+    <details className="as-disclosure" open={live}>
+      <summary className="w-fit text-[12px] text-content-tertiary hover:text-content-secondary">
+        <ChevronRight className="as-chevron h-3.5 w-3.5" />处理记录 · {steps.length} 步
+      </summary>
+      <ol className="ml-[6px] mt-1.5 space-y-1.5 border-l border-surface-border-light pl-3.5">
         {steps.map((s, i) => (
-          <li key={i} className="flex items-start gap-1.5 text-[11px] leading-5 text-content-secondary">
-            {s.ok ? <Check className="mt-0.5 h-3 w-3 flex-none text-brand" /> : <TriangleAlert className="mt-0.5 h-3 w-3 flex-none text-gold-500" />}
-            <span><span className="text-content">{s.label}</span>{(s.summary || s.detail) && <> · {s.summary || s.detail}</>}</span>
+          <li key={i} className="flex items-start gap-1.5 text-[12px] leading-5 text-content-tertiary">
+            {s.ok
+              ? <Check className="mt-1 h-3 w-3 flex-none text-emerald-500" />
+              : <TriangleAlert className="mt-1 h-3 w-3 flex-none text-gold-500" />}
+            <span><span className="text-content-secondary">{s.label}</span>{(s.summary || s.detail) && <> · {s.summary || s.detail}</>}</span>
           </li>
         ))}
       </ol>
@@ -72,14 +94,34 @@ function StepList({ steps, live }: { steps: { label: string; summary?: string; d
   );
 }
 
+/** 「正在处理」的三个点 */
+function TypingDots() {
+  return <span className="as-typing" aria-label="正在处理"><span /><span /><span /></span>;
+}
+
+/** 团队一侧每条发言的头一行：成员头像 + 名字 + 补充说明；旧消息没有成员就用助笔图标 */
+function SpeakerLine({ member, note, children }: { member?: AssistantMember | null; note?: string; children?: ReactNode }) {
+  return (
+    <div className="mb-1.5 flex h-6 items-center gap-2">
+      {member
+        ? <MemberAvatar member={member} />
+        : <span className="flex h-5 w-5 items-center justify-center rounded-full bg-brand-50 text-brand"><Sparkles className="h-3 w-3" /></span>}
+      <span className="flex-none whitespace-nowrap text-[13px] font-medium text-content">{member?.name ?? '智能助笔'}</span>
+      {note && <span className="as-meta min-w-0 truncate" title={note}>{note}</span>}
+      {children && <span className="flex-none">{children}</span>}
+    </div>
+  );
+}
+
 function ChapterCandidateLink({ item, onOpen }: { item: AssistantChapterCandidateRef; onOpen: (item: AssistantChapterCandidateRef) => void }) {
   return (
-    <button onClick={() => onOpen(item)} className="mt-2 flex w-full items-start gap-2 rounded border border-gold-300/50 bg-gold-50/50 px-2.5 py-2 text-left hover:bg-gold-50">
-      <FilePenLine className="mt-0.5 h-3.5 w-3.5 flex-none text-gold-500" />
-      <span className="min-w-0">
-        <span className="block text-xs font-medium text-content">第 {item.chapter_number} 章《{item.chapter_title}》候选稿 · {item.word_count} 字</span>
-        <span className="block truncate text-[11px] text-content-tertiary">{item.preview || '去章节写作页审阅后采用'}</span>
+    <button onClick={() => onOpen(item)} className="as-card flex w-full items-center gap-3 px-4 py-3 text-left hover:border-surface-border">
+      <FilePenLine className="h-4 w-4 flex-none text-brand" />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[13px] font-medium text-content">第 {item.chapter_number} 章《{item.chapter_title}》候选稿</span>
+        <span className="block truncate text-[12px] text-content-tertiary">{item.word_count} 字 · {item.preview || '去章节写作页审阅后采用'}</span>
       </span>
+      <ChevronRight className="h-4 w-4 flex-none text-content-tertiary" />
     </button>
   );
 }
@@ -93,6 +135,9 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
   const route = useAssistantStore((s) => s.route);
   const detail = useAssistantStore((s) => s.detail);
   const composeRequest = useAssistantStore((s) => s.composeRequest);
+  const newSessionNonce = useAssistantStore((s) => s.newSessionNonce);
+  const reviewNonce = useAssistantStore((s) => s.reviewNonce);
+  const visible = useAssistantStore((s) => s.open && s.mode === 'agent');
   const page = useMemo(() => pageContextOf({ route, detail }), [route, detail]);
 
   const [view, setView] = useState<AssistantSessionView | null>(null);
@@ -110,15 +155,59 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
   const [progress, setProgress] = useState<AssistantProgress | null>(null);
   const [usage, setUsage] = useState<AssistantContextUsage | null>(null);
   const [compacting, setCompacting] = useState(false);
+  const [confirmedPlans, setConfirmedPlans] = useState<Set<string>>(() => new Set());
+  const [trayOpen, setTrayOpen] = useState(false);
+  const [trayDetail, setTrayDetail] = useState<string | null>(null);
+  const [expandedReplies, setExpandedReplies] = useState<Set<string>>(() => new Set());
+  const [showJump, setShowJump] = useState(false);
   const pageRef = useRef(page);
   const jobIdRef = useRef<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  // 停在最新处（离底部不到 STICK_PX）才跟着新内容滚；往上翻着看时只亮「回到最新」
+  const stickRef = useRef(true);
+  const savedTopRef = useRef(0);
   // 运行中产生的页面刷新 / 跳转等它结束再做：不在任务写库时触发一大批页面请求，也不在半途把作者带走
   const pendingRef = useRef<{ nav: string | null; data: AssistantDataChange[] }>({ nav: null, data: [] });
 
-  const scrollToEnd = useCallback(() => {
-    requestAnimationFrame(() => listRef.current?.scrollTo({ top: listRef.current.scrollHeight }));
+  /** 滚到最新：force = 作者自己发了消息 / 刚打开对话 / 点了「回到最新」 */
+  const scrollToEnd = useCallback((force = false) => {
+    requestAnimationFrame(() => {
+      const el = listRef.current;
+      if (!el) return;
+      if (force || stickRef.current) {
+        el.scrollTop = el.scrollHeight;
+        stickRef.current = true;
+        setShowJump(false);
+      } else {
+        setShowJump(true);
+      }
+    });
+  }, []);
+
+  const onListScroll = () => {
+    const el = listRef.current;
+    if (!el || !el.clientHeight) return; // 抽屉 / 页签隐藏时不算
+    savedTopRef.current = el.scrollTop;
+    stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < STICK_PX;
+    if (stickRef.current) setShowJump(false);
+  };
+
+  // 关抽屉、切到核对 / 任务时对话是隐藏的，浏览器会丢掉滚动位置：重新显示时停在最新处，或回到作者刚才看的地方
+  useLayoutEffect(() => {
+    const el = listRef.current;
+    if (!visible || !el) return;
+    el.scrollTop = stickRef.current ? el.scrollHeight : savedTopRef.current;
+  }, [visible]);
+
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(() => {
+      if (el.clientHeight && stickRef.current) el.scrollTop = el.scrollHeight;
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
   }, []);
 
   const reload = useCallback(async () => {
@@ -153,6 +242,14 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
 
   useEffect(() => { sessionStorage.setItem(`assistant-draft:${projectId}`, draft); }, [draft, projectId]);
 
+  // 输入框跟着内容长高（像 iMessage），到上限后内部滚动
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, INPUT_MAX_HEIGHT)}px`;
+  }, [draft]);
+
   useEffect(() => { pageRef.current = page; }, [page]);
 
   // 对话变了、换了上限或成员模型、一轮跑完：重新估一次下一条要求的用量
@@ -177,12 +274,17 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
     } else if (m.type === 'candidate' && m.candidate) {
       const candidate = m.candidate as AssistantFieldCandidate;
       setView((prev) => (prev ? { ...prev, candidates: [...prev.candidates.filter((c) => c.id !== candidate.id), candidate] } : prev));
+      setLive((prev) => (prev ? withLiveCard(prev, m.member_id, (c) => ({ ...c, candidates: [...c.candidates, candidate.id] })) : prev));
     } else if (m.type === 'entity_candidate' && m.candidate) {
       const candidate = m.candidate as AssistantEntityCandidate;
       setView((prev) => (prev ? { ...prev, entity_candidates: [...prev.entity_candidates.filter((c) => c.id !== candidate.id), candidate] } : prev));
+      setLive((prev) => (prev
+        ? withLiveCard(prev, m.member_id, (c) => ({ ...c, entity_candidates: [...c.entity_candidates, candidate.id] }))
+        : prev));
     } else if (m.type === 'chapter_candidate' && m.candidate) {
       const item = m.candidate as AssistantChapterCandidateRef;
       pendingRef.current.data.push({ entity: 'chapter_candidate', chapterId: item.chapter_id, targetId: item.id });
+      setLive((prev) => (prev ? withLiveCard(prev, m.member_id, (c) => ({ ...c, chapter_candidates: [...c.chapter_candidates, item] })) : prev));
     } else if (m.type === 'navigate' && typeof m.page === 'string') {
       pendingRef.current.nav = m.page;
     } else if (m.type === 'speaker' && m.member) {
@@ -191,7 +293,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
     } else if (m.type === 'member_start' && m.member) {
       const member = m.member as AssistantMember;
       const task = String(m.task ?? '');
-      setLive((prev) => (prev ? { ...prev, delegations: [...prev.delegations, { member, task, content: '' }] } : prev));
+      setLive((prev) => (prev ? { ...prev, delegations: [...prev.delegations, { member, task, content: '', cards: noAttachments() }] } : prev));
       scrollToEnd();
     } else if (m.type === 'member_message' && m.member) {
       const member = m.member as AssistantMember;
@@ -200,14 +302,15 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
         if (!prev) return prev;
         const index = prev.delegations.findIndex((d) => d.member.id === member.id && !d.content);
         const delegations = index < 0
-          ? [...prev.delegations, { member, task: '', content }]
+          ? [...prev.delegations, { member, task: '', content, cards: noAttachments() }]
           : prev.delegations.map((d, i) => (i === index ? { ...d, content } : d));
         return { ...prev, delegations };
       });
       scrollToEnd();
     } else if (m.type === 'plan' && m.plan) {
-      const kind = (m.plan as { kind?: string }).kind;
-      pendingRef.current.data.push({ entity: kind === 'outlines' ? 'chapter_outline' : 'volume' });
+      const plan = m.plan as AssistantPlan;
+      pendingRef.current.data.push({ entity: plan.kind === 'outlines' ? 'chapter_outline' : 'volume' });
+      setLive((prev) => (prev ? withLiveCard(prev, m.member_id, (c) => ({ ...c, plans: [...c.plans, plan] })) : prev));
     } else if (m.type === 'job' && m.job) {
       const job = m.job as { title?: string };
       toast.success(`${job.title ?? '后台任务'}已开始，进度在右下角任务托盘`);
@@ -241,10 +344,10 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
     } finally {
       unsubscribe();
       jobIdRef.current = null;
+      await reload(); // 先读回存好的消息再撤掉运行中的那段，中间不闪空
       setBusy(false);
       setLive(null);
       setCompacting(false);
-      await reload();
       flushPending();
       void loadProgress();
       scrollToEnd();
@@ -255,6 +358,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
     let cancelled = false;
     void (async () => {
       const next = await reload();
+      if (!cancelled) scrollToEnd(true); // 打开对话先看到最新的
       if (cancelled || !next?.active_run || next.active_run.status !== 'running') return;
       await useAIJobsStore.getState().syncFromServer(projectId);
       const job = Object.values(useAIJobsStore.getState().jobs).find(
@@ -262,7 +366,6 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
       );
       if (job && !cancelled) void follow(job.id, next.active_run.goal);
     })();
-    scrollToEnd();
     return () => { cancelled = true; };
   }, [follow, projectId, reload, scrollToEnd]);
 
@@ -281,7 +384,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
   const runJob = async (goal: string, connect: (o: SSEClientOptions<AssistantRunResult>) => Promise<unknown>) => {
     setBusy(true);
     setLive(newLive(goal));
-    scrollToEnd();
+    scrollToEnd(true);
     try {
       await runAIJob<AssistantRunResult>({
         kind: 'assistant_run',
@@ -314,7 +417,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
     try {
       const data = await assistantApi.preview(projectId, { message, page: context });
       setPreview({ data, key: `${message}\n${JSON.stringify(context)}` });
-      scrollToEnd();
+      scrollToEnd(true);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '发送核对没准备好');
     } finally {
@@ -352,8 +455,11 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
     if (jobIdRef.current) void useAIJobsStore.getState().cancel(jobIdRef.current);
   };
 
-  const startNew = async () => {
-    if (busy) return;
+  const startNew = useCallback(async () => {
+    if (busy) {
+      toast.info('团队正在处理这一轮，停止或等它结束后再开新对话');
+      return;
+    }
     try {
       setView(await assistantApi.newSession(projectId));
       setPreview(null);
@@ -361,7 +467,23 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '没能开始新对话');
     }
-  };
+  }, [busy, projectId]);
+
+  // 头部的「新对话」按钮：store 里的计数变了就开一次（挂载时的初始值不算）
+  const seenNewSession = useRef(newSessionNonce);
+  useEffect(() => {
+    if (newSessionNonce === seenNewSession.current) return;
+    seenNewSession.current = newSessionNonce;
+    void startNew();
+  }, [newSessionNonce, startNew]);
+
+  // 「核对」页点了待确认的候选：展开待确认栏（挂载时的初始值不算）
+  const seenReview = useRef(reviewNonce);
+  useEffect(() => {
+    if (reviewNonce === seenReview.current) return;
+    seenReview.current = reviewNonce;
+    setTrayOpen(true);
+  }, [reviewNonce]);
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.nativeEvent.isComposing) {
@@ -407,188 +529,350 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
     requestAnimationFrame(() => inputRef.current?.focus());
   };
 
-  const renderMessage = (m: AssistantMessageView): ReactNode => {
-    const fieldCandidates = m.candidates.map((id) => candidatesById.get(id)).filter((c): c is AssistantFieldCandidate => Boolean(c));
-    const entityCandidates = (m.entity_candidates ?? []).map((id) => entityCandidatesById.get(id)).filter((c): c is AssistantEntityCandidate => Boolean(c));
-    const isUser = m.role === 'user';
+  const markPlanConfirmed = (plan: AssistantPlan) => setConfirmedPlans((prev) => new Set(prev).add(planKey(plan)));
+  const lookups = useMemo(
+    () => ({ fields: candidatesById, entities: entityCandidatesById, confirmedPlans }),
+    [candidatesById, entityCandidatesById, confirmedPlans],
+  );
+  const pending = pendingChanges([
+    ...messages.map(attachmentsOf),
+    ...(live ? [live.cards, ...live.delegations.map((d) => d.cards)] : []),
+  ], lookups);
+
+  /** 改动的明细：点开一行看到的完整卡片（按钮和待确认栏里的是同一套操作；待确认栏里按钮在行上，卡片只给看） */
+  const renderDetail: RenderDetail = (item, { showActions }) => {
+    const { ref } = item;
+    if (ref.kind === 'field') {
+      return (
+        <FieldCandidateCard
+          projectId={projectId} candidate={ref.candidate} onChange={updateCandidate} onOpenPage={(p) => onNavigate(p)} showActions={showActions}
+        />
+      );
+    }
+    if (ref.kind === 'entity') {
+      return (
+        <EntityCandidateCard
+          projectId={projectId} candidate={ref.candidate} onChange={updateEntityCandidate} onOpenPage={(p) => onNavigate(p)} showActions={showActions}
+        />
+      );
+    }
+    if (ref.kind === 'plan') {
+      return (
+        <PlanCard
+          plan={ref.plan} confirmed={confirmedPlans.has(item.key)} onConfirmed={markPlanConfirmed} onFailed={() => void reload()}
+          onNavigate={(p) => onNavigate(p)} showActions={showActions}
+        />
+      );
+    }
+    return <ChapterCandidateLink item={ref.item} onOpen={openChapterCandidate} />;
+  };
+
+  /** 待确认栏里的单条 / 全部处理（全部处理时页面刷新攒到最后一起发） */
+  const batchChangesRef = useRef(new Set<string>());
+  const decide: DecideChange = async (item, action, opts) => {
+    const { ref } = item;
+    const quiet = Boolean(opts?.quiet);
+    const say = (text: string) => { if (!quiet) toast.success(text); };
+    try {
+      if (ref.kind === 'field') {
+        const next = await fieldAction(projectId, ref.candidate, action, !quiet);
+        updateCandidate(next);
+        if (quiet && action === 'apply' && next.entity) batchChangesRef.current.add(next.entity);
+        say(action === 'apply' ? `已应用到「${ref.candidate.label}」` : '已放弃这份候选');
+      } else if (ref.kind === 'entity') {
+        const next = await entityAction(projectId, ref.candidate, action, !quiet);
+        updateEntityCandidate(next);
+        if (quiet && action === 'apply') batchChangesRef.current.add(next.entity_type);
+        say(action === 'apply' ? `已建档：${ref.candidate.label}` : '已放弃这份新建候选');
+      } else if (ref.kind === 'plan' && action === 'apply') {
+        await confirmPlan(ref.plan, !quiet);
+        if (quiet) batchChangesRef.current.add(planEntity(ref.plan));
+        markPlanConfirmed(ref.plan);
+        say(ref.plan.kind === 'outlines' ? '章纲已确认，可以开写了' : '卷纲已确认');
+      } else if (ref.kind === 'chapter') {
+        openChapterCandidate(ref.item);
+      }
+      return true;
+    } catch (err) {
+      toast.error(`「${item.title}」没处理成：${errorDetail(err)}`);
+      if (ref.kind === 'plan') void reload();
+      return false;
+    }
+  };
+  const flushBatchChanges = () => {
+    batchChangesRef.current.forEach((entity) => emitAssistantData({ entity }));
+    batchChangesRef.current.clear();
+  };
+
+  /** 回复正文；成员几千字的长回复先折起来 */
+  const replyBody = (key: string, text: string, foldable: boolean): ReactNode => {
+    const long = foldable && text.length > LONG_REPLY;
+    const folded = long && !expandedReplies.has(key);
+    const toggle = () => setExpandedReplies((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
     return (
-      <article key={m.id} className={cn('rounded border px-3 py-2.5', isUser ? 'border-surface-border-light bg-surface-paper' : 'border-surface-border bg-white')}>
-        <header className="mb-1 flex items-center justify-between gap-2">
-          <span className="flex items-center gap-1.5 text-[11px] font-medium text-content-tertiary">
-            {isUser ? '你' : m.member
-              ? <><MemberAvatar member={m.member} /><span className="text-content-secondary">{m.member.name}</span></>
-              : <><Sparkles className="h-3 w-3 text-brand" />智能助笔</>}
-            {m.delegated && <span className="lj-badge lj-badge--muted">受主编委托</span>}
-            {m.answer && <span className="lj-badge lj-badge--muted">回答</span>}
-            {m.question && <span className="lj-badge lj-badge--candidate">提问</span>}
-          </span>
-          <span className="flex items-center gap-0.5">
-            <span className="mr-1 text-[10px] text-content-tertiary">{m.content.length} 字</span>
-            <button onClick={() => void copy(m)} className="rounded p-1 text-content-tertiary hover:bg-surface-hover hover:text-content" title="复制">
-              {copied === m.id ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-            </button>
-            <button onClick={() => quote(m)} className="rounded p-1 text-content-tertiary hover:bg-surface-hover hover:text-content" title="引用到输入框（可先选中其中几句）">
-              <Quote className="h-3 w-3" />
-            </button>
-            {isUser && !m.answer && (
-              <button onClick={() => { setDraft(m.content); inputRef.current?.focus(); }} className="rounded p-1 text-content-tertiary hover:bg-surface-hover hover:text-content" title="编辑后再发">
-                <PencilLine className="h-3 w-3" />
-              </button>
-            )}
-          </span>
-        </header>
-        <RichText text={m.content} />
-        {!isUser && <StepList steps={m.steps} />}
-        {fieldCandidates.map((c) => (
-          <div key={c.id} className="mt-2">
-            <FieldCandidateCard projectId={projectId} candidate={c} onChange={updateCandidate} onOpenPage={(p) => onNavigate(p)} />
-          </div>
-        ))}
-        {entityCandidates.map((c) => (
-          <div key={c.id} className="mt-2">
-            <EntityCandidateCard projectId={projectId} candidate={c} onChange={updateEntityCandidate} onOpenPage={(p) => onNavigate(p)} />
-          </div>
-        ))}
-        {m.chapter_candidates.map((item) => <ChapterCandidateLink key={item.id} item={item} onOpen={openChapterCandidate} />)}
-        {(m.plans ?? []).map((plan, i) => <PlanCard key={`${m.id}-plan-${i}`} plan={plan} onNavigate={(p) => onNavigate(p)} />)}
-      </article>
+      <div>
+        <div className={cn('as-prose', folded && 'relative max-h-[11.5rem] overflow-hidden')}>
+          <RichText text={text} />
+          {folded && <div className="pointer-events-none absolute inset-x-0 bottom-0 h-14 bg-gradient-to-t from-white to-transparent" />}
+        </div>
+        {long && (
+          <button onClick={toggle} className="as-link mt-1">{folded ? `展开全文（${text.length} 字）` : '收起'}</button>
+        )}
+      </div>
     );
   };
 
+  // 正在等作者回答的那条提问：问题在下方提问卡里，消息里不再整段重复
+  const activeQuestionId = waitingRun?.question && !busy
+    ? [...messages].reverse().find((m) => m.question && m.run_id === waitingRun.id)?.id
+    : undefined;
+
+  /** 悬停才出现的小操作：字数、复制、引用（作者自己的话还能改了再发） */
+  const messageActions = (m: AssistantMessageView): ReactNode => (
+    <span className="flex items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+      {m.role !== 'user' && <span className="mr-1 text-[11px] tabular-nums text-content-tertiary">{m.content.length} 字</span>}
+      <button onClick={() => void copy(m)} className="as-icon-btn h-6 w-6" title="复制">
+        {copied === m.id ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+      </button>
+      <button onClick={() => quote(m)} className="as-icon-btn h-6 w-6" title="引用到输入框（可先选中其中几句）">
+        <Quote className="h-3.5 w-3.5" />
+      </button>
+      {m.role === 'user' && !m.answer && (
+        <button onClick={() => { setDraft(m.content); inputRef.current?.focus(); }} className="as-icon-btn h-6 w-6" title="编辑后再发">
+          <PencilLine className="h-3.5 w-3.5" />
+        </button>
+      )}
+    </span>
+  );
+
+  const renderMessage = (m: AssistantMessageView): ReactNode => {
+    if (m.role === 'user') {
+      // 操作按钮浮在下方的间隔里（悬停才出现），不占行高
+      return (
+        <div key={m.id} className="group flex flex-col items-end">
+          {m.answer && <span className="as-meta mb-1">回答提问</span>}
+          <div className="relative max-w-[88%]">
+            <div className="as-user-msg"><RichText text={m.content} /></div>
+            <div className="absolute right-0 top-full z-10">{messageActions(m)}</div>
+          </div>
+        </div>
+      );
+    }
+    const note = [m.delegated && '受主编委托', m.question && '向你提问'].filter(Boolean).join(' · ');
+    // 照 AI 编程软件的顺序：处理记录、改动（各一行，默认收起）在前，回复正文在最后
+    return (
+      <div key={m.id} className="group">
+        <SpeakerLine member={m.member} note={note}>
+          <span className="ml-auto">{messageActions(m)}</span>
+        </SpeakerLine>
+        <div className="space-y-2">
+          <StepList steps={m.steps} />
+          <ChangeList items={changeItems(attachmentsOf(m), lookups)} renderDetail={renderDetail} />
+          {m.id === activeQuestionId
+            ? <p className="as-prose text-content-secondary">向你提了 {m.question?.questions.length ?? 0} 个问题，请在下方回答。</p>
+            : replyBody(m.id, m.content, Boolean(m.delegated))}
+        </div>
+      </div>
+    );
+  };
+
+  const sendLabel = previewCurrent ? '确认发送' : preview ? '更新核对' : '核对后发送';
+  const toggleReview = () => {
+    const next = !reviewBeforeSend;
+    setReviewBeforeSend(next);
+    localStorage.setItem(REVIEW_KEY, String(next));
+    setPreview(null);
+  };
+  const pageHint = `共创室会参考你所在的页面（${page.label || '本项目'}），但不限于这里：可以直接说要处理的设定、人物或章节，团队会自己定位。`
+    + (page.selection ? `\n\n已选中：${page.selection.text.slice(0, 200)}${page.selection.text.length > 200 ? '…' : ''}` : '');
+
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <details className="border-b border-surface-border-light bg-surface-paper px-3 py-1.5 text-[11px] text-content-secondary">
-        <summary className="flex cursor-pointer select-none items-center gap-2">
-          <span className="truncate font-medium text-content">{page.label || '本项目'}</span>
-          {page.selection && <span className="lj-badge lj-badge--candidate">已选 {page.selection.text.length} 字</span>}
-          <span className="ml-auto flex items-center gap-0.5 text-content-tertiary">当前内容<ChevronDown className="h-3 w-3" /></span>
-        </summary>
-        <p className="mt-1 leading-5 text-content-tertiary">共创室会参考你所在的页面，但不限于这里：可以直接说要处理的设定、人物或章节，团队会自己定位。</p>
-        {page.selection && <p className="mt-1 line-clamp-3 border-l-2 border-gold-300 pl-2 leading-5">{page.selection.text}</p>}
-      </details>
-      {progress && <ProgressStrip progress={progress} onAsk={askEditor} disabled={busy} />}
-
-      <div ref={listRef} className="min-h-0 flex-1 space-y-2.5 overflow-y-auto px-3 py-3">
-        {showTeam && team && <TeamSettings projectId={projectId} team={team} onChange={setTeam} onClose={() => setShowTeam(false)} />}
-        {loadError && <p className="rounded border border-cinnabar/30 bg-cinnabar-wash px-3 py-2 text-xs text-cinnabar">{loadError}</p>}
-        {!messages.length && !live && (
-          <div className="rounded border border-dashed border-surface-border bg-surface-paper px-3 py-3">
-            <p className="text-[11px] tracking-wide text-content-tertiary">共创室 · 一支团队陪你把书写完</p>
-            <h3 className="mt-0.5 font-serif text-base font-semibold text-content">从一个想法开始</h3>
-            <p className="mt-1 text-xs leading-6 text-content-secondary">
-              主编会先弄清你想写什么，再按 总纲 → 卷纲 → 章纲 → 正文 推进，把专业的事交给世界观、人物、总纲、章节、正文、审校几位成员。
-              需要你拍板时会先问你；所有改动和规划都是候选或草案，你确认了才写进书里。
-            </p>
-            {members.length > 0 && (
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                {members.map((mb) => (
-                  <button key={mb.id} onClick={() => mention(mb)} className="flex items-center gap-1 rounded border border-surface-border-light bg-white px-1.5 py-1 text-[11px] text-content-secondary hover:border-brand/40" title={mb.responsibility}>
-                    <MemberAvatar member={mb} />{mb.name}
-                  </button>
-                ))}
+      <div className="relative min-h-0 flex-1">
+        <div ref={listRef} onScroll={onListScroll} className="h-full overflow-y-auto [overflow-anchor:none]">
+          <div className="space-y-6 px-4 py-5">
+            {loadError && <p className="rounded-[10px] bg-cinnabar-wash px-3.5 py-2.5 text-[13px] text-cinnabar">{loadError}</p>}
+            {!messages.length && !live && (
+              <div className="flex flex-col items-center pt-6 text-center">
+                <span className="flex h-11 w-11 items-center justify-center rounded-full bg-brand-50 text-brand">
+                  <Sparkles className="h-5 w-5" />
+                </span>
+                <h3 className="mt-4 text-[18px] font-semibold text-content">今天想写点什么？</h3>
+                <p className="mt-2 max-w-[360px] text-[13px] leading-[1.7] text-content-secondary">
+                  主编会先弄清你想写什么，再按 总纲 → 卷纲 → 章纲 → 正文 推进，把专业的事交给团队成员。
+                  需要你拍板时会先问你；所有改动都是候选或草案，你确认了才写进书里。
+                </p>
+                <div className="mt-6 grid w-full grid-cols-2 gap-2.5 text-left">
+                  {(team?.starters ?? []).map((s) => (
+                    <button key={s.id} onClick={() => { setDraft((prev) => appendRequest(prev, s.message)); inputRef.current?.focus(); }}
+                      className="as-card px-3.5 py-3 text-left hover:border-brand/40 hover:bg-brand-50/40">
+                      <span className="block text-[13px] font-medium text-content">{s.label}</span>
+                      <span className="mt-1 block text-[12px] leading-[1.5] text-content-tertiary">{s.hint}</span>
+                    </button>
+                  ))}
+                </div>
+                {members.length > 0 && (
+                  <div className="mt-6 w-full">
+                    <p className="as-meta mb-2">团队成员 · 点一位直接找他</p>
+                    <div className="flex flex-wrap justify-center gap-1.5">
+                      {members.map((mb) => (
+                        <button key={mb.id} onClick={() => mention(mb)} className="as-chip pl-1" title={mb.responsibility}>
+                          <MemberAvatar member={mb} />{mb.name}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
-            <div className="mt-2 grid grid-cols-2 gap-1.5">
-              {(team?.starters ?? []).map((s) => (
-                <button key={s.id} onClick={() => { setDraft((prev) => appendRequest(prev, s.message)); inputRef.current?.focus(); }}
-                  className="rounded border border-surface-border-light bg-white px-2.5 py-2 text-left hover:border-brand/40 hover:bg-brand-50">
-                  <span className="block text-xs font-semibold text-content">{s.label}</span>
-                  <span className="block text-[11px] text-content-tertiary">{s.hint}</span>
-                </button>
-              ))}
-            </div>
-            <p className="mt-2 text-[11px] text-content-tertiary">快捷入口只填入要求，不会自动发送；已有草稿会保留。点成员头像可以「@」他直接对话。</p>
-          </div>
-        )}
-        {messages.map(renderMessage)}
-        {live?.delegations.map((d, i) => (
-          <article key={`delegation-${i}`} className="rounded border border-surface-border bg-white px-3 py-2.5">
-            <header className="mb-1 flex items-center gap-1.5 text-[11px] font-medium text-content-tertiary">
-              <MemberAvatar member={d.member} /><span className="text-content-secondary">{d.member.name}</span>
-              <span className="lj-badge lj-badge--muted">受主编委托</span>
-              {!d.content && <Loader2 className="h-3 w-3 animate-spin text-brand" />}
-            </header>
-            {d.content ? <RichText text={d.content} /> : <p className="text-xs text-content-tertiary">正在处理：{d.task || '主编交代的事'}</p>}
-          </article>
-        ))}
-        {live && (
-          <article className="rounded border border-brand/30 bg-white px-3 py-2.5">
-            <header className="mb-1 flex items-center gap-1.5 text-[11px] font-medium text-brand">
-              <Loader2 className="h-3 w-3 animate-spin" />
-              {live.member ? <><MemberAvatar member={live.member} />{live.member.name}</> : '智能助笔'} · {live.text ? '正在回复' : live.steps.length ? '正在处理' : '思考中'}
-            </header>
-            {live.text ? <RichText text={live.text} /> : <p className="text-xs text-content-tertiary">正在查找相关内容…</p>}
-            <StepList steps={live.steps} live />
-          </article>
-        )}
-        {waitingRun?.question && !busy && (
-          <AuthorQuestionCard key={questionCardKey(waitingRun)} question={waitingRun.question} busy={busy} onSubmit={(a) => void answer(a)} />
-        )}
-        {preview && (
-          <section className={cn('rounded border bg-white px-3 py-2.5', previewCurrent ? 'border-brand/40' : 'border-gold-300')}>
-            <header className="mb-1 flex items-center justify-between">
-              <span className="text-xs font-semibold text-content">发送前核对</span>
-              <span className="text-[11px] text-content-tertiary">{previewCurrent ? '核对后点「确认发送」' : '要求或页面变了，请更新核对'}</span>
-            </header>
-            <p className="mb-1 text-[11px] text-content-tertiary">
-              本次上下文约 {formatTokens(preview.data.context.used)} / {formatTokens(preview.data.context.limit)}（{preview.data.context.percent}%）
-              · 带入 {preview.data.context.history.included} 条近期对话
-              {preview.data.context.will_compact > 0 && ` · 发送时会先把较早的 ${preview.data.context.will_compact} 条压成前情摘要`}
-            </p>
-            <p className="mb-1 border-l-2 border-gold-300 bg-gold-50/50 px-2 py-1 text-xs leading-6">{preview.data.message}</p>
-            {preview.data.sections.map((s) => (
-              <details key={s.label} className="border-t border-surface-border-light py-1">
-                <summary className="cursor-pointer text-[11px] text-brand">{s.label}</summary>
-                <pre className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap break-words font-sans text-[11px] leading-5 text-content-secondary">{s.content}</pre>
-              </details>
+            {messages.map(renderMessage)}
+            {live?.delegations.map((d, i) => (
+              <div key={`delegation-${i}`}>
+                <SpeakerLine member={d.member} note={d.content ? '受主编委托' : `受主编委托 · 正在处理：${d.task || '主编交代的事'}`}>
+                  {!d.content && <TypingDots />}
+                </SpeakerLine>
+                <div className="space-y-2">
+                  <ChangeList items={changeItems(d.cards, lookups)} renderDetail={renderDetail} />
+                  {d.content && replyBody(`delegation-${i}`, d.content, true)}
+                </div>
+              </div>
             ))}
-            <details className="border-t border-surface-border-light py-1">
-              <summary className="cursor-pointer text-[11px] text-brand">助笔的规则与工具</summary>
-              <pre className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap break-words font-sans text-[11px] leading-5 text-content-secondary">{preview.data.rules}</pre>
-            </details>
-          </section>
+            {live && (
+              <div>
+                <SpeakerLine member={live.member} note={live.text ? '正在回复' : live.steps.length ? '正在处理' : '正在思考'}>
+                  {!live.text && <TypingDots />}
+                </SpeakerLine>
+                <div className="space-y-2">
+                  <StepList steps={live.steps} live />
+                  <ChangeList items={changeItems(live.cards, lookups)} renderDetail={renderDetail} />
+                  {live.text && <div className="as-prose"><RichText text={live.text} /></div>}
+                </div>
+              </div>
+            )}
+            {waitingRun?.question && !busy && (
+              <AuthorQuestionCard key={questionCardKey(waitingRun)} question={waitingRun.question} busy={busy} onSubmit={(a) => void answer(a)} />
+            )}
+            {preview && (
+              <section className={cn('as-card px-4 py-3.5', !previewCurrent && 'border-gold-300')}>
+                <header className="flex items-center gap-2">
+                  <span className="text-[14px] font-semibold text-content">发送前核对</span>
+                  <span className={cn('ml-auto text-[12px]', previewCurrent ? 'text-content-tertiary' : 'text-gold-500')}>
+                    {previewCurrent ? '核对后点「确认发送」' : '要求或页面变了，请更新核对'}
+                  </span>
+                  {!busy && (
+                    <button onClick={() => setPreview(null)} className="as-icon-btn -mr-1.5 h-7 w-7" title="收起核对">
+                      <X className="h-4 w-4" />
+                    </button>
+                  )}
+                </header>
+                <p className="as-meta mt-1">
+                  本次上下文约 {formatTokens(preview.data.context.used)} / {formatTokens(preview.data.context.limit)}（{preview.data.context.percent}%）
+                  · 带入 {preview.data.context.history.included} 条近期对话
+                  {preview.data.context.will_compact > 0 && ` · 发送时会先把较早的 ${preview.data.context.will_compact} 条压成前情摘要`}
+                </p>
+                <p className="as-user-msg mt-3">{preview.data.message}</p>
+                <div className="mt-3 divide-y divide-surface-border-light border-t border-surface-border-light">
+                  {[...preview.data.sections, { label: '助笔的规则与工具', content: preview.data.rules }].map((s) => (
+                    <details key={s.label} className="as-disclosure py-2">
+                      <summary className="text-[13px] text-content">
+                        <ChevronRight className="as-chevron h-3.5 w-3.5 text-content-tertiary" />{s.label}
+                      </summary>
+                      <pre className="mt-1.5 max-h-48 overflow-y-auto whitespace-pre-wrap break-words pl-5 font-sans text-[12px] leading-5 text-content-secondary">{s.content}</pre>
+                    </details>
+                  ))}
+                </div>
+              </section>
+            )}
+          </div>
+        </div>
+        {showJump && (
+          <button
+            onClick={() => scrollToEnd(true)}
+            className="absolute bottom-3 left-1/2 z-10 inline-flex -translate-x-1/2 items-center gap-1 rounded-full border border-surface-border bg-white px-3 py-1.5 text-[12px] text-content-secondary shadow-md hover:text-content"
+          >
+            <ArrowDown className="h-3.5 w-3.5" />回到最新
+          </button>
+        )}
+        {showTeam && team && (
+          <div className="absolute inset-0 z-20 overflow-y-auto bg-white px-4 py-5">
+            <TeamSettings projectId={projectId} team={team} onChange={setTeam} onClose={() => setShowTeam(false)} />
+          </div>
         )}
       </div>
 
-      <div className="border-t border-surface-border bg-white px-3 py-2">
-        {notice && <p className="mb-1 text-[11px] text-content-tertiary">{notice}</p>}
-        {busy && <p className="mb-1 text-[11px] text-brand">正在处理本轮要求…可以先写下一条，处理完再发。</p>}
-        {waitingRun && !busy && <p className="mb-1 text-[11px] text-gold-500">团队在等你回答上面的问题；直接发新要求会结束那轮提问。</p>}
-        <TeamBar members={members} onMention={mention} onOpenSettings={() => setShowTeam((v) => !v)} />
-        <textarea
-          ref={inputRef}
-          value={draft}
-          onChange={(e) => { setDraft(e.target.value); setNotice(''); }}
-          onKeyDown={onKeyDown}
-          rows={3}
-          maxLength={MAX_CHARS}
-          placeholder="和主编说说你的想法；「@成员」可直接找人…（Ctrl+Enter 发送）"
-          className="hh-textarea text-sm"
+      <div className="flex-none px-3 pb-3 pt-2">
+        <PendingTray
+          items={pending}
+          open={trayOpen}
+          onOpenChange={setTrayOpen}
+          detailKey={trayDetail}
+          onDetailChange={setTrayDetail}
+          renderDetail={renderDetail}
+          onDecide={decide}
+          onBatchEnd={flushBatchChanges}
         />
-        <div className="mt-1.5 flex flex-wrap items-center gap-2">
-          <span className="text-[10px] text-content-tertiary">{draft.length}/{MAX_CHARS}</span>
-          <ContextMeter usage={usage} compacting={compacting} />
-          <label className="flex cursor-pointer items-center gap-1 text-[11px] text-content-secondary">
-            <input type="checkbox" checked={reviewBeforeSend} onChange={(e) => { setReviewBeforeSend(e.target.checked); localStorage.setItem(REVIEW_KEY, String(e.target.checked)); setPreview(null); }} />
-            发送前核对
-          </label>
-          <div className="ml-auto flex items-center gap-1.5">
-            <button onClick={() => void startNew()} disabled={busy} className="hh-btn-ghost hh-btn-sm h-8 px-2 text-[11px]" title="开始新对话">
-              <MessageSquarePlus className="h-3.5 w-3.5" />新对话
+        {progress && !busy && !pending.length && <NextStepHint progress={progress} onAsk={askEditor} disabled={busy} />}
+        {notice && <p className="as-meta mb-2 px-1">{notice}</p>}
+        {busy && <p className="mb-2 px-1 text-[12px] text-brand">正在处理本轮要求…可以先写下一条，处理完再发。</p>}
+        {waitingRun && !busy && <p className="mb-2 px-1 text-[12px] text-gold-500">团队在等你回答上面的问题；直接发新要求会结束那轮提问。</p>}
+        <div className="rounded-[18px] border border-surface-border bg-white shadow-[0_4px_16px_-8px_rgba(29,36,32,0.16)] transition-[border-color,box-shadow] focus-within:border-brand/50 focus-within:shadow-[0_4px_16px_-6px_rgba(40,91,77,0.28)]">
+          <textarea
+            ref={inputRef}
+            value={draft}
+            onChange={(e) => { setDraft(e.target.value); setNotice(''); }}
+            onKeyDown={onKeyDown}
+            rows={2}
+            maxLength={MAX_CHARS}
+            placeholder="和主编说说你的想法，Ctrl+Enter 发送"
+            className="block min-h-[56px] w-full resize-none !rounded-none !border-0 !bg-transparent px-4 pb-1 pt-3 text-[14px] leading-[1.6] !text-content outline-none placeholder:!text-content-tertiary focus:!shadow-none"
+          />
+          <div className="flex items-center gap-1.5 px-2.5 pb-2.5 pt-1">
+            <MemberPicker members={members} onMention={mention} onOpenSettings={() => setShowTeam((v) => !v)} />
+            <span className="as-chip max-w-[11rem] shrink cursor-default" title={pageHint}>
+              <MapPin className="h-3.5 w-3.5 flex-none" />
+              <span className="truncate">
+                {page.label || '本项目'}
+                {page.selection && <span className="text-brand-600"> · 已选 {page.selection.text.length} 字</span>}
+              </span>
+            </span>
+            <button
+              onClick={toggleReview}
+              aria-pressed={reviewBeforeSend}
+              aria-label="发送前核对"
+              className={cn('as-chip', reviewBeforeSend && 'as-chip--on px-1.5')}
+              title={reviewBeforeSend ? '发送前核对：已打开，点一下关掉' : '打开后，发送前先列出这次会带给团队的内容，确认了再发'}
+            >
+              <ListChecks className="h-3.5 w-3.5" />{!reviewBeforeSend && '核对'}
             </button>
-            {preview && !busy && (
-              <button onClick={() => setPreview(null)} className="hh-btn-ghost hh-btn-sm h-8 px-2 text-[11px]" title="收起核对">
-                <X className="h-3.5 w-3.5" />
-              </button>
-            )}
-            {busy ? (
-              <button onClick={stop} className="hh-btn-secondary hh-btn-sm h-8"><Square className="h-3.5 w-3.5" />停止</button>
-            ) : (
-              <button onClick={() => void send()} disabled={!draft.trim() || previewLoading} className="hh-btn-primary hh-btn-sm h-8">
-                {previewLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <SendHorizontal className="h-3.5 w-3.5" />}
-                {reviewBeforeSend ? (previewCurrent ? '确认发送' : preview ? '更新核对' : '核对后发送') : '发送'}
-              </button>
-            )}
+            <div className="ml-auto flex items-center gap-2.5">
+              {draft.length > MAX_CHARS * 0.8 && (
+                <span className="text-[11px] tabular-nums text-gold-500">{draft.length}/{MAX_CHARS}</span>
+              )}
+              <ContextMeter usage={usage} compacting={compacting} />
+              {busy ? (
+                <button onClick={stop} className="flex h-8 w-8 flex-none items-center justify-center rounded-full bg-content text-white hover:bg-black" title="停止">
+                  <Square className="h-3 w-3 fill-current" />
+                </button>
+              ) : reviewBeforeSend ? (
+                <button onClick={() => void send()} disabled={!draft.trim() || previewLoading} className="as-btn-primary rounded-full px-3.5" title="Ctrl+Enter">
+                  {previewLoading && <Loader2 className="h-3.5 w-3.5 animate-spin" />}{sendLabel}
+                </button>
+              ) : (
+                <button
+                  onClick={() => void send()}
+                  disabled={!draft.trim() || previewLoading}
+                  className="flex h-8 w-8 flex-none items-center justify-center rounded-full bg-brand text-white hover:bg-brand-600 disabled:cursor-not-allowed disabled:bg-surface-border"
+                  title="发送（Ctrl+Enter）"
+                >
+                  {previewLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" strokeWidth={2.5} />}
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </div>

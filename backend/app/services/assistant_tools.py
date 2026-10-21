@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import copy
 import json
 import re
 from dataclasses import dataclass, field
@@ -22,8 +23,10 @@ from app.models.chapter_outline import ChapterOutline
 from app.models.character import Character
 from app.models.knowledge import KbSource
 from app.models.project import Project
+from app.models.setting_entry import SettingEntry
 from app.models.story_outline import StoryOutline
 from app.models.world_map import WorldMapLocation
+from app.models.world_rule import WorldRule
 from app.models.volume import Volume
 from app.services import assistant_candidate_service as cands
 from app.services import assistant_entity_candidate_service as entities
@@ -44,25 +47,41 @@ PAGES = {
     "chapter-analysis": "章节写作", "writing-styles": "写作风格", "memories": "故事账本",
 }
 
+BATCH_LIMIT = 8
+_BATCH_HINT = f"；一次可以提多条：{{\"items\": [{{...}}, {{...}}]}}（每条的参数同单条，最多 {BATCH_LIMIT} 条）"
+
 TOOLS: dict[str, tuple[str, str, str]] = {
-    "search_project": ("查找资料", "在本书的章节正文、章纲、人物、设定、地点里按关键词找资料（返回出处与摘录）",
+    "search_project": ("查找资料", "在本书的章节正文、章纲、卷纲、总纲、人物、组织、设定、设定条目、世界规则、地点里按关键词找资料"
+                                   "（返回出处与摘录）",
                        '{"query": "关键词（多个用空格分开）"}'),
-    "list_fields": ("定位内容", "列出可以修改的内容项：字段 ID、目标 ID、名称与当前内容摘要；可按人物名 / 章号 / 字段名筛选",
+    "list_fields": ("定位内容", "列出可以修改的内容项：字段 ID、目标 ID、名称与当前内容摘要；可按人物名 / 章号 / 卷号 / 字段名筛选"
+                                "（本书还没有总纲时，总纲各字段的目标是 new，照常 propose_edit，作者应用时新建总纲）",
                     '{"query": "可选，例如 林尘 性格"}'),
-    "read_field": ("读取内容", "读取某一项的当前完整内容（修改前必须先读取这一项）", '{"field_id": "...", "target_id": "..."}'),
-    "propose_edit": ("准备修改候选", "为某一项生成修改候选：value 是完整的新内容（列表类字段给字符串数组），作者确认后才写入",
+    "read_field": ("读取内容", "读取某一项的当前完整内容", '{"field_id": "...", "target_id": "..."}'),
+    "propose_edit": ("准备修改候选", "为某一项生成修改候选：value 是完整的新内容（列表类字段给字符串数组），作者在卡片上点「应用」才写入；"
+                                     "这一项已有内容而你还没读过时，会先把现有内容给你，按它给出完整新值再提一次",
                      '{"field_id": "...", "target_id": "...", "value": "完整新内容", "reason": "为什么这样改"}'),
-    "propose_character": ("新建角色", "为本书新建一个角色（人物）生成候选，作者在对话里确认后才真正建档；name 必填，其余可留空",
-                          '{"name": "角色名", "role_type": "protagonist|supporting|antagonist（可选）", "age": "可选", '
-                          '"gender": "可选", "personality": "性格（可选）", "background": "背景故事（可选）", '
+    "propose_character": ("新建角色", "为本书新建一个角色（人物）生成候选，作者在卡片上点「建档」才真正建档；本书已有同名的改用 propose_edit；"
+                                      "name 必填，其余可留空" + _BATCH_HINT,
+                          '{"name": "角色名", "role_type": "protagonist|supporting|antagonist|mentor|ally|extra（可选）", '
+                          '"age": "可选", "gender": "可选", "personality": "性格（可选）", "background": "背景故事（可选）", '
                           '"appearance": "外貌（可选）", "speech_style": "说话风格（可选）", "reason": "为什么加（可选）"}'),
-    "propose_organization": ("新建组织", "为本书新建一个组织 / 势力生成候选，作者确认后才真正建档；name 必填，其余可留空",
+    "propose_organization": ("新建组织", "为本书新建一个组织 / 势力生成候选，作者在卡片上点「建档」才真正建档；本书已有同名的改用 "
+                                         "propose_edit；name 必填，其余可留空" + _BATCH_HINT,
                              '{"name": "组织名", "organization_type": "类型（可选）", "organization_purpose": "宗旨（可选）", '
+                             '"location": "所在地（可选）", "motto": "座右铭 / 口号（可选）", '
                              '"personality": "组织特性（可选）", "background": "背景（可选）", "reason": "为什么加（可选）"}'),
-    "propose_setting_entry": ("新建设定条目", "为本书新建一条世界设定（术语 / 铁律 / 势力 / 规则等，不属于境界·装备·地图三类）"
-                              "生成候选，作者确认后才建档；分条存、各自独立容量，别再往「世界规则」单字段里堆。title 必填",
+    "propose_setting_entry": ("新建设定条目", "为本书新建一条世界设定条目（术语 / 铁律 / 势力 / 规则等；修炼境界、装备、地图位置三类"
+                              "用 propose_world_rule）生成候选，作者在卡片上点「建档」才建档；本书已有同名的改用 propose_edit；"
+                              "分条存、各自独立容量，别再往「世界规则」单字段里堆。title 必填" + _BATCH_HINT,
                               '{"title": "条目名", "category": "term|law|faction|rule|other（可选）", '
                               '"summary": "一句话简述（可选）", "content": "详细设定（可选）", "reason": "为什么加（可选）"}'),
+    "propose_world_rule": ("新建世界规则", "为本书新建一条世界规则（世界规则页的三类：cultivation_realm 修炼境界 / equipment_template "
+                           "装备模板 / map_location 地图位置；地图位置建档后会出现在世界地图上）生成候选，作者在卡片上点「建档」才建档；"
+                           "同一分类已有同名的改用 propose_edit。境界按从低到高的顺序提" + _BATCH_HINT,
+                           '{"category": "cultivation_realm|equipment_template|map_location", "name": "名称", '
+                           '"summary": "一句话简述（可选）", "details": "详细设定：突破条件 / 战力范围 / 用途 / 地理关系等（可选）", '
+                           '"reason": "为什么加（可选）"}'),
     "manuscript": ("处理正文", "处理某一章的正文：continue 续写 / rewrite 改写选段 / polish 润色选段 / review 核对本章 / query 查前文；"
                               "改写、润色只能处理作者在该章正文里选中的那段；修改类结果是候选稿",
                    '{"chapter_number": 1, "skill": "continue", "instruction": "具体要求"}'),
@@ -130,6 +149,20 @@ def tool_label(name: str) -> str:
     return TOOLS[name][0] if name in TOOLS else name
 
 
+def _member_ai(ctx: ToolContext) -> Any:
+    """发言成员设了自己的模型：处理正文 / 批量写作也用它（复制一份改默认模型，不动共享实例）。"""
+    if not ctx.model or getattr(ctx.ai_service, "default_model", None) == ctx.model:
+        return ctx.ai_service
+    svc = copy.copy(ctx.ai_service)
+    svc.default_model = ctx.model
+    return svc
+
+
+def _emit_card(ctx: ToolContext, kind: str, payload: dict) -> None:
+    """推一张卡片给前端：带上是哪位成员提的，运行中就能挂到他的发言下。"""
+    ctx.emit({"type": kind, **payload, "member_id": ctx.member_id})
+
+
 def _text(args: dict, key: str, limit: int = 2000, required: bool = True) -> str:
     value = args.get(key)
     if value is None or (isinstance(value, str) and not value.strip()):
@@ -171,6 +204,17 @@ async def _search_sources(db: AsyncSession, project_id: str) -> list[tuple[str, 
         sources.append(("正文", f"第{ch.chapter_number}章《{ch.title}》", "chapter-analysis", ch.content or ""))
     for loc in (await db.execute(select(WorldMapLocation).where(WorldMapLocation.project_id == project_id))).scalars():
         sources.append(("地点", loc.name, "world-map", "\n".join(filter(None, [loc.name, loc.region, loc.description]))))
+    for entry in (await db.execute(select(SettingEntry).where(SettingEntry.project_id == project_id))).scalars():
+        sources.append(("设定条目", entry.title, "setting-entries",
+                        "\n".join(filter(None, [entry.title, entry.summary, entry.content]))))
+    for rule in (await db.execute(select(WorldRule).where(WorldRule.project_id == project_id))).scalars():
+        sources.append(("世界规则", f"{fields.WORLD_RULE_LABELS.get(rule.category, '世界规则')}「{rule.name}」", "world-rules",
+                        "\n".join(filter(None, [rule.name, rule.summary, rule.details]))))
+    for v in (await db.execute(
+        select(Volume).where(Volume.project_id == project_id).order_by(Volume.volume_number)
+    )).scalars():
+        sources.append(("卷纲", f"第{v.volume_number}卷《{v.title}》", "outline",
+                        "\n".join(filter(None, [v.title, v.goal, v.summary, v.climax, v.ending_hook, v.threads]))))
     return sources
 
 
@@ -193,27 +237,42 @@ async def _search_project(ctx: ToolContext, args: dict) -> ToolOutcome:
 
 async def _list_fields(ctx: ToolContext, args: dict) -> ToolOutcome:
     query = _text(args, "query", 100, required=False)
-    rows = await fields.list_fields(ctx.db, ctx.project_id, query)
+    rows, total, loose = await fields.find_fields(ctx.db, ctx.project_id, query)
     if not rows:
         return ToolOutcome(True, "没有匹配的内容项", f"没有和「{query}」匹配的可修改内容；换个说法或不带 query 再列。")
-    data = "\n".join(
+    notes = []
+    if loose:
+        notes.append("（没有同时包含全部关键词的内容项，下面按任一关键词列出，命中多的在前）")
+    if total > len(rows):
+        notes.append(f"（共 {total} 项，只列了前 {len(rows)} 项；加上人物名、章号或字段名再筛选）")
+    data = "\n".join([*notes, *(
         f"- {r['label']}｜field_id={r['field_id']}｜target_id={r['target_id']}｜当前：{r['preview']}" for r in rows
-    )
-    return ToolOutcome(True, f"列出 {len(rows)} 项{('「' + query + '」') if query else ''}", data)
+    )])
+    more = f"（共 {total} 项）" if total > len(rows) else ""
+    return ToolOutcome(True, f"列出 {len(rows)} 项{('「' + query + '」') if query else ''}{more}", data)
+
+
+def _field_text(got: dict) -> str:
+    value = json.dumps(got["value"], ensure_ascii=False) if got["kind"] == "list" else (got["value"] or "（空白）")
+    return f"{got['label']}（{'列表' if got['kind'] == 'list' else '文字'}，上限 {got['max_length']} 字）：\n{value}"
 
 
 async def _read_field(ctx: ToolContext, args: dict) -> ToolOutcome:
     got = await fields.read_field(ctx.db, ctx.project_id, _text(args, "field_id", 80), _text(args, "target_id", 36))
     ctx.read_targets.add((got["field_id"], got["target_id"]))
-    value = json.dumps(got["value"], ensure_ascii=False) if got["kind"] == "list" else (got["value"] or "（空白）")
-    return ToolOutcome(True, f"读取「{got['label']}」",
-                       f"{got['label']}（{'列表' if got['kind'] == 'list' else '文字'}，上限 {got['max_length']} 字）：\n{value}")
+    return ToolOutcome(True, f"读取「{got['label']}」", _field_text(got))
 
 
 async def _propose_edit(ctx: ToolContext, args: dict) -> ToolOutcome:
     field_id, target_id = _text(args, "field_id", 80), _text(args, "target_id", 36)
     if (field_id, target_id) not in ctx.read_targets:
-        raise ToolError("修改前先用 read_field 读取这一项的当前内容，再按读到的内容给出完整的新值")
+        # 没读过就提修改：替它读一遍。空白的直接照提（没有可冲掉的）；有内容的先交给它看，按现有内容给完整新值再提
+        got = await fields.read_field(ctx.db, ctx.project_id, field_id, target_id)
+        ctx.read_targets.add((got["field_id"], got["target_id"]))
+        if got["value"] not in ("", []):
+            return ToolOutcome(False, f"修改前先读了「{got['label']}」的现有内容",
+                               "这一项已经有内容（下面是现有内容，已替你读取）：在它的基础上给出完整的新值，"
+                               f"再调用 propose_edit。\n{_field_text(got)}")
     if "value" not in args:
         raise ToolError("缺少参数 value（完整的新内容）")
     reason = _text(args, "reason", 1000, required=False)
@@ -238,13 +297,21 @@ async def _propose_edit(ctx: ToolContext, args: dict) -> ToolOutcome:
     candidate = made[-1]
     view = cands.candidate_view(candidate)
     ctx.candidates.append(view)
-    ctx.emit({"type": "candidate", "candidate": view})
-    return ToolOutcome(True, f"为「{view['label']}」准备了修改候选",
-                       "修改候选已生成，正在等作者在对话里比较后决定是否应用；现在还没有写入，不要说已经改好了。")
+    _emit_card(ctx, "candidate", {"candidate": view})
+    return ToolOutcome(True, f"为{view['label']}准备了修改候选",
+                       "修改候选已生成：作者在卡片上比较后点「应用」才写入（回答提问不会写入）；现在还没有写入，不要说已经改好了。")
 
 
-async def _propose_entity(ctx: ToolContext, args: dict, entity_type: str) -> ToolOutcome:
+_ENTITY_NOTE = "新建候选已生成：作者要在卡片上点「建档」才真正建档（回答提问不会建档）；现在还没有建，不要说已经建好了。"
+
+
+async def _propose_one(ctx: ToolContext, args: dict, entity_type: str) -> dict:
+    """提一条新建候选（校验 → 查同名 → 落候选表 → 推卡片），返回规整后的字段。"""
     reason = _text(args, "reason", 1000, required=False)
+    payload = entities.normalize_entity_payload(entity_type, args)
+    clash = await entities.same_name_conflict(ctx.db, ctx.project_id, ctx.session_id, entity_type, payload)
+    if clash:
+        raise ToolError(clash)
     made: list = []
 
     async def write() -> None:
@@ -266,9 +333,39 @@ async def _propose_entity(ctx: ToolContext, args: dict, entity_type: str) -> Too
         raise ToolError(str(exc))
     view = entities.entity_candidate_view(made[-1])
     ctx.entity_candidates.append(view)
-    ctx.emit({"type": "entity_candidate", "candidate": view})
-    return ToolOutcome(True, f"为「{view['label']}」准备了新建候选",
-                       "新建候选已生成，正在等作者在对话里确认后才真正建档；现在还没有建，不要说已经建好了。")
+    _emit_card(ctx, "entity_candidate", {"candidate": view})
+    return payload
+
+
+async def _propose_entity(ctx: ToolContext, args: dict, entity_type: str) -> ToolOutcome:
+    name_key = entities.ENTITY_NAME_KEY[entity_type]
+    items = args.get("items")
+    if items is None:
+        payload = await _propose_one(ctx, args, entity_type)
+        return ToolOutcome(True, f"为{entities.kind_label(entity_type, payload)}「{payload[name_key]}」准备了新建候选",
+                           _ENTITY_NOTE)
+    if not isinstance(items, list) or not items:
+        raise ToolError("items 应是一组对象（每条一个 {...}）；只提一条就直接给参数")
+    if len(items) > BATCH_LIMIT:
+        raise ToolError(f"一次最多提 {BATCH_LIMIT} 条，分几次来")
+    made: list[dict] = []
+    failed: list[str] = []
+    for item in items:  # 一条一条提：前面的已经落库，同一批里重名的会被同名查重挡下
+        name = str(item.get(name_key) or "（没写名字）") if isinstance(item, dict) else "（格式不对）"
+        try:
+            if not isinstance(item, dict):
+                raise ToolError("每条应是一个对象")
+            made.append(await _propose_one(ctx, item, entity_type))
+        except (ToolError, entities.EntityError) as exc:
+            failed.append(f"「{name}」：{exc}")
+    if not made:
+        raise ToolError("一条都没提成——" + "；".join(failed))
+    kinds = {entities.kind_label(entity_type, p) for p in made}
+    kind = kinds.pop() if len(kinds) == 1 else entities.ENTITY_LABEL[entity_type]
+    names = "、".join(f"「{p[name_key]}」" for p in made)
+    note = f"（另有 {len(failed)} 条没提成）" if failed else ""
+    return ToolOutcome(True, f"为{kind}{names}准备了新建候选{note}",
+                       _ENTITY_NOTE + ("\n没提成的：\n" + "\n".join(f"- {f}" for f in failed) if failed else ""))
 
 
 async def _propose_character(ctx: ToolContext, args: dict) -> ToolOutcome:
@@ -281,6 +378,10 @@ async def _propose_organization(ctx: ToolContext, args: dict) -> ToolOutcome:
 
 async def _propose_setting_entry(ctx: ToolContext, args: dict) -> ToolOutcome:
     return await _propose_entity(ctx, args, "setting_entry")
+
+
+async def _propose_world_rule(ctx: ToolContext, args: dict) -> ToolOutcome:
+    return await _propose_entity(ctx, args, "world_rule")
 
 
 async def _manuscript(ctx: ToolContext, args: dict) -> ToolOutcome:
@@ -303,7 +404,7 @@ async def _manuscript(ctx: ToolContext, args: dict) -> ToolOutcome:
         if not page_sel or ctx.page.get("chapter_id") != chapter.id:
             raise ToolError(f"{SKILL_LABELS[skill]}只能处理作者在第 {number} 章正文里选中的那段：请作者在章节写作页选中后再说")
         selection = page_sel
-    result = await execute_skill(ctx.db, chapter, ai_service=ctx.ai_service, message=instruction, skill=skill,
+    result = await execute_skill(ctx.db, chapter, ai_service=_member_ai(ctx), message=instruction, skill=skill,
                                  selection=selection)
     label = f"第 {number} 章 · {SKILL_LABELS[skill]}"
     candidate = result.get("candidate")
@@ -312,7 +413,7 @@ async def _manuscript(ctx: ToolContext, args: dict) -> ToolOutcome:
     if candidate:
         summary = {**candidate, "chapter_number": number, "chapter_title": chapter.title}
         ctx.chapter_candidates.append(summary)
-        ctx.emit({"type": "chapter_candidate", "candidate": summary})
+        _emit_card(ctx, "chapter_candidate", {"candidate": summary})
         return ToolOutcome(True, f"{label}：候选稿 {candidate.get('word_count', 0)} 字",
                            f"{result['answer']}\n候选稿开头：{candidate.get('preview', '')}\n"
                            "作者要在章节写作页的候选稿里审阅后采用，现在正文还没变。")
@@ -331,7 +432,7 @@ async def _project_status(ctx: ToolContext, _args: dict) -> ToolOutcome:
     checks = await project_checks(ctx.db, ctx.project_id)
     items = checks["items"]
     if not items:
-        return ToolOutcome(True, "没有需要注意的事项", "本书目前没有待确认章纲、过期分析、待审候选稿或一致性问题。")
+        return ToolOutcome(True, "没有需要注意的事项", "本书目前没有待确认的卷纲 / 章纲、过期分析、待审候选稿或一致性问题。")
     data = "\n".join(f"- [{i['kind']}] {i['title']}：{i['detail']}" for i in items[:30])
     return ToolOutcome(True, f"需要注意 {len(items)} 项", data)
 
@@ -391,7 +492,7 @@ def _int_arg(args: dict, key: str, required: bool = True) -> Optional[int]:
 
 def _emit_plan(ctx: ToolContext, plan: dict) -> None:
     ctx.plans.append(plan)
-    ctx.emit({"type": "plan", "plan": plan})
+    _emit_card(ctx, "plan", {"plan": plan})
 
 
 def _volume_card(v: dict) -> dict:
@@ -507,7 +608,7 @@ async def _write_chapters(ctx: ToolContext, args: dict) -> ToolOutcome:
     if not ctx.user_id:
         raise ToolError("没有登录信息，不能启动后台写作")
     try:
-        job = await start_batch_job(project_id=ctx.project_id, user_id=ctx.user_id, ai_service=ctx.ai_service,
+        job = await start_batch_job(project_id=ctx.project_id, user_id=ctx.user_id, ai_service=_member_ai(ctx),
                                     options=BatchOptions(from_chapter=start, to_chapter=end, require_confirmed_outline=True))
     except AIJobConflictError as exc:
         raise ToolError(f"本书已有正文任务在运行：{exc}")
@@ -521,6 +622,7 @@ HANDLERS = {
     "search_project": _search_project, "list_fields": _list_fields, "read_field": _read_field,
     "propose_edit": _propose_edit, "propose_character": _propose_character,
     "propose_organization": _propose_organization, "propose_setting_entry": _propose_setting_entry,
+    "propose_world_rule": _propose_world_rule,
     "manuscript": _manuscript, "open_page": _open_page,
     "project_status": _project_status, "ask_author": _ask_author, "story_progress": _story_progress,
     "kb_search": _kb_search, "kb_read": _kb_read,

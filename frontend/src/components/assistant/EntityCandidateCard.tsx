@@ -1,65 +1,55 @@
-/** 新建对象候选：列出拟新建的角色 / 组织字段，作者「建档」才真正写入，可放弃；与内容修改候选并列。 */
+/**
+ * 新建对象候选：列出拟新建的角色 / 组织 / 设定条目 / 世界规则字段（名称、顺序由后端照页面给），作者「建档」才真正写入，可放弃；
+ * 建过档、书里却找不到了（被删了或当时没写进去）就标出来，可以重新建档。与内容修改候选并列。
+ */
 import { useState } from 'react';
-import { isAxiosError } from 'axios';
-import { Check, ExternalLink, Loader2, UserPlus, X } from 'lucide-react';
+import { ArrowUpRight, Check, Loader2, RotateCcw } from 'lucide-react';
 import { toast } from 'sonner';
-import { cn } from '@/lib/utils';
-import { assistantApi } from '@/services/api';
-import { emitAssistantData } from '@/store/assistantStore';
 import type { AssistantEntityCandidate } from '@/types/assistant';
+import { getRoleDisplayName } from '@/utils/characterRole';
+import { entityKind } from '@/utils/cocreation';
+import { entityAction, errorDetail } from './changeActions';
+import { StatusDot, type StatusTone } from './CocreationParts';
 
-const STATUS: Record<AssistantEntityCandidate['status'], { label: string; cls: string }> = {
-  candidate: { label: '待确认', cls: 'lj-badge--candidate' },
-  applied: { label: '已建档', cls: 'lj-badge--ok' },
-  rejected: { label: '没有采用', cls: 'lj-badge--muted' },
+const STATUS: Record<AssistantEntityCandidate['status'], { label: string; tone: StatusTone }> = {
+  candidate: { label: '待确认', tone: 'orange' },
+  applied: { label: '已建档', tone: 'green' },
+  rejected: { label: '没有采用', tone: 'gray' },
+};
+const MISSING: { label: string; tone: StatusTone } = { label: '已不在书里', tone: 'red' };
+
+const VALUE_LABELS: Record<string, Record<string, string>> = {
+  category: { term: '术语', law: '铁律', faction: '势力', rule: '规则', other: '其他' },
 };
 
-const ENTITY_LABEL: Record<string, string> = { character: '角色', organization: '组织', setting_entry: '设定条目' };
-
-const FIELD_LABELS: Record<string, string> = {
-  role_type: '角色类型', age: '年龄', gender: '性别', personality: '性格', background: '背景',
-  appearance: '外貌', speech_style: '说话风格', organization_type: '组织类型', organization_purpose: '宗旨',
-  category: '分类', summary: '简述', details: '详细设定',
-};
-const ROLE_LABELS: Record<string, string> = { protagonist: '主角', supporting: '配角', antagonist: '反派' };
-const FIELD_ORDER = ['role_type', 'organization_type', 'organization_purpose', 'age', 'gender', 'appearance',
-  'speech_style', 'category', 'summary', 'personality', 'background', 'details'];
-
-const errorDetail = (err: unknown) => {
-  if (isAxiosError(err)) {
-    const detail = (err.response?.data as { detail?: unknown } | undefined)?.detail;
-    if (typeof detail === 'string') return detail;
-  }
-  return err instanceof Error ? err.message : '操作失败';
-};
+const valueLabel = (key: string, value: string) => (key === 'role_type' ? getRoleDisplayName(value) : VALUE_LABELS[key]?.[value] ?? value);
 
 interface EntityCandidateCardProps {
   projectId: string;
   candidate: AssistantEntityCandidate;
   onChange: (next: AssistantEntityCandidate) => void;
   onOpenPage?: (page: string) => void;
+  /** false = 只看内容（在待确认栏里展开时，建档 / 不建在那一行上，不再重复一套） */
+  showActions?: boolean;
 }
 
-export function EntityCandidateCard({ projectId, candidate, onChange, onOpenPage }: EntityCandidateCardProps) {
+export function EntityCandidateCard({ projectId, candidate, onChange, onOpenPage, showActions = true }: EntityCandidateCardProps) {
   const [busy, setBusy] = useState(false);
-  const status = STATUS[candidate.status];
-  const rest = candidate.payload;
-  const rows = FIELD_ORDER
-    .filter((k) => rest[k])
-    .map((k) => ({ key: k, label: FIELD_LABELS[k] ?? k, value: k === 'role_type' ? (ROLE_LABELS[rest[k]] ?? rest[k]) : rest[k] }));
+  const missing = candidate.status === 'applied' && Boolean(candidate.entity_missing);
+  const status = missing ? MISSING : STATUS[candidate.status];
+  const fields = candidate.payload;
+  const rows = (candidate.fields ?? [])
+    .filter((f) => fields[f.key])
+    .map((f) => ({ key: f.key, label: f.label, value: valueLabel(f.key, fields[f.key]) }));
+  const pending = showActions && candidate.status === 'candidate';
+  const rebuild = showActions && missing;
+  const canOpen = candidate.status === 'applied' && !missing && candidate.page && onOpenPage;
 
   const act = async (action: 'apply' | 'reject') => {
     setBusy(true);
     try {
-      const call = action === 'apply' ? assistantApi.applyEntityCandidate : assistantApi.rejectEntityCandidate;
-      const next = await call(projectId, candidate.id);
-      onChange(next);
-      if (action === 'apply') {
-        emitAssistantData({ entity: next.entity_type, targetId: next.created_entity_id });
-        toast.success(`已建档：${candidate.label}`);
-      } else {
-        toast.success('已放弃这份新建候选');
-      }
+      onChange(await entityAction(projectId, candidate, action));
+      toast.success(action === 'reject' ? '已放弃这份新建候选' : `${missing ? '已重新建档' : '已建档'}：${candidate.label}`);
     } catch (err) {
       toast.error(errorDetail(err));
     } finally {
@@ -68,44 +58,54 @@ export function EntityCandidateCard({ projectId, candidate, onChange, onOpenPage
   };
 
   return (
-    <section className="rounded border border-brand/30 bg-white">
-      <header className="flex flex-wrap items-center justify-between gap-2 border-b border-surface-border-light px-3 py-2">
-        <div className="flex min-w-0 items-center gap-1.5">
-          <UserPlus className="h-3.5 w-3.5 flex-none text-brand" />
-          <div className="min-w-0">
-            <p className="truncate text-xs font-semibold text-content">{candidate.label}</p>
-            <p className="text-[11px] text-content-tertiary">新建{ENTITY_LABEL[candidate.entity_type] ?? '对象'} · 作者确认后才建档</p>
-          </div>
+    <section className="as-card">
+      <header className="as-card-head">
+        <div className="flex items-center gap-2">
+          <span className="as-kind">新建{entityKind(candidate)}</span>
+          <span className="ml-auto"><StatusDot tone={status.tone} label={status.label} /></span>
         </div>
-        <span className={cn('lj-badge', status.cls)}>{status.label}</span>
+        <p className="mt-1.5 truncate text-[14px] font-semibold text-content">{fields.name || fields.title || candidate.label}</p>
+        {candidate.reason && <p className="mt-1 text-[13px] leading-[1.6] text-content-secondary">{candidate.reason}</p>}
       </header>
-      {candidate.reason && <p className="border-b border-surface-border-light px-3 py-1.5 text-[11px] text-content-secondary">理由：{candidate.reason}</p>}
-      <dl className="max-h-56 space-y-1.5 overflow-y-auto px-3 py-2">
-        {rows.length === 0 && <p className="text-[11px] text-content-tertiary">只有名字，其余留空（建档后可在页面补充）</p>}
-        {rows.map((r) => (
-          <div key={r.key}>
-            <dt className="text-[11px] font-medium text-content-tertiary">{r.label}</dt>
-            <dd className="whitespace-pre-wrap text-xs leading-6 text-content">{r.value}</dd>
-          </div>
-        ))}
-      </dl>
-      <footer className="flex flex-wrap items-center justify-end gap-1.5 border-t border-surface-border-light px-3 py-2">
-        {candidate.status !== 'candidate' && candidate.page && onOpenPage && (
-          <button onClick={() => onOpenPage(candidate.page!)} className="hh-btn-ghost hh-btn-sm mr-auto h-7 px-2 text-[11px]">
-            <ExternalLink className="h-3 w-3" />去页面查看
-          </button>
-        )}
-        {candidate.status === 'candidate' && (
-          <>
-            <button onClick={() => void act('reject')} disabled={busy} className="hh-btn-ghost hh-btn-sm h-7 px-2 text-[11px]">
-              <X className="h-3 w-3" />不建
+      <div className="max-h-64 overflow-y-auto px-4 pb-3.5">
+        {rows.length === 0
+          ? <p className="as-meta">只有名字，其余留空（建档后可在页面补充）</p>
+          : (
+            <dl className="as-fields">
+              {rows.map((r) => (
+                <div key={r.key} className="contents">
+                  <dt>{r.label}</dt>
+                  <dd>{r.value}</dd>
+                </div>
+              ))}
+            </dl>
+          )}
+      </div>
+      {(pending || canOpen || rebuild) && (
+        <footer className="as-card-foot">
+          {canOpen && (
+            <button onClick={() => onOpenPage(candidate.page!)} className="as-link mr-auto">
+              去页面查看<ArrowUpRight className="h-3.5 w-3.5" />
             </button>
-            <button onClick={() => void act('apply')} disabled={busy} className="hh-btn-primary hh-btn-sm h-7 px-2.5 text-[11px]">
-              {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}建档
-            </button>
-          </>
-        )}
-      </footer>
+          )}
+          {rebuild && (
+            <>
+              <span className="mr-auto min-w-0 text-[12px] leading-[1.5] text-content-tertiary">建过档，但书里现在找不到它（被删了，或当时没写进去）</span>
+              <button onClick={() => void act('apply')} disabled={busy} className="as-btn-secondary flex-none">
+                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />}重新建档
+              </button>
+            </>
+          )}
+          {pending && (
+            <>
+              <button onClick={() => void act('reject')} disabled={busy} className="as-btn-reject">不建</button>
+              <button onClick={() => void act('apply')} disabled={busy} className="as-btn-primary">
+                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}建档
+              </button>
+            </>
+          )}
+        </footer>
+      )}
     </section>
   );
 }

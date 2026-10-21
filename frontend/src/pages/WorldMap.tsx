@@ -78,9 +78,9 @@ export default function WorldMap() {
     void load(false);
   }, [projectId, load]);
 
-  // 全局智能助笔：改了地点档案就重新载入（保留未保存的布局调整）；登记正在看的地点
+  // 全局智能助笔：改了地点档案、建了 / 改了「地图位置」规则就重新载入（保留未保存的布局调整）；登记正在看的地点
   const onAssistantData = useCallback((change: AssistantDataChange) => {
-    if (change.entity === 'location') void load(true);
+    if (change.entity === 'location' || change.entity === 'world_rule') void load(true);
   }, [load]);
   useAssistantDataChange(onAssistantData);
   const focused = view?.locations.find((l) => l.id === selectedId);

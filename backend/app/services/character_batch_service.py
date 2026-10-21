@@ -29,6 +29,7 @@ from app.services.generation_trace import stage_scope
 from app.services.knowledge.kb_context import traced_kb_context
 from app.services.prompt_service import prompt_service
 from app.services.relationship_matcher import match_relationship_type
+from app.services.world_setting_context import build_world_context, world_query
 from app.utils.character_names import build_name_index, normalize_name
 from app.utils.json_cleaner import clean_and_parse_json
 from app.utils.prompt_safety import quote_untrusted
@@ -108,20 +109,8 @@ async def _load_cast(db: AsyncSession, project_id: str) -> list[Character]:
 
 async def _world_rules_summary(db: AsyncSession, project: Project) -> str:
     """详细世界规则 + 世界设定条目（语义检索；各服务自动上报 reference 事件）；失败不中断。"""
-    from app.services.world_rule_service import world_rule_service
-    from app.services import setting_entry_service
-
-    query = f"{project.theme or ''} {project.genre or ''} 人物 势力"
-    parts = []
-    try:
-        parts.append(await world_rule_service.generate_rules_summary_with_search(db, project.id, query, limit=10) or "")
-    except Exception as rule_error:  # noqa: BLE001 - 世界规则缺失不影响生成
-        logger.warning("⚠️ [批量角色] 加载世界规则失败: %s", rule_error)
-    try:
-        parts.append(await setting_entry_service.generate_summary_with_search(db, project.id, query, limit=6) or "")
-    except Exception as entry_error:  # noqa: BLE001 - 设定条目缺失不影响生成
-        logger.warning("⚠️ [批量角色] 加载世界设定条目失败: %s", entry_error)
-    return "\n\n".join(p for p in parts if p)
+    world = await build_world_context(db, project, world_query(project, "人物 势力"), rule_limit=10, scene="批量角色")
+    return world.detail
 
 
 def _extra_blocks(world_rules: str, reference: str, kb_text: str) -> str:

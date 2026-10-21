@@ -1,6 +1,6 @@
 """全局智能助笔 · 「核对」清单：本书现在需要作者注意的事项（只读，不改任何数据）。
 
-待确认 / 上游已改的章纲、未分析 / 分析过期的章节、待审的候选稿（章节与内容修改）、一致性问题。
+待确认 / 上游已改的卷纲与章纲、未分析 / 分析过期的章节、待审的候选稿（章节、内容修改与新建）、一致性问题。
 """
 from __future__ import annotations
 
@@ -9,12 +9,13 @@ from collections import Counter
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.assistant import AssistantFieldCandidate
+from app.models.assistant import AssistantEntityCandidate, AssistantFieldCandidate, AssistantSession
 from app.models.chapter import Chapter
 from app.models.chapter_candidate import ChapterCandidate
 from app.models.chapter_consistency_issue import ChapterConsistencyIssue
 from app.models.chapter_outline import ChapterOutline
 from app.models.memory import PlotAnalysis
+from app.models.volume import Volume
 from app.services.chapter_readiness_service import analysis_is_stale
 
 LIMIT_PER_KIND = 20
@@ -23,6 +24,20 @@ SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 async def project_checks(db: AsyncSession, project_id: str) -> dict:
     items: list[dict] = []
+
+    volumes = (await db.execute(
+        select(Volume)
+        .where(Volume.project_id == project_id, or_(Volume.review_status == "draft", Volume.upstream_stale.is_(True)))
+        .order_by(Volume.volume_number).limit(LIMIT_PER_KIND)
+    )).scalars().all()
+    for v in volumes:
+        stale = bool(v.upstream_stale)
+        items.append({
+            "kind": "volume_unconfirmed", "severity": "warning",
+            "title": f"第{v.volume_number}卷卷纲{'上游已改' if stale else '待确认'}《{v.title}》",
+            "detail": (v.upstream_reason or "总纲改过") if stale else "AI 草拟的卷纲，确认后再细化、出章纲更稳",
+            "page": "outline/volumes", "target_id": v.id,
+        })
 
     outlines = (await db.execute(
         select(ChapterOutline)
@@ -72,14 +87,29 @@ async def project_checks(db: AsyncSession, project_id: str) -> dict:
                       "detail": f"《{title}》：审阅后采用才会写入正文", "page": "chapter-analysis",
                       "target_id": chapter_id, "chapter_number": number})
 
+    # 只列当前对话里的：点一下打开的是当前对话，别的对话里的卡在这儿找不到（新对话时没处理的卡会跟过来）
+    session_id = await db.scalar(
+        select(AssistantSession.id).where(AssistantSession.project_id == project_id, AssistantSession.archived.is_(False))
+        .order_by(AssistantSession.updated_at.desc())
+    )
     fields_pending = (await db.execute(
         select(AssistantFieldCandidate)
-        .where(AssistantFieldCandidate.project_id == project_id, AssistantFieldCandidate.status == "candidate")
+        .where(AssistantFieldCandidate.project_id == project_id, AssistantFieldCandidate.status == "candidate",
+               AssistantFieldCandidate.session_id == session_id)
         .order_by(AssistantFieldCandidate.created_at.desc()).limit(LIMIT_PER_KIND)
-    )).scalars().all()
+    )).scalars().all() if session_id else []
     for c in fields_pending:
         items.append({"kind": "field_candidate", "severity": "info", "title": f"「{c.target_label}」有修改候选待确认",
                       "detail": c.reason or "在助笔对话里比较后应用或不用", "page": c.page or "", "target_id": c.id})
+    entities_pending = (await db.execute(
+        select(AssistantEntityCandidate)
+        .where(AssistantEntityCandidate.project_id == project_id, AssistantEntityCandidate.status == "candidate",
+               AssistantEntityCandidate.session_id == session_id)
+        .order_by(AssistantEntityCandidate.created_at.desc()).limit(LIMIT_PER_KIND)
+    )).scalars().all() if session_id else []
+    for c in entities_pending:
+        items.append({"kind": "entity_candidate", "severity": "info", "title": f"{c.label}待建档",
+                      "detail": c.reason or "在助笔的「待确认」里建档或不建", "page": c.page or "", "target_id": c.id})
 
     issues = (await db.execute(
         select(ChapterConsistencyIssue).where(ChapterConsistencyIssue.project_id == project_id)

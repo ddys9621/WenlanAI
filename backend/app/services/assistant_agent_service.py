@@ -29,27 +29,33 @@ from app.models.assistant import (
 )
 from app.models.chapter import Chapter
 from app.models.chapter_candidate import utcnow
+from app.models.chapter_outline import ChapterOutline
 from app.models.project import Project
+from app.models.volume import Volume
 from app.services import assistant_context as budgeting
 from app.services import cocreation_team as team
 from app.services.assistant_candidate_service import candidate_view
-from app.services.assistant_entity_candidate_service import entity_candidate_view
+from app.services.assistant_entity_candidate_service import entity_candidate_view, gone_entity_candidates
 from app.services.assistant_persistence import write_verified
 from app.services.assistant_tools import (
     DATA_LIMIT, PAGES, ToolContext, ToolOutcome, execute_tool, tool_catalog_text, tool_label,
 )
+from app.services.planning_context import clip
 from app.utils.json_cleaner import safe_parse_json
 from app.utils.prompt_safety import UNTRUSTED_DATA_RULE, quote_untrusted
 
 logger = get_logger(__name__)
 
 MAX_STEPS = 8
-MEMBER_MAX_STEPS = 4
+MEMBER_MAX_STEPS = 6
 MAX_QUESTIONS = 3
 MESSAGE_HEAD, MESSAGE_TAIL = 3600, 2400
 LAST_STEP_CLIP = 1500
 SELECTION_PREVIEW = 600
+PROGRESS_LIMIT, PROGRESS_ITEM = 4000, 800
 ACTIVE = ("running", "waiting_input")
+STOP_MESSAGE = "已停止；停止前已经完成的部分（候选、草稿、成员回复、已启动的后台任务）不受影响"
+CARRY_NOTE = "上一段对话里还有 {count} 张卡没处理，已经挪到这段对话：在输入框上方的「待确认」里照常建档 / 应用 / 确认，或者放弃。"
 
 WORKFLOW = """## 创作流程（总纲 → 卷纲 → 章纲 → 正文）
 - 总纲：梗概 + 全书主线（用自然段把整个故事从头讲到尾）+ 卖点 / 成长路线 / 终极目标；主角特殊能力只是设定的一部分，不必每段都用
@@ -76,13 +82,14 @@ def build_system_prompt(member: team.Member) -> str:
 {WORKFLOW}
 
 ## 怎么做
-1. 作者当前在哪个页面只是参考，不是限制。要改哪项内容：先 list_fields 定位、read_field 读取当前内容，再用 propose_edit 给出完整的新内容。不要用别的字段代替作者要改的那一项。
+1. 作者当前在哪个页面只是参考，不是限制。要改哪项内容：先 list_fields 定位、read_field 读取当前内容，再用 propose_edit 给出完整的新内容。不要用别的字段代替作者要改的那一项（比如总纲不要写进主题或简介）。
 2. 正文（续写 / 改写 / 润色 / 核对 / 查前文）交给 manuscript 或 write_chapters；不要在普通回复里写大段正文冒充已经写进书里。
-3. 需要作者做决定、选方案或补充信息时调用 ask_author（如果你能用），不要替作者猜；目标可能有多个（比如同名人物）时也先问一句。
-4. 不能说已经保存、采用、确认或写好，除非工具结果证明；候选和草稿要作者确认后才写入。
-5. 只依据工具读到的资料和对话内容；引用原文要逐字；资料里没有就直说没找到，不编造前文。
-6. 问候、使用帮助、构思讨论、比较几种写法可以直接回答，不必调用工具。
-7. 回复用简洁的中文，必要时分点；说明你做了什么、作者接下来可以做什么。
+3. 设计好的东西要落成卡片，作者在卡片上看内容、点按钮确认：新的人物 / 组织 / 设定条目 / 世界规则用对应的 propose_* 一条条提（一次可以提多条），已有的内容用 propose_edit，分卷和章纲用规划工具。不要把整份草稿、名册或长篇设定贴在回复里代替卡片；步数不够提完，就如实说还剩哪些。
+4. 需要作者做决定、选方案或补充信息时调用 ask_author（如果你能用），不要替作者猜；目标可能有多个（比如同名人物）时也先问一句。
+5. 不能说已经保存、采用、确认或写好，除非工具结果或【候选卡状态】证明；候选和草稿要作者在卡片上点按钮确认后才写入，回答提问不会建档或写入，所以不要用 ask_author 让作者勾选要确认哪些候选，请他直接在卡片上处理。
+6. 只依据工具读到的资料和对话内容；引用原文要逐字；资料里没有就直说没找到，不编造前文。
+7. 问候、使用帮助、构思讨论、比较几种写法可以直接回答，不必调用工具。
+8. 回复用简洁的中文，必要时分点；做完事的回复几句话说清做了什么、还差什么、作者接下来可以做什么（卡片里已有的内容不必再抄一遍）。
 
 ## 输出格式
 - 调用工具或向作者提问：只输出一个 JSON 对象，前后不要有任何文字：{{"tool": "工具名", "args": {{...}}}}
@@ -126,12 +133,19 @@ def session_view(session: Optional[AssistantSession]) -> Optional[dict]:
             "created_at": _iso(session.created_at), "updated_at": _iso(session.updated_at)}
 
 
+def _after_last_answer(steps: list) -> list:
+    """修复前存的消息记的是整轮累计的步骤：最后一次「作者回答」及之前的步骤已经挂在本轮前面的消息下了。"""
+    marks = [i for i, s in enumerate(steps) if s.get("tool") == "ask_author" and s.get("label") == "作者回答"]
+    return steps[marks[-1] + 1:] if marks else steps
+
+
 def message_view(message: AssistantMessage) -> dict:
     meta = _loads(message.meta_json, {})
     speaker = team.member(meta.get("member")) if message.role == "assistant" else None
     return {
         "id": message.id, "role": message.role, "content": message.content, "created_at": _iso(message.created_at),
-        "run_id": meta.get("run_id"), "steps": meta.get("steps", []), "candidates": meta.get("candidates", []),
+        "run_id": meta.get("run_id"), "steps": _after_last_answer(meta.get("steps", [])),
+        "candidates": meta.get("candidates", []),
         "entity_candidates": meta.get("entity_candidates", []),
         "chapter_candidates": meta.get("chapter_candidates", []), "question": meta.get("question"),
         "answer": meta.get("answer"), "page": meta.get("page"), "plans": meta.get("plans", []),
@@ -156,22 +170,62 @@ async def current_session(db: AsyncSession, project_id: str) -> Optional[Assista
     )).scalars().first()
 
 
+async def _unconfirmed_plans(db: AsyncSession, session_id: str) -> list[dict]:
+    """这段对话里还没确认、也没作废的草案（开新对话时跟着挪过去，同一份只挪一次）。"""
+    messages = [message_view(m) for m in await session_messages(db, session_id)]
+    await _mark_plan_states(db, messages)
+    seen: set[tuple] = set()
+    plans = []
+    for plan in (p for m in messages for p in m["plans"]):
+        key = tuple(i for ids in _plan_targets(plan) for i in ids)
+        if not (plan["confirmed"] or plan["gone"] or key in seen):
+            seen.add(key)
+            plans.append({k: v for k, v in plan.items() if k not in ("confirmed", "gone")})
+    return plans
+
+
 async def new_session(db: AsyncSession, project_id: str, user_id: Optional[str]) -> AssistantSession:
-    """开始新对话：旧的归档（任务记录里仍可回看）。写入后读回核对。"""
-    session_id, now = str(uuid.uuid4()), utcnow()
+    """开始新对话：旧的归档（任务记录里仍可回看）；还没处理的候选卡和还没确认的草案挪进新对话开头的一条说明下，
+    等回答的旧运行结束。写入后读回核对。"""
+    session_id, note_id, now = str(uuid.uuid4()), str(uuid.uuid4()), utcnow()
+    field_ids = list((await db.execute(select(AssistantFieldCandidate.id).where(
+        AssistantFieldCandidate.project_id == project_id, AssistantFieldCandidate.status == "candidate",
+    ).order_by(AssistantFieldCandidate.created_at))).scalars())
+    entity_ids = list((await db.execute(select(AssistantEntityCandidate.id).where(
+        AssistantEntityCandidate.project_id == project_id, AssistantEntityCandidate.status == "candidate",
+    ).order_by(AssistantEntityCandidate.created_at))).scalars())
+    old = await current_session(db, project_id)
+    plans = await _unconfirmed_plans(db, old.id) if old else []
+    carried = len(field_ids) + len(entity_ids) + len(plans)
 
     async def write() -> None:
         await db.execute(update(AssistantSession).where(
             AssistantSession.project_id == project_id, AssistantSession.archived.is_(False), AssistantSession.id != session_id,
         ).values(archived=True))
+        await db.execute(update(AssistantRun).where(
+            AssistantRun.project_id == project_id, AssistantRun.status == "waiting_input",
+        ).values(status="cancelled", message="开始了新对话，这轮提问不再等待", question_json=None, updated_at=now))
         if not await _exists(db, AssistantSession, session_id):
             await db.execute(insert(AssistantSession).values(
                 id=session_id, project_id=project_id, user_id=user_id, title="新对话", archived=False, created_at=now, updated_at=now,
             ))
+        if field_ids:
+            await db.execute(update(AssistantFieldCandidate).where(AssistantFieldCandidate.id.in_(field_ids))
+                             .values(session_id=session_id))
+        if entity_ids:
+            await db.execute(update(AssistantEntityCandidate).where(AssistantEntityCandidate.id.in_(entity_ids))
+                             .values(session_id=session_id))
+        if carried and not await _exists(db, AssistantMessage, note_id):
+            meta = {"member": team.DEFAULT_MEMBER, "candidates": field_ids, "entity_candidates": entity_ids, "plans": plans,
+                    "carried": True}
+            await db.execute(insert(AssistantMessage).values(
+                id=note_id, session_id=session_id, project_id=project_id, role="assistant",
+                content=CARRY_NOTE.format(count=carried), meta_json=json.dumps(meta, ensure_ascii=False), created_at=now,
+            ))
 
     async def verify() -> bool:
         current = await current_session(db, project_id)
-        return current is not None and current.id == session_id
+        return current is not None and current.id == session_id and (not carried or await _exists(db, AssistantMessage, note_id))
 
     await write_verified(db, write, verify, "新对话")
     return await _fresh(db, AssistantSession, session_id)
@@ -198,13 +252,62 @@ async def build_session_view(db: AsyncSession, session: Optional[AssistantSessio
         select(AssistantEntityCandidate).where(AssistantEntityCandidate.session_id == session.id)
         .order_by(AssistantEntityCandidate.created_at)
     )).scalars().all()
+    messages, seen = [], {"candidates": set(), "entity_candidates": set()}
+    for row in await session_messages(db, session.id):
+        view = message_view(row)
+        for key, ids in seen.items():  # 修复前存的消息挂的是整轮的候选：同一张卡只留在最早那条
+            view[key] = [i for i in view[key] if i not in ids]
+            ids.update(view[key])
+        messages.append(view)
+    _attach_orphans(messages, seen, {"candidates": candidates, "entity_candidates": entity_candidates})
+    await _mark_plan_states(db, messages)
+    gone = await gone_entity_candidates(db, entity_candidates)
     return {
         "session": session_view(session),
-        "messages": [message_view(m) for m in await session_messages(db, session.id)],
+        "messages": messages,
         "active_run": run_view(active) if active else None,
         "candidates": [candidate_view(c) for c in candidates],
-        "entity_candidates": [entity_candidate_view(c) for c in entity_candidates],
+        "entity_candidates": [entity_candidate_view(c, c.id in gone) for c in entity_candidates],
     }
+
+
+def _attach_orphans(messages: list[dict], seen: dict[str, set], pools: dict[str, list]) -> None:
+    """没挂在任何消息上的候选（运行被服务重启打断、来不及写回复）：挂到它那一轮的最后一条消息下，作者照样能处理。"""
+    for key, rows in pools.items():
+        for cand in rows:
+            if cand.id in seen[key] or not messages:
+                continue
+            target = next((m for m in reversed(messages) if m["run_id"] and m["run_id"] == cand.run_id), messages[-1])
+            target[key] = [*target[key], cand.id]
+            seen[key].add(cand.id)
+
+
+def _plan_targets(plan: dict) -> tuple[list[str], list[str]]:
+    if plan.get("kind") == "volumes":
+        return [v["id"] for v in plan.get("volumes") or []], []
+    if plan.get("kind") == "units":
+        return [plan["volume"]["id"]] if plan.get("volume") else [], []
+    return [], [c["id"] for c in plan.get("chapters") or []]
+
+
+async def _mark_plan_states(db: AsyncSession, messages: list[dict]) -> None:
+    """草案卡带上现在的状态。confirmed：卷纲 / 章纲在谋篇页或卡片上确认过，刷新后不再显示成草案；之后总纲又改、
+    被标「上游已改」仍算确认过（要不要重新核对在谋篇页看，卡片上是当时的草稿，不能拿来再确认一次）。
+    gone：目标已经不在了（重新分卷 / 重新生成替换掉，或在谋篇页删了），卡片作废——确认必然失败，不能再算待确认。"""
+    plans = [p for m in messages for p in m["plans"]]
+    volume_ids = {i for p in plans for i in _plan_targets(p)[0]}
+    outline_ids = {i for p in plans for i in _plan_targets(p)[1]}
+    present: set[str] = set()
+    confirmed: set[str] = set()
+    for model, ids in ((Volume, volume_ids), (ChapterOutline, outline_ids)):
+        if ids:
+            rows = (await db.execute(select(model.id, model.review_status).where(model.id.in_(ids)))).all()
+            present |= {r.id for r in rows}
+            confirmed |= {r.id for r in rows if (r.review_status or "confirmed") == "confirmed"}
+    for plan in plans:
+        targets = [i for ids in _plan_targets(plan) for i in ids]
+        plan["gone"] = not targets or any(i not in present for i in targets)
+        plan["confirmed"] = not plan["gone"] and all(i in confirmed for i in targets)
 
 
 async def _exists(db: AsyncSession, model: Any, row_id: str) -> bool:
@@ -256,7 +359,9 @@ def _excerpt_message(text: str) -> str:
 
 
 def _history_line(message: AssistantMessage) -> str:
-    return f"{'作者' if message.role == 'user' else '助笔'}：{_excerpt_message(message.content)}"
+    member_id = _loads(message.meta_json, {}).get("member") if message.role == "assistant" else None
+    who = "作者" if message.role == "user" else team.member(member_id).name if member_id else "助笔"
+    return f"{who}：{_excerpt_message(message.content)}"
 
 
 @dataclass
@@ -333,11 +438,45 @@ def _step_text(index: int, step: dict, mode: str = "full") -> str:
     return f"{head}\n{quote_untrusted(data, '工具结果')}"
 
 
-async def _head_sections(db: AsyncSession, project_id: str, page: dict) -> list[dict]:
-    return [
+CARD_STATUS = (("candidate", "待作者确认"), ("applied", "作者已采用"),
+               ("missing", "建过档、书里现在没有了（被删了或当时没建成；作者可以在卡片上重新建档）"),
+               ("undone", "作者已撤销"), ("rejected", "作者没有采用"))
+CARD_LIST_LIMIT = 12
+
+
+async def _card_status(db: AsyncSession, session_id: Optional[str]) -> str:
+    """这段对话里候选卡现在的状态：作者在卡片上点按钮决定，处理记录里写的只是提出时的情况。"""
+    if not session_id:
+        return ""
+    rows = [(at, f"修改{label}", status) for at, label, status in (await db.execute(
+        select(AssistantFieldCandidate.created_at, AssistantFieldCandidate.target_label, AssistantFieldCandidate.status)
+        .where(AssistantFieldCandidate.session_id == session_id)
+    )).all()]
+    entity_rows = (await db.execute(
+        select(AssistantEntityCandidate).where(AssistantEntityCandidate.session_id == session_id)
+    )).scalars().all()
+    gone = await gone_entity_candidates(db, entity_rows)
+    rows += [(c.created_at, c.label, "missing" if c.id in gone else c.status) for c in entity_rows]
+    rows.sort(key=lambda r: r[0])
+    lines = []
+    for status, title in CARD_STATUS:
+        labels = [label for _at, label, s in rows if s == status]
+        if labels:
+            shown = "、".join(labels[-CARD_LIST_LIMIT:])
+            lines.append(f"- {title} {len(labels)} 张：{'……、' if len(labels) > CARD_LIST_LIMIT else ''}{shown}")
+    if not lines:
+        return ""
+    return ("作者在卡片上点按钮决定建档 / 应用与否，回答提问不会改变它们；处理记录里的「还没有建 / 还没有写入」是提出时的情况，"
+            "现状以这里为准。\n" + quote_untrusted("\n".join(lines), "候选卡"))
+
+
+async def _head_sections(db: AsyncSession, project_id: str, page: dict, session_id: Optional[str] = None) -> list[dict]:
+    head = [
         {"label": "本书", "content": await _project_brief(db, project_id)},
         {"label": "作者现在的位置", "content": await _page_text(db, page)},
     ]
+    cards = await _card_status(db, session_id)
+    return [*head, {"label": "候选卡状态", "content": cards}] if cards else head
 
 
 def _sections(head: list[dict], summary: str, lines: list[str], goal: str, extra: tuple = ()) -> list[dict]:
@@ -457,7 +596,13 @@ class Decision:
     args: Any = None
 
 
-_FENCE = re.compile(r"```(?:json)?\s*(\{.*\})\s*```", re.S)
+_FENCE = re.compile(r"```(?:json)?\s*([\[{].*[\]}])\s*```", re.S)
+_CALL_START = re.compile(r'(?:\[\s*)?\{\s*"tool"\s*:')
+PREFACE_LIMIT = 200
+
+
+def _is_call(obj: Any) -> bool:
+    return isinstance(obj, dict) and isinstance(obj.get("tool"), str)
 
 
 def _parse_tool(text: str) -> Optional[tuple[str, Any]]:
@@ -465,11 +610,24 @@ def _parse_tool(text: str) -> Optional[tuple[str, Any]]:
     fenced = _FENCE.search(raw)
     if fenced:
         raw = fenced.group(1)
-    if not raw.startswith("{"):
+    if not raw.startswith(("{", "[")):
         return None
-    obj = safe_parse_json(raw, default=None, expected_type="object", log_prefix="[智能助笔]")
-    if isinstance(obj, dict) and isinstance(obj.get("tool"), str):
-        return obj["tool"], obj.get("args", {})
+    obj = safe_parse_json(raw, default=None, expected_type="array" if raw[0] == "[" else "object", log_prefix="[智能助笔]")
+    if isinstance(obj, list):  # 模型偶尔把调用包成数组：一步只执行第一个，其余的它下一步会看到没做
+        obj = next((o for o in obj if _is_call(o)), None)
+    if not _is_call(obj):
+        return None
+    # 模型偶尔把参数平铺在顶层、不写 args
+    return obj["tool"], obj["args"] if "args" in obj else {k: v for k, v in obj.items() if k != "tool"}
+
+
+def _trailing_call(text: str) -> Optional[tuple[str, Any]]:
+    """开头先说了几句、后面才跟工具调用（带不带代码块都算）：按工具调用处理，前面那几句不当回复。"""
+    for match in (_FENCE.search(text), _CALL_START.search(text)):
+        if match and len(text[:match.start()].strip()) <= PREFACE_LIMIT:
+            parsed = _parse_tool(text[match.start():])
+            if parsed:
+                return parsed
     return None
 
 
@@ -485,7 +643,7 @@ async def _model_step(ai_service: Any, prompt: str, job: Any, *, system_prompt: 
             head = buffer.lstrip()
             if not head:
                 continue
-            mode = "tool" if head[0] in "{`" else "text"
+            mode = "tool" if head[0] in "{[`" else "text"
             if mode == "text":
                 publish({"type": "content", "content": buffer})
             continue
@@ -497,12 +655,10 @@ async def _model_step(ai_service: Any, prompt: str, job: Any, *, system_prompt: 
             return Decision("tool", tool=parsed[0], args=parsed[1])
         publish({"type": "content", "content": buffer})
         return Decision("reply", text=buffer.strip())
-    tail_tool = _FENCE.search(buffer)
-    if tail_tool and len(buffer[:tail_tool.start()].strip()) <= 200:
-        parsed = _parse_tool(tail_tool.group(0))
-        if parsed:
-            publish({"type": "content_reset"})
-            return Decision("tool", tool=parsed[0], args=parsed[1])
+    trailing = _trailing_call(buffer)
+    if trailing:
+        publish({"type": "content_reset"})
+        return Decision("tool", tool=trailing[0], args=trailing[1])
     return Decision("reply", text=buffer.strip())
 
 
@@ -601,18 +757,26 @@ async def _compact(db: AsyncSession, job: Any, ai_service: Any, state: RunState,
     return convo.drop_oldest(count, summary, convo.summarized + count)
 
 
+def _public_steps(steps: list[dict]) -> list[dict]:
+    return [{k: s.get(k) for k in ("tool", "label", "ok", "summary", "args")} for s in steps]
+
+
+def _attachments(ctx: ToolContext) -> dict:
+    """一条消息带出的卡片：只算这一段（这次运行 / 续跑 / 成员这次处理）产出的，每张卡只挂在产出它的消息下。"""
+    return {"candidates": [c["id"] for c in ctx.candidates], "entity_candidates": [c["id"] for c in ctx.entity_candidates],
+            "chapter_candidates": ctx.chapter_candidates, "plans": ctx.plans}
+
+
 async def _finish(db: AsyncSession, state: RunState, *, content: str, ctx: ToolContext, status: str,
-                  question: Optional[dict] = None) -> dict:
+                  question: Optional[dict] = None, first_step: int = 0) -> dict:
+    """写这一段的回复。一轮运行会因提问分成几段：first_step 之前的步骤已经挂在前面的消息下，不再列一遍。"""
     candidates = await _run_candidates(db, state.id)
     entity_candidates = await _run_entity_candidates(db, state.id)
     meta = {
         "run_id": state.id,
         "member": ctx.member_id,
-        "steps": [{k: s.get(k) for k in ("tool", "label", "ok", "summary", "args")} for s in state.steps],
-        "candidates": [c["id"] for c in candidates],
-        "entity_candidates": [c["id"] for c in entity_candidates],
-        "chapter_candidates": ctx.chapter_candidates,
-        "plans": ctx.plans,
+        "steps": _public_steps(state.steps[first_step:]),
+        **_attachments(ctx),
         **({"question": question} if question else {}),
     }
     message_id, now = str(uuid.uuid4()), utcnow()
@@ -649,7 +813,7 @@ async def _mark_stopped(db: AsyncSession, state: RunState, status: str, message:
         logger.error(f"[智能助笔] 运行 {state.id} 的结束状态没写进去：{exc}")
 
 
-async def _insert_member_message(db: AsyncSession, state: RunState, content: str, meta: dict) -> None:
+async def _insert_message(db: AsyncSession, state: RunState, content: str, meta: dict, what: str = "成员回复") -> None:
     message_id, now = str(uuid.uuid4()), utcnow()
 
     async def write() -> None:
@@ -659,7 +823,56 @@ async def _insert_member_message(db: AsyncSession, state: RunState, content: str
                 content=content, meta_json=json.dumps(meta, ensure_ascii=False), created_at=now,
             ))
 
-    await write_verified(db, write, lambda: _exists(db, AssistantMessage, message_id), "成员回复")
+    await write_verified(db, write, lambda: _exists(db, AssistantMessage, message_id), what)
+
+
+async def _save_partial(db: AsyncSession, state: RunState, ctx: ToolContext, content: str, *,
+                        steps: Optional[list] = None, delegated: bool = False) -> None:
+    """运行中途停下或出错：这一段已经产出的卡片挂到一条说明消息上，作者照样能处理（不写就成了谁也看不见的孤儿）。"""
+    attachments = _attachments(ctx)
+    if not any(attachments.values()):
+        return
+    meta = {"run_id": state.id, "member": ctx.member_id, "steps": _public_steps(steps or []), **attachments,
+            **({"delegated": True} if delegated else {})}
+    try:
+        await _insert_message(db, state, content, meta, "中途停下前的产出")
+    except Exception as exc:  # noqa: BLE001 - 已经在停止 / 失败路径上；卡片读取时还会挂到本轮最后一条消息下
+        logger.error(f"[智能助笔] 运行 {state.id} 停下前的产出没写进去：{exc}")
+
+
+def _did(steps: list[dict]) -> str:
+    """如实交代做了什么、哪些没做成（成员步数用完 / 出错时的说明）。"""
+    done = [s.get("summary") or s.get("label") for s in steps if s.get("ok")]
+    failed = [s.get("summary") or s.get("label") for s in steps if not s.get("ok")]
+    return (f"已经做了：{'；'.join(done)}。" if done else "") + (f"没做成：{'；'.join(failed)}。" if failed else "")
+
+
+def _out_of_steps(steps: list[dict]) -> str:
+    """成员把工具次数用完还没收尾：如实交代这次做了什么、哪些没做成，剩下的交回主编。"""
+    return f"这次的工具次数用完了，来不及写总结。{_did(steps)}还没做的部分请主编再交给我。"
+
+
+async def _run_progress(db: AsyncSession, state: RunState) -> str:
+    """交给成员时附上本轮已经发生的事：作者的回答、前面成员的回复、主编查到的东西、本轮已经提出的卡片。
+    成员看不到主编的处理记录，不附上就会重复建档、问过的又不知道答案。"""
+    lines = []
+    for s in state.steps:
+        answered = s.get("tool") == "ask_author" and s.get("label") == "作者回答"
+        if answered or (s.get("tool") == "delegate" and s.get("ok")):
+            lines.append(clip(s.get("data") or s.get("summary") or "", PROGRESS_ITEM))
+        elif s.get("ok") and s.get("tool") != "ask_author":
+            lines.append(f"主编·{s.get('label')}：{s.get('summary')}")
+    cards = [f"修改{label}" for label in (await db.execute(
+        select(AssistantFieldCandidate.target_label).where(AssistantFieldCandidate.run_id == state.id)
+    )).scalars()]
+    cards += list((await db.execute(
+        select(AssistantEntityCandidate.label).where(AssistantEntityCandidate.run_id == state.id)
+        .order_by(AssistantEntityCandidate.created_at)
+    )).scalars())
+    if cards:
+        lines.append("本轮已经提出的候选（不要重复提出）：" + "、".join(cards))
+    text = "\n".join(lines)
+    return text if len(text) <= PROGRESS_LIMIT else text[:PROGRESS_LIMIT] + "…"
 
 
 async def _delegate(db: AsyncSession, state: RunState, ctx: ToolContext, job: Any, ai_service: Any,
@@ -677,36 +890,49 @@ async def _delegate(db: AsyncSession, state: RunState, ctx: ToolContext, job: An
     model = models.get(member.id)
     job.publish({"type": "member_start", "member": team.member_view(member, model), "task": task})
     sub = ToolContext(db=db, project_id=ctx.project_id, session_id=ctx.session_id, run_id=ctx.run_id, page=ctx.page,
-                      ai_service=ai_service, emit=ctx.emit, read_targets=ctx.read_targets, candidates=ctx.candidates,
-                      chapter_candidates=ctx.chapter_candidates, user_id=ctx.user_id, member_id=member.id, model=model,
-                      plans=ctx.plans, entity_candidates=ctx.entity_candidates)
+                      ai_service=ai_service, emit=ctx.emit, read_targets=ctx.read_targets, user_id=ctx.user_id,
+                      member_id=member.id, model=model)
     budget = _budget(setting, model or getattr(ai_service, "default_model", None),
                      getattr(ai_service, "default_max_tokens", None))
-    extra = ({"label": "主编交给你的任务", "content": task},)
+    progress = await _run_progress(db, state)
+    extra = (*([{"label": "本轮已有进展", "content": quote_untrusted(progress, "本轮进展")}] if progress else []),
+             {"label": "主编交给你的任务", "content": task})
     system_prompt = build_system_prompt(member)
     steps: list[dict] = []
-    while True:
-        exhausted = len(steps) >= MEMBER_MAX_STEPS
-        fitted = _fit(system_prompt, head, convo, state.goal, steps, exhausted, budget, extra)
-        decision = await _model_step(ai_service, fitted.prompt, job, system_prompt=system_prompt, model=model, stream=False)
-        if decision.kind == "reply" or exhausted:
-            text = (decision.text if decision.kind == "reply" else "") or "这件事我没能在限定步数内做完：" + "；".join(
-                s.get("summary", "") for s in steps[-3:])
-            break
-        if decision.tool in ("delegate", "ask_author"):
-            outcome = ToolOutcome(False, f"{member.name}不能转交或直接提问", "需要作者决定的事写进回复里，主编会去问。")
-        else:
-            outcome = await execute_tool(sub, decision.tool, decision.args)
-        label = f"{member.name}·{tool_label(decision.tool)}"
-        steps.append({"tool": decision.tool, "label": label, "args": _args_summary(decision.args), "ok": outcome.ok,
-                      "summary": outcome.summary, "data": outcome.data})
-        job.publish({"type": "tool", "name": decision.tool, "label": label, "detail": outcome.summary, "ok": outcome.ok})
-    public_steps = [{k: s.get(k) for k in ("tool", "label", "ok", "summary", "args")} for s in steps]
-    await _insert_member_message(db, state, text, {"run_id": state.id, "member": member.id, "steps": public_steps,
-                                                   "delegated": True})
+    try:
+        while True:
+            exhausted = len(steps) >= MEMBER_MAX_STEPS
+            fitted = _fit(system_prompt, head, convo, state.goal, steps, exhausted, budget, extra)
+            decision = await _model_step(ai_service, fitted.prompt, job, system_prompt=system_prompt, model=model,
+                                         stream=False)
+            if decision.kind == "reply" or exhausted:
+                finished = decision.kind == "reply" and bool(decision.text)
+                text = decision.text if finished else _out_of_steps(steps)
+                break
+            if decision.tool in ("delegate", "ask_author"):
+                outcome = ToolOutcome(False, f"{member.name}不能转交或直接提问", "需要作者决定的事写进回复里，主编会去问。")
+            else:
+                outcome = await execute_tool(sub, decision.tool, decision.args)
+            label = f"{member.name}·{tool_label(decision.tool)}"
+            steps.append({"tool": decision.tool, "label": label, "args": _args_summary(decision.args), "ok": outcome.ok,
+                          "summary": outcome.summary, "data": outcome.data})
+            job.publish({"type": "tool", "name": decision.tool, "label": label, "detail": outcome.summary, "ok": outcome.ok})
+    except asyncio.CancelledError:
+        await _save_partial(db, state, sub, f"（被停止了，这件事没做完）{_did(steps)}", steps=steps, delegated=True)
+        raise
+    except Exception as exc:  # noqa: BLE001 - 成员的模型出错只算这一步失败，主编接着推进
+        logger.warning(f"[智能助笔] {member.name}处理委托时出错 {state.id}: {exc}")
+        reason = str(exc)[:200]
+        await _save_partial(db, state, sub, f"这件事做到一半出错了（{reason}）。{_did(steps)}", steps=steps, delegated=True)
+        return ToolOutcome(False, f"{member.name}出错了：{reason}",
+                           f"{member.name}没能完成：{reason}。{_did(steps)}可以换个说法再交给他，或者先做别的。")
+    public_steps = _public_steps(steps)
+    await _insert_message(db, state, text, {"run_id": state.id, "member": member.id, "steps": public_steps,
+                                            "delegated": True, **_attachments(sub)})
     job.publish({"type": "member_message", "member": team.member_view(member, model), "content": text,
                  "steps": public_steps})
-    return ToolOutcome(True, f"{member.name}完成了交代的事", f"{member.name}的回复：\n{text}"[:DATA_LIMIT])
+    summary = f"{member.name}完成了交代的事" if finished else f"{member.name}步数用完，没做完"
+    return ToolOutcome(finished, summary, f"{member.name}的回复：\n{text}"[:DATA_LIMIT])
 
 
 async def run_agent(job: Any, *, session_factory: Any, run_id: str, ai_service: Any) -> dict:
@@ -726,9 +952,10 @@ async def run_agent(job: Any, *, session_factory: Any, run_id: str, ai_service: 
         setting = await context_setting(db, state.project_id)
         budget = _budget(setting, ctx.model or getattr(ai_service, "default_model", None),
                          getattr(ai_service, "default_max_tokens", None))
-        head = await _head_sections(db, state.project_id, state.page)
+        head = await _head_sections(db, state.project_id, state.page, state.session_id)
         convo = await load_conversation(db, state.session_id, state.goal_message_id)
         steps = state.steps
+        first_step = len(steps)  # 续跑：之前的步骤（含「作者回答」）已经挂在上一条消息下
         job.publish({"type": "speaker", "member": team.member_view(speaker, ctx.model)})
         try:
             count = _compaction_count(system_prompt, head, convo, state.goal, budget)
@@ -746,7 +973,7 @@ async def run_agent(job: Any, *, session_factory: Any, run_id: str, ai_service: 
                     if not text:
                         text = "本轮的处理步数用完了：" + "；".join(s.get("summary", "") for s in steps[-3:]) + "。可以告诉我接下来先做哪一项。"
                         job.publish({"type": "content", "content": text})
-                    return await _finish(db, state, content=text, ctx=ctx, status="completed")
+                    return await _finish(db, state, content=text, ctx=ctx, status="completed", first_step=first_step)
 
                 job.progress(f"{speaker.name} · 第 {used + 1} 步：{tool_label(decision.tool)}…", min(90, 15 + used * 10))
                 asked = sum(1 for s in steps if s.get("tool") == "ask_author" and s.get("ok") and s.get("label") != "作者回答")
@@ -766,13 +993,17 @@ async def run_agent(job: Any, *, session_factory: Any, run_id: str, ai_service: 
                     job.publish({"type": "question", "question": outcome.question})
                     prompt_text = "\n".join(q["prompt"] for q in outcome.question["questions"])
                     return await _finish(db, state, content=prompt_text, ctx=ctx, status="waiting_input",
-                                         question=outcome.question)
+                                         question=outcome.question, first_step=first_step)
                 await _save_run(db, state)
         except asyncio.CancelledError:
-            await _mark_stopped(db, state, "cancelled", "已停止，本轮没有写入任何内容")
+            await _save_partial(db, state, ctx, "已停止。停止前已经准备好的候选在输入框上方的「待确认」里，可以照常处理。",
+                                steps=steps[first_step:])
+            await _mark_stopped(db, state, "cancelled", STOP_MESSAGE)
             raise
         except Exception as exc:
             logger.warning(f"[智能助笔] 运行失败 {run_id}: {exc}")
+            await _save_partial(db, state, ctx, f"这一轮中途出错了（{str(exc)[:200]}）。出错前已经准备好的候选在输入框上方的「待确认」里，可以照常处理。",
+                                steps=steps[first_step:])
             await _mark_stopped(db, state, "failed", str(exc))
             raise
 
@@ -854,7 +1085,7 @@ async def _dry_run(db: AsyncSession, project_id: str, message: str, page: dict, 
     models = await team_models(db, project_id)
     budget = _budget(await context_setting(db, project_id), models.get(speaker.id) or default_model, max_tokens)
     system = build_system_prompt(speaker)
-    head = await _head_sections(db, project_id, page)
+    head = await _head_sections(db, project_id, page, session.id if session else None)
     convo = await load_conversation(db, session.id if session else None, None)
     count = _compaction_count(system, head, convo, message, budget) or 0
     if count:

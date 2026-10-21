@@ -114,6 +114,16 @@ class WorldRuleExportData(BaseModel):
     created_at: Optional[str] = None
 
 
+class SettingEntryExportData(BaseModel):
+    """世界设定条目导出数据（2.2.0 起）"""
+    category: str = "other"
+    title: str
+    summary: Optional[str] = None
+    content: Optional[str] = None
+    order_index: int = 0
+    created_at: Optional[str] = None
+
+
 class ChapterOutlineExportData(BaseModel):
     """章节大纲导出数据"""
     chapter_number: int
@@ -163,7 +173,7 @@ class PromptOverrideExportData(BaseModel):
 
 class ProjectExportData(BaseModel):
     """项目完整导出数据"""
-    version: str = "2.1.0"
+    version: str = "2.2.0"
     export_time: str
     project: Dict[str, Any]
     chapters: List[ChapterExportData] = []
@@ -182,6 +192,8 @@ class ProjectExportData(BaseModel):
     # 导入后不用整本书重新分析；结构见 services/ledger_transfer.py
     ledger: Optional[Dict[str, Any]] = None
     prompt_overrides: List[PromptOverrideExportData] = []
+    # 2.2.0 起：世界设定条目（术语 / 铁律 / 势力 / 规则等；2.1.0 及更早的文件没有这段，导入即为空）
+    setting_entries: List[SettingEntryExportData] = []
 
 
 class ImportValidationResult(BaseModel):

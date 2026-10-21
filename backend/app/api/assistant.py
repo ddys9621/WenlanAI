@@ -3,6 +3,8 @@
 
 一个项目一段可续接的对话；每条要求在后台任务里运行（SSE 推进度、处理记录、流式回复、上下文用量）；修改只产生候选。
 """
+import asyncio
+import weakref
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -69,7 +71,7 @@ def _start_job(*, project_id: str, user_id: str, run: AssistantRun, ai: AIServic
 
     return ai_jobs.start(
         kind="assistant_run", title=title, user_id=user_id, project_id=project_id, runner=runner,
-        scope=_scope(project_id), cancel_message="已停止；本轮没有写入任何内容",
+        scope=_scope(project_id), cancel_message=agent.STOP_MESSAGE,
         meta={"run_id": run.id, "session_id": run.session_id},
     )
 
@@ -197,6 +199,19 @@ async def list_runs(project_id: str, request: Request, db: AsyncSession = Depend
     return {"items": sorted(items, key=lambda r: 0 if r["status"] in agent.ACTIVE else 1)}
 
 
+_decision_locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = weakref.WeakValueDictionary()
+
+
+def _decision_lock(project_id: str) -> asyncio.Lock:
+    """同一项目的候选处理排队做（没人用时锁自动回收）：同一张卡被同时点了两次（待确认栏的行上和对话里的卡片）、
+    两张同名新建卡同时建档、同一项内容的两份修改同时应用，不排队就都过了「还没处理 / 没有同名 / 内容没被改过」的核对，
+    建出两份或互相覆盖。"""
+    lock = _decision_locks.get(project_id)
+    if lock is None:
+        lock = _decision_locks[project_id] = asyncio.Lock()
+    return lock
+
+
 async def _candidate(db: AsyncSession, project_id: str, candidate_id: str) -> AssistantFieldCandidate:
     candidate = (await db.execute(
         select(AssistantFieldCandidate).where(AssistantFieldCandidate.id == candidate_id)
@@ -210,17 +225,23 @@ async def _candidate(db: AsyncSession, project_id: str, candidate_id: str) -> As
 async def _decide(project_id: str, candidate_id: str, request: Request, db: AsyncSession, action, done: str) -> dict:
     """应用 / 撤销 / 放弃：提交后读回核对（所有会话共用一个 SQLite 连接，别的请求收尾时的回滚可能冲掉这次写入）。"""
     await verify_request_project(request, project_id, db)
-    for attempt in range(WRITE_ATTEMPTS):
-        candidate = await _candidate(db, project_id, candidate_id)
-        try:
-            await action(db, candidate)
-        except FieldError as exc:
-            await db.rollback()
-            raise HTTPException(status_code=exc.status_code, detail=str(exc))
-        await db.commit()
-        if await db.scalar(select(AssistantFieldCandidate.status).where(AssistantFieldCandidate.id == candidate_id)) == done:
-            return cands.candidate_view(candidate)
-        db.expire_all()
+    async with _decision_lock(project_id):
+        for attempt in range(WRITE_ATTEMPTS):
+            candidate = await _candidate(db, project_id, candidate_id)
+            if attempt and done in cands.REOPEN and candidate.status == done:
+                candidate.status = cands.REOPEN[done]  # 上一轮状态记上了、内容却被冲掉了：退回一步重做
+            try:
+                await action(db, candidate)
+            except FieldError as exc:
+                await db.rollback()
+                raise HTTPException(status_code=exc.status_code, detail=str(exc))
+            view = cands.candidate_view(candidate)
+            field_id, target_id, expected = candidate.field_id, candidate.target_id, cands.expected_json(candidate, done)
+            await db.commit()
+            status = await db.scalar(select(AssistantFieldCandidate.status).where(AssistantFieldCandidate.id == candidate_id))
+            if status == done and (expected is None or await cands.value_is(db, project_id, field_id, target_id, expected)):
+                return view
+            db.expire_all()
     raise HTTPException(status_code=503, detail="这次修改没能写进数据库（被同时进行的其他操作打断），请重试")
 
 
@@ -258,18 +279,25 @@ async def _entity_candidate(db: AsyncSession, project_id: str, candidate_id: str
 async def _decide_entity(project_id: str, candidate_id: str, request: Request, db: AsyncSession, action, done: str) -> dict:
     """应用 / 放弃新建候选：提交后读回核对（同一 SQLite 连接，别的请求收尾时的回滚可能冲掉这次写入）。"""
     await verify_request_project(request, project_id, db)
-    for _attempt in range(WRITE_ATTEMPTS):
-        candidate = await _entity_candidate(db, project_id, candidate_id)
-        try:
-            await action(db, candidate)
-        except EntityError as exc:
-            await db.rollback()
-            raise HTTPException(status_code=exc.status_code, detail=str(exc))
-        view = entity_cands.entity_candidate_view(candidate)
-        await db.commit()
-        if await db.scalar(select(AssistantEntityCandidate.status).where(AssistantEntityCandidate.id == candidate_id)) == done:
-            return view
-        db.expire_all()
+    async with _decision_lock(project_id):
+        for _attempt in range(WRITE_ATTEMPTS):
+            candidate = await _entity_candidate(db, project_id, candidate_id)
+            if done == "applied" and candidate.status == "applied" and not await entity_cands.created_entity_exists(
+                    db, candidate.entity_type, candidate.created_entity_id):
+                # 记成已建档、建出来的那一行却不在了（上一轮 / 修复前被别的请求回滚冲掉，或作者后来删了）：重建；还在就照常 409
+                entity_cands.reopen_entity_candidate(candidate)
+            try:
+                await action(db, candidate)
+            except EntityError as exc:
+                await db.rollback()
+                raise HTTPException(status_code=exc.status_code, detail=str(exc))
+            view = entity_cands.entity_candidate_view(candidate)
+            entity_type, entity_id = candidate.entity_type, candidate.created_entity_id
+            await db.commit()
+            status = await db.scalar(select(AssistantEntityCandidate.status).where(AssistantEntityCandidate.id == candidate_id))
+            if status == done and (done != "applied" or await entity_cands.created_entity_exists(db, entity_type, entity_id)):
+                return view
+            db.expire_all()
     raise HTTPException(status_code=503, detail="这次操作没能写进数据库（被同时进行的其他操作打断），请重试")
 
 

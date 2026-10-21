@@ -5,6 +5,8 @@ import { cn } from '@/lib/utils'
 import { useStore } from '@/store/index'
 import { worldRulesApi } from '@/services/api'
 import { Modal } from '@/components/ui/Modal'
+import { useAssistantDataChange } from '@/hooks/useAssistantPage'
+import type { AssistantDataChange } from '@/store/assistantStore'
 import type { WorldRule, WorldRuleCreate, WorldRuleUpdate } from '@/types'
 
 const CATEGORIES = [
@@ -48,6 +50,12 @@ export default function WorldRules() {
   }, [currentProject?.id, activeCategory])
 
   useEffect(() => { fetchRules() }, [fetchRules])
+
+  // 智能助笔建了 / 改了世界规则：刷新列表
+  const onAssistantData = useCallback((change: AssistantDataChange) => {
+    if (change.entity === 'world_rule') void fetchRules()
+  }, [fetchRules])
+  useAssistantDataChange(onAssistantData)
 
   const openCreate = () => {
     setEditingRule(null)

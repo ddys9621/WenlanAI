@@ -30,14 +30,18 @@ MEMBERS: tuple[Member, ...] = (
     Member(
         "editor", "主编", "编", "jade", "澄清创作目标，统筹成员分工，把握故事方向与推进顺序",
         (*READ_TOOLS, "propose_edit", "propose_character", "propose_organization", "propose_setting_entry",
-         *PLANNING_TOOLS, "manuscript", "write_chapters", "project_status", "open_page", "ask_author", "delegate"),
+         "propose_world_rule", *PLANNING_TOOLS, "manuscript", "write_chapters", "project_status", "open_page",
+         "ask_author", "delegate"),
         "先弄清作者想写什么，再按 总纲 → 分卷 → 细化卷纲 → 单元章纲 → 确认 → 写正文 → 审校 的顺序推进；"
-        "专业的事交给对应成员（delegate），重要的选择用 ask_author 让作者拍板；每轮结束告诉作者下一步是什么。",
+        "专业的事交给对应成员（delegate），交代时写明要落成哪些卡片（比如「把势力建成组织候选」），别只让他们「起草」；"
+        "重要的选择用 ask_author 让作者拍板；每轮结束告诉作者下一步是什么。",
     ),
     Member(
         "world", "世界观设定师", "世", "blue", "设计世界规则、地点、势力与力量 / 职业体系",
-        (*READ_TOOLS, "propose_edit", "propose_organization", "propose_setting_entry"),
+        (*READ_TOOLS, "propose_edit", "propose_organization", "propose_setting_entry", "propose_world_rule"),
         "写清时代、空间、秩序、核心冲突和不可违反的规则；力量体系说明能力边界、代价和突破条件。"
+        "作品设定的时代背景 / 地点设定 / 氛围基调 / 世界规则四栏用 propose_edit 改；"
+        "修炼境界、装备模板、地图位置用 propose_world_rule 建成世界规则条目（境界从低到高、一级一条）；"
         "势力 / 组织用 propose_organization 建成独立条目；术语 / 铁律 / 规则等世界设定用 propose_setting_entry 分条建，"
         "都别堆进「世界规则」单字段撑爆 20000 字上限。不适合境界体系或金手指的题材不要硬塞；不凭空声称素材里没有的事实。",
     ),
@@ -51,7 +55,8 @@ MEMBERS: tuple[Member, ...] = (
         "outline", "总纲策划师", "纲", "amber", "打磨总纲与分卷：全书主线因果连贯，每卷一个新局面",
         (*READ_TOOLS, "propose_edit", "plan_volumes"),
         "先想清从开始到结局发生了什么、人物为何这样选择、结果为何引出下一件事，再写连贯的自然段；"
-        "每卷换一个新局面（舞台、对手或目标），赌注逐卷抬高。",
+        "总纲按字段用 propose_edit 写（故事梗概 / 全书主线 / 核心卖点 / 成长路线 / 终极目标 / 开篇钩子…，本书还没有总纲时目标是 new），"
+        "不要写进作品设定的主题或简介；每卷换一个新局面（舞台、对手或目标），赌注逐卷抬高。",
     ),
     Member(
         "chapter", "章节策划师", "章", "violet", "把卷纲细化成剧情单元，再把单元展开为章纲",

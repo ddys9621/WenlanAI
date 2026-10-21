@@ -85,6 +85,7 @@ from app.services.generation_trace import begin_stage, trace_reference
 from app.services.knowledge import kb_refs
 from app.services.knowledge.kb_context import traced_kb_context
 from app.services.world_map_context import chapter_map_reference
+from app.services.world_setting_context import build_world_context, world_query
 from app.services.chapter_consistency_service import chapter_consistency_service
 from app.services.memory_service import memory_service
 from app.services.narrative_state_service import narrative_state_service
@@ -594,23 +595,10 @@ async def run_chapter_generation(job, *, chapter_id: str, user_id: str, ai_servi
         )
         chapter_number = current_chapter.chapter_number
 
-        # 世界规则：项目规则 + 语义检索相关条目
+        # 世界观：总述 + 语义检索到的体系与设定条目（统一出口，见 world_setting_context）
         outline_text = chapter_outline.summary or chapter_outline.plot_points or ''
-        query_text = f"{project.theme or ''} {project.genre or ''} {outline_text[:500]}"
-        from app.services.world_rule_service import world_rule_service
-        enhanced_world_rules = await world_rule_service.generate_rules_summary_with_search(
-            db_session, project.id, query_text, limit=5
-        )
-        final_world_rules = project.world_rules or '未设定'
-        if enhanced_world_rules:
-            final_world_rules = f"{final_world_rules}\n\n{enhanced_world_rules}"
-        # 世界设定条目（术语 / 铁律 / 势力 / 规则等，语义检索）：让从 world_rules 单字段挪出来的设定在写作时仍读得到
-        from app.services import setting_entry_service
-        setting_summary = await setting_entry_service.generate_summary_with_search(
-            db_session, project.id, query_text, limit=6
-        )
-        if setting_summary:
-            final_world_rules = f"{final_world_rules}\n\n{setting_summary}"
+        world = await build_world_context(db_session, project, world_query(project, outline_text[:500]), scene="写正文")
+        final_world_rules = world.merged
 
         current_outline_content = _outline_task_text(chapter_outline, target_word_count)
         logger.info(f"📖 使用章纲生成: 第{chapter_outline.chapter_number}章《{chapter_outline.title}》")

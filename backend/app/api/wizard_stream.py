@@ -35,6 +35,7 @@ from app.api.ai_jobs import job_sse_response
 from app.api.settings import get_user_ai_service
 from app.services.ai_jobs import AIJobConflictError, ai_jobs, job_session_factory
 from app.services.sse_job_adapter import make_sse_generator_runner
+from app.services.world_setting_context import build_world_context, world_query
 router = APIRouter(prefix="/wizard-stream", tags=["项目创建向导(流式)"])
 logger = get_logger(__name__)
 
@@ -597,24 +598,17 @@ async def characters_generator(
             "rules": project.world_rules or "未设定"
         }
 
-        # 【新增】查询世界规则,让角色生成参考详细规则
-        from app.services.world_rule_service import world_rule_service
-        world_rules_summary = ""
-        try:
-            yield await SSEResponse.send_progress("📋 加载世界规则...", 12)
-            # 构建查询文本
-            query_text = f"{theme or project.theme or ''} {genre or project.genre or ''}"
-            # 使用语义检索获取相关规则
-            world_rules_summary = await world_rule_service.generate_rules_summary_with_search(
-                db, project.id, query_text, limit=10
-            )
-            if world_rules_summary:
-                logger.info(f"✅ 为角色生成加载了世界规则摘要 ({len(world_rules_summary)} 字符)")
-            else:
-                logger.info("📋 项目暂无详细世界规则,使用基础设定")
-        except Exception as rule_error:
-            logger.warning(f"⚠️ 加载世界规则失败: {str(rule_error)}")
-            world_rules_summary = ""
+        # 世界规则明细 + 设定条目（语义检索），让角色生成参考详细规则；向导传入的主题 / 类型优先
+        yield await SSEResponse.send_progress("📋 加载世界规则...", 12)
+        world = await build_world_context(
+            db, project, f"{theme or project.theme or ''} {genre or project.genre or ''}".strip(),
+            rule_limit=10, scene="向导角色",
+        )
+        world_rules_summary = world.detail
+        logger.info(
+            f"✅ 为角色生成加载了世界规则摘要 ({len(world_rules_summary)} 字符)" if world_rules_summary
+            else "📋 项目暂无详细世界规则 / 设定条目,使用基础设定"
+        )
         
         # MCP工具增强：收集角色参考资料
         character_reference_materials = ""
@@ -765,7 +759,7 @@ async def characters_generator(
                     if world_rules_summary:
                         prompt_parts.append(f"""
 【详细世界规则】
-以下是本作品的详细世界规则设定（境界体系、装备系统等），请确保角色设定符合这些规则：
+以下是本作品的详细世界规则设定（境界体系、装备系统，以及术语 / 铁律 / 势力等设定条目），请确保角色设定符合这些规则：
 
 {world_rules_summary}
 
@@ -1474,21 +1468,12 @@ async def outline_generator(
         # 准备生成高层大纲
         yield await SSEResponse.send_progress("准备生成高层故事大纲...", 30)
 
-        # 【修改】只查询现有世界规则,不再生成(规则已在世界观阶段生成)
-        from app.services.world_rule_service import world_rule_service
+        # 只查询现有世界规则 / 设定条目,不再生成(规则已在世界观阶段生成)
         stage = begin_stage("references", "检索世界规则与仿写参考")
         yield await SSEResponse.send_progress("📋 加载世界规则...", 32)
-
-        # 构建查询文本（用于智能检索世界规则）
-        query_text = f"{project.theme or ''} {project.genre or ''}"
-
-        # 增强世界规则（使用语义检索）
-        enhanced_world_rules = await world_rule_service.generate_rules_summary_with_search(
-            db, project.id, query_text, limit=5
-        )
-        final_world_rules = project.world_rules or "未设定"
-        if enhanced_world_rules:
-            final_world_rules = f"{final_world_rules}\n\n{enhanced_world_rules}"
+        world = await build_world_context(db, project, world_query(project), scene="总纲")
+        enhanced_world_rules = world.detail
+        final_world_rules = world.merged
 
         # 仿写参考：对标书的全书骨架 / 写法手册 / 结构统计（去名版）
         _kb = await traced_kb_context(db, project_id, "story_outline")

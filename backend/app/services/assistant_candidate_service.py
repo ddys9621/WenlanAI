@@ -81,6 +81,22 @@ async def undo_candidate(db: AsyncSession, candidate: AssistantFieldCandidate) -
     candidate.decided_at = utcnow()
 
 
+# 记成了这个状态、内容却没写进去（被别的请求收尾时的回滚冲掉）时，退回到哪一步重做
+REOPEN = {"applied": "candidate", "undone": "applied"}
+
+
+def expected_json(candidate: AssistantFieldCandidate, done: str) -> Optional[str]:
+    """应用 / 撤销之后这项内容应该是什么（与候选里存的同一份 JSON）；放弃不改内容，返回 None。"""
+    return {"applied": candidate.after_json, "undone": candidate.before_json}.get(done)
+
+
+async def value_is(db: AsyncSession, project_id: str, field_id: str, target_id: str, expected: str) -> bool:
+    """绕过会话缓存读回这项内容现在的值，和应有的值比对（所有会话共用一个 SQLite 连接，写入可能被别的请求的回滚冲掉）。"""
+    db.expire_all()
+    current = (await fields.read_field(db, project_id, field_id, target_id))["value"]
+    return json.dumps(current, ensure_ascii=False) == expected
+
+
 async def reject_candidate(db: AsyncSession, candidate: AssistantFieldCandidate) -> None:
     if candidate.status != "candidate":
         raise fields.FieldConflict("这份候选已经处理过了")

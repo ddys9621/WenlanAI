@@ -1113,8 +1113,9 @@ export const volumeApi = {
   update: (volumeId: string, data: VolumeFields) =>
     api.put<unknown, Volume>(`/volumes/${volumeId}`, data),
 
-  confirm: (volumeId: string) =>
-    api.post<unknown, Volume>(`/volumes/${volumeId}/confirm`),
+  /** silent：失败不弹全局提示，调用方自己提示（助笔确认整份草案时，几卷就会弹几条） */
+  confirm: (volumeId: string, silent = false) =>
+    api.post<unknown, Volume>(`/volumes/${volumeId}/confirm`, undefined, { silent }),
 
   confirmAll: (projectId: string) =>
     api.post<unknown, { confirmed: number }>(`/projects/${projectId}/volumes/confirm-all`),
@@ -1167,9 +1168,9 @@ export const chapterOutlineApi = {
   batchCreateChapterOutlines: (data: ChapterOutlineBatchCreateRequest) =>
     api.post<unknown, ChapterOutline[]>('/chapter-outlines/batch', data),
 
-  // 确认章纲（清除 AI 草拟 / 上游已改标记）
-  confirmChapterOutline: (outlineId: string) =>
-    api.post<unknown, ChapterOutline>(`/chapter-outlines/${outlineId}/confirm`),
+  // 确认章纲（清除 AI 草拟 / 上游已改标记）；silent 同卷纲
+  confirmChapterOutline: (outlineId: string, silent = false) =>
+    api.post<unknown, ChapterOutline>(`/chapter-outlines/${outlineId}/confirm`, undefined, { silent }),
 
   // 一键确认本项目全部待确认 / 上游已改的章纲
   confirmAllChapterOutlines: (projectId: string) =>

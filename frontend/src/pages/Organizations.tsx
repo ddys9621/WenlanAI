@@ -5,6 +5,8 @@ import { cn } from '@/lib/utils'
 import { useStore } from '@/store/index'
 import { organizationApi, characterApi } from '@/services/api'
 import { Modal } from '@/components/ui/Modal'
+import { useAssistantDataChange } from '@/hooks/useAssistantPage'
+import type { AssistantDataChange } from '@/store/assistantStore'
 import type { Character } from '@/types'
 
 /* ------------------------------------------------------------------ */
@@ -119,6 +121,12 @@ export default function Organizations() {
   }, [currentProject?.id])
 
   useEffect(() => { fetchOrgs() }, [fetchOrgs])
+
+  // 智能助笔建了组织 / 改了组织详情：刷新列表
+  const onAssistantData = useCallback((change: AssistantDataChange) => {
+    if (change.entity === 'organization') void fetchOrgs()
+  }, [fetchOrgs])
+  useAssistantDataChange(onAssistantData)
 
   /* ---- 组织 CRUD ---- */
   const openCreateOrg = () => {

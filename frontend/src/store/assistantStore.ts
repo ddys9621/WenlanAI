@@ -23,6 +23,10 @@ interface AssistantState {
   route: { page: string; label: string };
   detail: AssistantDetail;
   composeRequest: { text: string; nonce: number } | null;
+  /** 头部「新对话」按钮每点一次加一，对话界面看到变化就开新对话（开不开由它按是否在运行决定） */
+  newSessionNonce: number;
+  /** 每要求一次「打开待确认栏」加一（核对页点了待确认的候选） */
+  reviewNonce: number;
   setOpen: (open: boolean) => void;
   toggle: () => void;
   setMode: (mode: AssistantMode) => void;
@@ -31,6 +35,9 @@ interface AssistantState {
   setDetail: (detail: AssistantDetail | null) => void;
   /** 打开助笔并把一段要求填进输入框（不自动发送） */
   compose: (text: string) => void;
+  requestNewSession: () => void;
+  /** 切回对话并展开输入框上方的待确认栏 */
+  openReview: () => void;
 }
 
 const OPEN_KEY = 'assistant-open';
@@ -49,6 +56,8 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
   route: { page: '', label: '' },
   detail: {},
   composeRequest: null,
+  newSessionNonce: 0,
+  reviewNonce: 0,
   setOpen: (open) => {
     writeFlag(OPEN_KEY, open);
     set({ open });
@@ -65,6 +74,11 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
     writeFlag(OPEN_KEY, true);
     nonce += 1;
     set({ open: true, mode: 'agent', composeRequest: { text, nonce } });
+  },
+  requestNewSession: () => set((s) => ({ mode: 'agent', newSessionNonce: s.newSessionNonce + 1 })),
+  openReview: () => {
+    writeFlag(OPEN_KEY, true);
+    set((s) => ({ open: true, mode: 'agent', reviewNonce: s.reviewNonce + 1 }));
   },
 }));
 

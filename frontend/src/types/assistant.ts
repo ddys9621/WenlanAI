@@ -124,7 +124,7 @@ export interface AssistantTeam {
 }
 
 /** 规划工具产出的草案卡片：作者在卡片上确认才算定稿 */
-export type AssistantPlan =
+export type AssistantPlan = (
   | {
     kind: 'volumes'
     title: string
@@ -146,6 +146,12 @@ export type AssistantPlan =
     unit_index: number
     chapters: { id: string; chapter_number: number; title: string; plot_points: string }[]
   }
+) & {
+  /** 读取对话时这份草案是否已经确认（在卡片或谋篇页确认过；运行中刚推来的卡没有这个字段） */
+  confirmed?: boolean
+  /** 读取对话时草案里的卷纲 / 章纲已经不在了（重新分卷 / 重新生成替换掉，或在谋篇页删了）：卡片作废，不能再确认 */
+  gone?: boolean
+}
 
 export interface AssistantProgress {
   text: string
@@ -190,19 +196,23 @@ export interface AssistantFieldCandidate {
   decided_at: string | null
 }
 
-/** 新建对象候选：工具只记下要新建的角色 / 组织 / 设定条目，作者「应用」才真正建档 */
+/** 新建对象候选：工具只记下要新建的角色 / 组织 / 设定条目 / 世界规则，作者「应用」才真正建档 */
 export type AssistantEntityCandidateStatus = 'candidate' | 'applied' | 'rejected'
 
 export interface AssistantEntityCandidate {
   id: string
-  /** character / organization / setting_entry */
+  /** character / organization / setting_entry / world_rule（payload.category：cultivation_realm / equipment_template / map_location） */
   entity_type: string
   label: string
   page: string | null
   /** 拟新建对象的各字段（已按类型校验过） */
   payload: Record<string, string>
+  /** 卡片上逐行列的字段（顺序、名称照页面；名字当标题不在其中） */
+  fields?: { key: string; label: string }[]
   reason: string
   status: AssistantEntityCandidateStatus
+  /** 已建档、建出来的那一行却不在了（被删了或当时没写进去），书里也没有同名的：可以重新建档 */
+  entity_missing?: boolean
   run_id: string | null
   /** 应用后新建行的 id */
   created_entity_id: string | null
@@ -261,7 +271,8 @@ export interface AssistantPreview {
 }
 
 export interface AssistantCheckItem {
-  kind: 'outline_unconfirmed' | 'analysis_missing' | 'analysis_stale' | 'candidate_pending' | 'field_candidate' | 'consistency' | string
+  kind: 'volume_unconfirmed' | 'outline_unconfirmed' | 'analysis_missing' | 'analysis_stale' | 'candidate_pending' | 'field_candidate'
+    | 'entity_candidate' | 'consistency' | string
   severity: string
   title: string
   detail: string

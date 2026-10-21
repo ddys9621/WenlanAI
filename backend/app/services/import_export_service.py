@@ -12,6 +12,7 @@ from app.models.relationship import CharacterRelationship, Organization, Organiz
 from app.models.writing_style import WritingStyle
 from app.models.generation_history import GenerationHistory
 from app.models.world_rule import WorldRule
+from app.models.setting_entry import SettingEntry
 from app.models.chapter_outline import ChapterOutline
 from app.models.volume import Volume
 from app.services.narrative_tasks import parse_narrative_tasks
@@ -26,6 +27,7 @@ from app.schemas.import_export import (
     WritingStyleExportData,
     GenerationHistoryExportData,
     WorldRuleExportData,
+    SettingEntryExportData,
     VolumeExportData,
     ChapterOutlineExportData,
     PromptOverrideExportData,
@@ -52,8 +54,9 @@ class ImportExportService:
     """导入导出服务类"""
 
     # 2.1.0：多了故事账本段（ledger）；2.0.x 的文件照样能导入（没有账本，导入后按需重新分析）
-    SUPPORTED_VERSION = "2.1.0"
-    COMPATIBLE_VERSIONS = ("2.0.0", "2.0.1", "2.1.0")
+    # 2.2.0：多了世界设定条目段（setting_entries）；更早的文件没有这段，导入即为空
+    SUPPORTED_VERSION = "2.2.0"
+    COMPATIBLE_VERSIONS = ("2.0.0", "2.0.1", "2.1.0", "2.2.0")
     
     @staticmethod
     async def export_project(
@@ -144,6 +147,10 @@ class ImportExportService:
         world_rules = await ImportExportService._export_world_rules(project_id, db)
         logger.info(f"导出世界规则数: {len(world_rules)}")
 
+        # 导出世界设定条目
+        setting_entries = await ImportExportService._export_setting_entries(project_id, db)
+        logger.info(f"导出世界设定条目数: {len(setting_entries)}")
+
         # 导出卷纲
         volumes = await ImportExportService._export_volumes(project_id, db)
         logger.info(f"导出卷纲数: {len(volumes)}")
@@ -177,6 +184,7 @@ class ImportExportService:
             chapter_outlines=chapter_outlines,
             ledger=ledger,
             prompt_overrides=prompt_overrides,
+            setting_entries=setting_entries,
         )
 
         logger.info(f"项目导出完成: {project_id}")
@@ -442,6 +450,24 @@ class ImportExportService:
             for rule in rules
         ]
 
+    @staticmethod
+    async def _export_setting_entries(project_id: str, db: AsyncSession) -> List[SettingEntryExportData]:
+        """导出世界设定条目"""
+        rows = (await db.execute(
+            select(SettingEntry).where(SettingEntry.project_id == project_id)
+            .order_by(SettingEntry.order_index, SettingEntry.created_at)
+        )).scalars().all()
+        return [
+            SettingEntryExportData(
+                category=entry.category or "other",
+                title=entry.title,
+                summary=entry.summary,
+                content=entry.content,
+                order_index=entry.order_index or 0,
+                created_at=entry.created_at.isoformat() if entry.created_at else None,
+            )
+            for entry in rows
+        ]
 
     @staticmethod
     async def _export_chapter_outlines(project_id: str, db: AsyncSession) -> List[ChapterOutlineExportData]:
@@ -554,6 +580,7 @@ class ImportExportService:
             "writing_styles": len(data.get("writing_styles", [])),
             "generation_history": len(data.get("generation_history", [])),
             "world_rules": len(data.get("world_rules", [])),
+            "setting_entries": len(data.get("setting_entries") or []),
             "volumes": len(data.get("volumes") or []),
             "chapter_outlines": len(data.get("chapter_outlines", [])),
             "prompt_overrides": len(data.get("prompt_overrides") or []),
@@ -691,6 +718,12 @@ class ImportExportService:
             )
             statistics["world_rules"] = world_rules_count
             logger.info(f"导入世界规则数: {world_rules_count}")
+
+            # 导入世界设定条目（2.2.0 起；更早的文件没有这段）
+            statistics["setting_entries"] = await ImportExportService._import_setting_entries(
+                new_project.id, data.get("setting_entries") or [], db
+            )
+            logger.info(f"导入世界设定条目数: {statistics['setting_entries']}")
 
             # 导入卷纲（章纲按卷序号挂到新卷上）
             volume_mapping = await ImportExportService._import_volumes(new_project.id, data.get("volumes") or [], db)
@@ -1028,6 +1061,25 @@ class ImportExportService:
         logger.info(f"✅ 导入世界规则完成: {count} 条，已向量化")
         return count
 
+    @staticmethod
+    async def _import_setting_entries(project_id: str, entries_data: List[Dict], db: AsyncSession) -> int:
+        """导入世界设定条目。不在这里逐条向量化：新项目的向量集合是空的，第一次检索时 SettingEntryIndex 会整批补齐。"""
+        count = 0
+        for item in entries_data:
+            title = (item.get("title") or "").strip() if isinstance(item, dict) else ""
+            if not title:
+                continue
+            db.add(SettingEntry(
+                project_id=project_id,
+                category=item.get("category") or "other",
+                title=title,
+                summary=item.get("summary") or "",
+                content=item.get("content") or "",
+                order_index=item.get("order_index") or 0,
+            ))
+            count += 1
+        await db.flush()
+        return count
 
     @staticmethod
     async def _import_volumes(project_id: str, volumes_data: List[Dict], db: AsyncSession) -> Dict[int, str]:

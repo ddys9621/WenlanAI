@@ -115,6 +115,7 @@ export default {
         'slide-down': 'slideDown 0.2s ease-out',
         'scale-in': 'scaleIn 0.16s ease-out',
         'float-soft': 'floatSoft 6s ease-in-out infinite',
+        'typing-dot': 'typingDot 1.2s ease-in-out infinite',
       },
       keyframes: {
         fadeIn: {
@@ -136,6 +137,11 @@ export default {
         floatSoft: {
           '0%, 100%': { transform: 'translateY(0px)' },
           '50%': { transform: 'translateY(-10px)' },
+        },
+        // 助笔「正在处理」的三个点
+        typingDot: {
+          '0%, 60%, 100%': { opacity: '0.35', transform: 'translateY(0)' },
+          '30%': { opacity: '1', transform: 'translateY(-2px)' },
         },
       },
     },

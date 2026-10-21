@@ -1,7 +1,7 @@
 """AI 生成单个角色（2026-09-11 从 api/characters.py 的 generate 端点抽出，供后台任务 runner 调用）。
 
-过程追踪：各步骤用 stage_scope 标注；MCP 工具调用 / 仿写参考 / LLM 进度由共享入口
-（MCPToolService / traced_kb_context / AIService）自动上报，这里不重复发事件。
+过程追踪：各步骤用 stage_scope 标注；世界规则 / 设定条目检索、MCP 工具调用 / 仿写参考 / LLM 进度由共享入口
+（world_setting_context / MCPToolService / traced_kb_context / AIService）自动上报，这里不重复发事件。
 服务层只抛 ValueError（面向用户的可读提示）或底层异常，由调用方转 HTTP 或任务 error 事件。
 """
 from __future__ import annotations
@@ -24,6 +24,7 @@ from app.services.generation_trace import stage_scope
 from app.services.knowledge.kb_context import traced_kb_context
 from app.services.prompt_service import prompt_service
 from app.services.relationship_matcher import match_relationship_type
+from app.services.world_setting_context import build_world_context, world_query
 from app.utils.json_cleaner import clean_and_parse_json
 from app.utils.prompt_safety import quote_untrusted
 from app.utils.role_type import normalize_role_type
@@ -75,7 +76,7 @@ async def generate_character_for_project(
     request: CharacterGenerateRequest,
 ) -> Character:
     """生成并落库一个角色（含关系 / 组织成员 / 生成历史），返回已 refresh 的 Character。"""
-    async with stage_scope("context", "整理项目上下文与已有角色") as st:
+    async with stage_scope("context", "整理项目上下文 / 已有角色 / 世界规则") as st:
         existing_characters = (await db.execute(
             select(Character).where(Character.project_id == request.project_id).order_by(Character.created_at.desc())
         )).scalars().all()
@@ -92,6 +93,10 @@ async def generate_character_for_project(
         if organization_list:
             existing_chars_info += "\n\n已有组织：\n" + "\n".join(organization_list)
 
+        # 详细世界规则 + 设定条目（语义检索；各服务自动上报 reference 事件）；失败不中断
+        world = await build_world_context(
+            db, project, world_query(project, request.role_type or "", request.background or ""), rule_limit=10, scene="角色生成",
+        )
         project_context_parts = [f"""
 项目信息：
 - 书名：{project.title}
@@ -103,6 +108,13 @@ async def generate_character_for_project(
 - 世界规则：{project.world_rules or '未设定'}
 {existing_chars_info}
 """]
+        if world.detail:
+            project_context_parts.append(f"""
+【详细世界规则】
+以下是本作品的详细世界规则设定，请确保角色的境界、能力、所属势力符合这些规则：
+
+{world.detail}
+""")
         user_input = f"""
 用户要求：
 - 角色名称：{request.name or '请AI生成'}
@@ -110,7 +122,7 @@ async def generate_character_for_project(
 - 背景设定：{request.background or '无特殊要求'}
 - 其他要求：{request.requirements or '无'}
 """
-        st.note(existing_characters=len(existing_characters))
+        st.note(existing_characters=len(existing_characters), world_rules_chars=len(world.detail))
 
     # 【强控工具流】启用 MCP 时先调用工具收集资料；失败不中断
     reference_materials = ""

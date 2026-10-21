@@ -1,27 +1,18 @@
-/** 内容修改候选：修改前 / 建议修改为 对比（只标改动的句子），作者应用才写入，可撤销；对不上时拒绝而不是覆盖。 */
+/** 内容修改候选：修改前 / 建议改为 对比（只标改动的句子），作者应用才写入，可撤销；对不上时拒绝而不是覆盖。 */
 import { useMemo, useState } from 'react';
-import { isAxiosError } from 'axios';
-import { Check, ExternalLink, Loader2, Undo2, X } from 'lucide-react';
+import { ArrowUpRight, Check, Loader2, Undo2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
-import { assistantApi } from '@/services/api';
-import { emitAssistantData } from '@/store/assistantStore';
 import type { AssistantFieldCandidate } from '@/types/assistant';
 import { diffBlocks, formatFieldValue } from '@/utils/assistantText';
+import { errorDetail, fieldAction } from './changeActions';
+import { StatusDot, type StatusTone } from './CocreationParts';
 
-const STATUS: Record<AssistantFieldCandidate['status'], { label: string; cls: string }> = {
-  candidate: { label: '待确认', cls: 'lj-badge--candidate' },
-  applied: { label: '已应用', cls: 'lj-badge--ok' },
-  undone: { label: '已撤销', cls: 'lj-badge--muted' },
-  rejected: { label: '没有采用', cls: 'lj-badge--muted' },
-};
-
-const errorDetail = (err: unknown) => {
-  if (isAxiosError(err)) {
-    const detail = (err.response?.data as { detail?: unknown } | undefined)?.detail;
-    if (typeof detail === 'string') return detail;
-  }
-  return err instanceof Error ? err.message : '操作失败';
+const STATUS: Record<AssistantFieldCandidate['status'], { label: string; tone: StatusTone }> = {
+  candidate: { label: '待确认', tone: 'orange' },
+  applied: { label: '已应用', tone: 'green' },
+  undone: { label: '已撤销', tone: 'gray' },
+  rejected: { label: '没有采用', tone: 'gray' },
 };
 
 interface FieldCandidateCardProps {
@@ -29,9 +20,11 @@ interface FieldCandidateCardProps {
   candidate: AssistantFieldCandidate;
   onChange: (next: AssistantFieldCandidate) => void;
   onOpenPage?: (page: string) => void;
+  /** false = 只看前后对比（在待确认栏里展开时，应用 / 不用在那一行上，不再重复一套） */
+  showActions?: boolean;
 }
 
-export function FieldCandidateCard({ projectId, candidate, onChange, onOpenPage }: FieldCandidateCardProps) {
+export function FieldCandidateCard({ projectId, candidate, onChange, onOpenPage, showActions = true }: FieldCandidateCardProps) {
   const [busy, setBusy] = useState(false);
   const before = formatFieldValue(candidate.before);
   const after = formatFieldValue(candidate.after);
@@ -42,10 +35,7 @@ export function FieldCandidateCard({ projectId, candidate, onChange, onOpenPage 
   const act = async (action: 'apply' | 'undo' | 'reject') => {
     setBusy(true);
     try {
-      const call = action === 'apply' ? assistantApi.applyCandidate : action === 'undo' ? assistantApi.undoCandidate : assistantApi.rejectCandidate;
-      const next = await call(projectId, candidate.id);
-      onChange(next);
-      if (action !== 'reject') emitAssistantData({ entity: next.entity, targetId: next.target_id });
+      onChange(await fieldAction(projectId, candidate, action));
       toast.success(action === 'apply' ? `已应用到「${candidate.label}」` : action === 'undo' ? '已撤销这次修改' : '已放弃这份候选');
     } catch (err) {
       toast.error(errorDetail(err));
@@ -55,52 +45,50 @@ export function FieldCandidateCard({ projectId, candidate, onChange, onOpenPage 
   };
 
   return (
-    <section className="rounded border border-brand/30 bg-white">
-      <header className="flex flex-wrap items-center justify-between gap-2 border-b border-surface-border-light px-3 py-2">
-        <div className="min-w-0">
-          <p className="truncate text-xs font-semibold text-content">{candidate.label}</p>
-          <p className="text-[11px] text-content-tertiary">修改候选 · 标色处为改动 · {changes} 处</p>
+    <section className="as-card">
+      <header className="as-card-head">
+        <div className="flex items-center gap-2">
+          <span className="as-kind">修改 · {changes} 处</span>
+          <span className="ml-auto"><StatusDot tone={status.tone} label={status.label} /></span>
         </div>
-        <span className={cn('lj-badge', status.cls)}>{status.label}</span>
+        <p className="mt-1.5 truncate text-[14px] font-semibold text-content">{candidate.label}</p>
+        {candidate.reason && <p className="mt-1 text-[13px] leading-[1.6] text-content-secondary">{candidate.reason}</p>}
       </header>
-      {candidate.reason && <p className="border-b border-surface-border-light px-3 py-1.5 text-[11px] text-content-secondary">理由：{candidate.reason}</p>}
-      <div className="grid gap-px bg-surface-border-light sm:grid-cols-2">
-        <div className="bg-surface-paper px-3 py-2">
-          <p className="mb-1 text-[11px] font-medium text-content-tertiary">修改前 · {before.length} 字</p>
-          <p className="max-h-56 overflow-y-auto whitespace-pre-wrap text-xs leading-6 text-content-secondary">
+      <div className="space-y-3 px-4 pb-3.5">
+        <div>
+          <p className="as-meta mb-1">修改前 · {before.length} 字</p>
+          <p className="max-h-44 overflow-y-auto whitespace-pre-wrap break-words rounded-[8px] bg-surface-paper px-3 py-2 text-[13px] leading-[1.7] text-content-secondary">
             {before === '' ? '（空白）' : blocks.map((b, i) => (
-              <span key={i} className={cn(b.kind === 'change' && b.before && 'bg-cinnabar-wash text-cinnabar line-through decoration-cinnabar/40')}>{b.before}</span>
+              <span key={i} className={cn(b.kind === 'change' && b.before && 'rounded-sm bg-cinnabar-wash text-cinnabar line-through decoration-cinnabar/40')}>{b.before}</span>
             ))}
           </p>
         </div>
-        <div className="bg-white px-3 py-2">
-          <p className="mb-1 text-[11px] font-medium text-content-tertiary">建议修改为 · {after.length} 字</p>
-          <p className="max-h-56 overflow-y-auto whitespace-pre-wrap text-xs leading-6 text-content">
+        <div>
+          <p className="as-meta mb-1">建议改为 · {after.length} 字</p>
+          <p className="max-h-44 overflow-y-auto whitespace-pre-wrap break-words rounded-[8px] border border-surface-border-light px-3 py-2 text-[13px] leading-[1.7] text-content">
             {blocks.map((b, i) => (
-              <span key={i} className={cn(b.kind === 'change' && b.after && 'bg-brand-100 text-brand-700')}>{b.after}</span>
+              <span key={i} className={cn(b.kind === 'change' && b.after && 'rounded-sm bg-brand-100 text-brand-700')}>{b.after}</span>
             ))}
           </p>
         </div>
       </div>
-      <footer className="flex flex-wrap items-center justify-end gap-1.5 border-t border-surface-border-light px-3 py-2">
+      <footer className="as-card-foot">
         {candidate.page && onOpenPage && (
-          <button onClick={() => onOpenPage(candidate.page!)} className="hh-btn-ghost hh-btn-sm mr-auto h-7 px-2 text-[11px]">
-            <ExternalLink className="h-3 w-3" />去页面查看
+          <button onClick={() => onOpenPage(candidate.page!)} className="as-link mr-auto">
+            去页面查看<ArrowUpRight className="h-3.5 w-3.5" />
           </button>
         )}
-        {candidate.status === 'candidate' && (
+        {showActions && candidate.status === 'candidate' && (
           <>
-            <button onClick={() => void act('reject')} disabled={busy} className="hh-btn-ghost hh-btn-sm h-7 px-2 text-[11px]">
-              <X className="h-3 w-3" />不用这份
-            </button>
-            <button onClick={() => void act('apply')} disabled={busy} className="hh-btn-primary hh-btn-sm h-7 px-2.5 text-[11px]">
-              {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}应用到此项
+            <button onClick={() => void act('reject')} disabled={busy} className="as-btn-reject">不用这份</button>
+            <button onClick={() => void act('apply')} disabled={busy} className="as-btn-primary">
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}应用
             </button>
           </>
         )}
-        {candidate.status === 'applied' && (
-          <button onClick={() => void act('undo')} disabled={busy} className="hh-btn-secondary hh-btn-sm h-7 px-2.5 text-[11px]">
-            {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Undo2 className="h-3 w-3" />}撤销本次修改
+        {showActions && candidate.status === 'applied' && (
+          <button onClick={() => void act('undo')} disabled={busy} className="as-btn-secondary">
+            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Undo2 className="h-3.5 w-3.5" />}撤销本次修改
           </button>
         )}
       </footer>

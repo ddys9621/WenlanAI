@@ -455,4 +455,176 @@
     @apply bg-brand-100 text-brand-600;
     box-shadow: inset 0 -2px #285b4d;
   }
+
+  /* ─── 智能助笔（AI 助手面板，as-*）─────────────────────────────────────────
+     参照 Claude / ChatGPT 的对话面板：团队的回复是正文排版、不套气泡；作者的话是浅灰圆角块；
+     输入框和工具条合成一个大圆角框。配色沿用全站 token（墨绿只给主操作、焦点、选中），和主界面是一套。
+     输入框要压过全站 base 样式（特异性 0,4,1），所以 .as-field 带 !important。 */
+  .as-icon-btn {
+    @apply inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[8px] text-content-tertiary hover:bg-surface hover:text-content disabled:pointer-events-none disabled:opacity-40;
+  }
+
+  /* 顶部文字页签：选中的那个下面一条墨绿线 */
+  .as-tab {
+    @apply relative inline-flex h-11 items-center gap-1.5 px-0.5 text-[13px] text-content-tertiary hover:text-content;
+  }
+
+  .as-tab--on {
+    @apply font-medium text-content;
+  }
+
+  .as-tab--on::after {
+    content: '';
+    @apply absolute inset-x-0 -bottom-px h-0.5 rounded-full bg-brand;
+  }
+
+  .as-btn {
+    @apply inline-flex h-8 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-[8px] px-3 text-[13px] disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .as-btn-primary {
+    @apply as-btn bg-brand font-medium text-white hover:bg-brand-600;
+  }
+
+  .as-btn-secondary {
+    @apply as-btn border border-surface-border bg-white text-content hover:bg-surface;
+  }
+
+  .as-btn-ghost {
+    @apply as-btn px-2.5 text-content-secondary hover:bg-surface hover:text-content;
+  }
+
+  /* 放弃类操作：平时灰字，悬停变朱砂 */
+  .as-btn-reject {
+    @apply as-btn px-2.5 text-content-secondary hover:bg-cinnabar-wash hover:text-cinnabar;
+  }
+
+  .as-btn-danger {
+    @apply as-btn bg-cinnabar font-medium text-white hover:bg-cinnabar/90;
+  }
+
+  .as-link {
+    @apply inline-flex shrink-0 items-center gap-0.5 text-[12px] text-brand hover:text-brand-600 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  /* 输入框工具条上的小胶囊（@成员、当前页面、核对） */
+  .as-chip {
+    @apply inline-flex h-7 min-w-0 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-surface-border-light bg-white px-2.5 text-[12px] text-content-secondary hover:border-surface-border hover:text-content;
+  }
+
+  .as-chip--on {
+    @apply border-brand/40 bg-brand-50 text-brand-600 hover:border-brand/60 hover:text-brand-600;
+  }
+
+  .as-card {
+    @apply overflow-hidden rounded-[12px] border border-surface-border-light bg-white;
+  }
+
+  .as-card-head {
+    @apply px-4 pb-2 pt-3.5;
+  }
+
+  .as-card-foot {
+    @apply flex flex-wrap items-center justify-end gap-2 border-t border-surface-border-light px-4 py-2.5;
+  }
+
+  /* 卡片类型小标签（新建组织 / 修改 / 规划草案…） */
+  .as-kind {
+    @apply inline-flex shrink-0 items-center rounded-[6px] bg-surface px-1.5 py-0.5 text-[11px] leading-4 text-content-secondary;
+  }
+
+  /* 卡片里的「字段名 字段值」两栏 */
+  .as-fields {
+    @apply grid grid-cols-[5rem_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-[13px] leading-[1.6];
+  }
+
+  .as-fields > dt {
+    @apply text-[12px] leading-[1.75] text-content-tertiary;
+  }
+
+  .as-fields > dd {
+    @apply whitespace-pre-wrap break-words text-content;
+  }
+
+  /* 团队的回复：正文排版 */
+  .as-prose {
+    @apply whitespace-pre-wrap break-words text-[14px] leading-[1.75] text-content;
+  }
+
+  /* 作者的话：浅灰圆角块 */
+  .as-user-msg {
+    @apply whitespace-pre-wrap break-words rounded-[16px] bg-surface px-4 py-2.5 text-[14px] leading-[1.7] text-content;
+  }
+
+  .as-meta {
+    @apply text-[12px] leading-5 text-content-tertiary;
+  }
+
+  .as-status {
+    @apply inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[12px] text-content-secondary;
+  }
+
+  .as-dot {
+    @apply h-1.5 w-1.5 shrink-0 rounded-full;
+  }
+
+  .as-field {
+    @apply w-full !rounded-[8px] !border-surface-border !bg-white px-3 text-[13px] !text-content placeholder:!text-content-tertiary;
+  }
+
+  /* 「正在处理」的三个点 */
+  .as-typing {
+    @apply inline-flex items-center gap-1;
+  }
+
+  .as-typing > span {
+    @apply h-1.5 w-1.5 animate-typing-dot rounded-full bg-content-tertiary;
+  }
+
+  .as-typing > span:nth-child(2) {
+    animation-delay: 0.15s;
+  }
+
+  .as-typing > span:nth-child(3) {
+    animation-delay: 0.3s;
+  }
+
+  /* 核对 / 任务页的分组列表 */
+  .as-section-title {
+    @apply flex items-center gap-2 pb-2 pt-5 text-[13px] font-semibold text-content;
+  }
+
+  .as-list {
+    @apply divide-y divide-surface-border-light overflow-hidden rounded-[12px] border border-surface-border-light bg-white;
+  }
+
+  .as-row {
+    @apply flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-surface-paper;
+  }
+
+  /* 弹出菜单（@成员） */
+  .as-menu {
+    @apply absolute z-30 overflow-hidden rounded-[12px] border border-surface-border bg-white p-1 shadow-lg animate-scale-in;
+  }
+
+  .as-menu-item {
+    @apply flex w-full items-center gap-2.5 rounded-[8px] px-2.5 py-2 text-left hover:bg-surface;
+  }
+
+  /* 折叠（details）：去掉默认三角，换成会转的细箭头 */
+  .as-disclosure > summary {
+    @apply flex cursor-pointer select-none list-none items-center gap-1;
+  }
+
+  .as-disclosure > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .as-disclosure > summary .as-chevron {
+    @apply shrink-0 transition-transform duration-150;
+  }
+
+  .as-disclosure[open] > summary .as-chevron {
+    transform: rotate(90deg);
+  }
 }

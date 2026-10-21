@@ -1,5 +1,6 @@
 """组织管理API"""
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 from typing import List
@@ -30,6 +31,21 @@ router = APIRouter(prefix="/organizations", tags=["组织管理"])
 logger = get_logger(__name__)
 
 
+async def _backfill_org_details(db: AsyncSession, characters: list[Character]) -> dict[str, Organization]:
+    """只建了角色行、没有组织详情的组织（早先共创室建档、角色页新建组织没填势力 / 所在地等都会这样）：补一条默认详情。
+    返回 character_id → 新详情；同时打开的另一个请求已经补过（撞唯一约束）就这次先不列，下次打开就有。"""
+    created = {c.id: Organization(character_id=c.id, project_id=c.project_id, member_count=0, power_level=50)
+               for c in characters}
+    db.add_all(created.values())
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        return {}
+    logger.info(f"补齐 {len(created)} 个组织的组织详情：{'、'.join(c.name for c in characters)}")
+    return created
+
+
 @router.get("/project/{project_id}", response_model=List[OrganizationDetailResponse], summary="获取项目的所有组织")
 async def get_project_organizations(
     project_id: str,
@@ -45,12 +61,16 @@ async def get_project_organizations(
     user_id = getattr(request.state, 'user_id', None)
     await verify_project_access(project_id, user_id, db)
     
-    # 组织与其角色一次 JOIN 取齐（此前每个组织再查一次角色）；内连接即跳过无角色的组织
-    result = await db.execute(
-        select(Organization, Character)
-        .join(Character, Character.id == Organization.character_id)
-        .where(Organization.project_id == project_id)
-    )
+    # 组织角色与其组织详情一次 JOIN 取齐（此前每个组织再查一次角色）；没有详情的当场补上，否则这页看不到它
+    pairs = (await db.execute(
+        select(Character, Organization)
+        .outerjoin(Organization, Organization.character_id == Character.id)
+        .where(Character.project_id == project_id, Character.is_organization.is_(True))
+    )).all()
+    missing = [char for char, org in pairs if org is None]
+    if missing:
+        filled = await _backfill_org_details(db, missing)
+        pairs = [(char, org or filled.get(char.id)) for char, org in pairs]
     org_list = [
         OrganizationDetailResponse(
             id=org.id,
@@ -64,7 +84,7 @@ async def get_project_organizations(
             motto=org.motto,
             color=org.color
         )
-        for org, char in result.all()
+        for char, org in pairs if org is not None
     ]
     
     logger.info(f"获取项目 {project_id} 的组织列表，共 {len(org_list)} 个")

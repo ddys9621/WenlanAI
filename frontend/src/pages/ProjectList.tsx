@@ -419,6 +419,7 @@ const IMPORT_STAT_LABELS: Record<string, string> = {
   chapter_outlines: '章纲',
   writing_styles: '写作风格',
   world_rules: '世界规则',
+  setting_entries: '设定条目',
 }
 
 function ImportDialog({
