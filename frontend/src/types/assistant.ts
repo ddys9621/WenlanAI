@@ -189,6 +189,9 @@ export interface AssistantFieldCandidate {
   page: string | null
   before: unknown
   after: unknown
+  /** 选项字段按页面写法的显示（active → 进行中）；不是选项字段为 null，照原值显示 */
+  before_text?: string | null
+  after_text?: string | null
   reason: string
   status: AssistantCandidateStatus
   run_id: string | null
@@ -196,19 +199,22 @@ export interface AssistantFieldCandidate {
   decided_at: string | null
 }
 
-/** 新建对象候选：工具只记下要新建的角色 / 组织 / 设定条目 / 世界规则，作者「应用」才真正建档 */
+/** 新建对象候选：工具只记下要新建的世界规则 / 设定条目 / 角色 / 组织 / 关系 / 组织成员，作者「应用」才真正建档 */
 export type AssistantEntityCandidateStatus = 'candidate' | 'applied' | 'rejected'
 
 export interface AssistantEntityCandidate {
   id: string
-  /** character / organization / setting_entry / world_rule（payload.category：cultivation_realm / equipment_template / map_location） */
+  /** world_rule / setting_entry / character / organization / relationship / membership
+   * （world_rule 的 payload.category：cultivation_realm / equipment_template / map_location） */
   entity_type: string
   label: string
+  /** 卡片标题：名字；关系是「甲 → 乙」，组织成员是「人物 · 组织」（旧数据可能没有） */
+  title?: string
   page: string | null
   /** 拟新建对象的各字段（已按类型校验过） */
   payload: Record<string, string>
-  /** 卡片上逐行列的字段（顺序、名称照页面；名字当标题不在其中） */
-  fields?: { key: string; label: string }[]
+  /** 卡片上逐行列的字段（顺序、名称照页面；名字当标题不在其中；text = 选项的中文写法） */
+  fields?: { key: string; label: string; text?: string }[]
   reason: string
   status: AssistantEntityCandidateStatus
   /** 已建档、建出来的那一行却不在了（被删了或当时没写进去），书里也没有同名的：可以重新建档 */

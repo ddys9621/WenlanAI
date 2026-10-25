@@ -49,6 +49,7 @@ async def lifespan(app: FastAPI):
     try:
         from app.database import get_engine, Base
         from app.services.chapter_digest_service import migrate_legacy_summaries
+        from app.services.user_status_service import migrate_account_status_schema, migrate_legacy_disabled
         from app.utils.legacy_db import legacy_schema_reason
 
         # 使用全局引擎创建所有表（结构完全由模型决定，不迁移旧库；发现 1.x 的库就停下，不在旧库上建表）
@@ -62,6 +63,11 @@ async def lifespan(app: FastAPI):
             migrated = await conn.run_sync(migrate_legacy_summaries)
             if migrated:
                 logger.info(f"📚 已把 {migrated} 章旧摘要迁入章节档案")
+            # 旧库用 trust_level == -1 标记禁用：迁入独立的 user_account_status 表
+            await conn.run_sync(migrate_account_status_schema)
+            disabled_migrated = await conn.run_sync(migrate_legacy_disabled)
+            if disabled_migrated:
+                logger.info(f"🔒 已把 {disabled_migrated} 个旧禁用用户迁入账号状态表")
 
         _startup_state["database_ready"] = True
         _startup_state["database_error"] = None

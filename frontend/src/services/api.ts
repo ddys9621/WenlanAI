@@ -66,6 +66,7 @@ import type {
 import type {
   PlatformPreset,
   User,
+  AdminAuditLog,
   AuthConfig,
   AuthSettingsView,
   AuthSettingsUpdate,
@@ -141,6 +142,7 @@ import type {
   BookDissectExtractionPlan,
   BookDissectUploadResponse,
   BookDissectChapterCardListItem,
+  BookDissectChapterItem,
   BookDissectChapterCard,
   BookDissectStoryArc,
 } from '../types';
@@ -1042,6 +1044,7 @@ export const adminApi = {
     display_name?: string;
     avatar_url?: string;
     trust_level?: number;
+    is_admin?: boolean;
   }) =>
     api.put<unknown, {
       success: boolean;
@@ -1065,12 +1068,20 @@ export const adminApi = {
       new_password: string;
     }>(`/admin/users/${userId}/reset-password`, { new_password: newPassword }),
   
+  // 强制下线：该用户此前签发的会话令牌全部失效
+  revokeUserSessions: (userId: string) =>
+    api.post<unknown, { success: boolean; message: string }>(`/admin/users/${userId}/revoke-sessions`),
+
   // 删除用户
   deleteUser: (userId: string) =>
     api.delete<unknown, {
       success: boolean;
       message: string;
     }>(`/admin/users/${userId}`),
+
+  // 管理员操作记录（倒序分页）
+  getAuditLogs: (params: { limit?: number; offset?: number } = {}) =>
+    api.get<unknown, { total: number; items: AdminAuditLog[]; limit: number; offset: number }>('/admin/audit-logs', { params }),
 
   // 登录方式设置（Linux.do / 邮箱 开关与凭据；秘密字段只回传 *_set）
   getAuthSettings: () => api.get<unknown, AuthSettingsView>('/admin/auth-settings'),
@@ -1420,12 +1431,16 @@ export const bookDissectApi = {
   /** 列出当前用户所有拆书任务（按创建时间倒序） */
   listTasks: () => api.get<unknown, BookDissectTask[]>('/book-dissect'),
 
-  /** 启动 LLM 抽取（分批抽取 + 全书聚合）。 */
+  /** 启动 LLM 抽取（mode：full 全部重抽 / resume 只抽失败和没抽过的章 / rebuild_post 只重建后续产物）。 */
   startExtraction: (taskId: string, params?: BookDissectExtractionOptions) =>
     api.post<unknown, BookDissectTask>(
       `/book-dissect/${taskId}/start-extraction`,
       params ?? { sampling_mode: 'all', sampling_param: 1 },
     ),
+
+  /** 章节目录：切章结果 + 每章拆书卡状态（切章检查 / 目录面板用） */
+  listChapters: (taskId: string) =>
+    api.get<unknown, BookDissectChapterItem[]>(`/book-dissect/${taskId}/chapters`),
 
   /** 启动前预估分批方案与 LLM 调用次数（不调 LLM），与 startExtraction 同一份参数 */
   previewExtractionPlan: (taskId: string, params?: BookDissectExtractionOptions) =>
@@ -1434,7 +1449,7 @@ export const bookDissectApi = {
       params ?? { sampling_mode: 'all', sampling_param: 1 },
     ),
 
-  /** 手动停止运行中的抽取（已完成批次的章节事实保留，可重新抽取） */
+  /** 手动停止运行中的抽取（已抽出的拆书卡保留，可继续抽取） */
   cancelExtraction: (taskId: string) =>
     api.post<unknown, BookDissectTask>(`/book-dissect/${taskId}/cancel`),
 

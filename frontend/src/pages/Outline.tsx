@@ -61,10 +61,10 @@ export default function OutlinePage() {
     ]).finally(() => setLoading(false))
   }, [projectId, refreshChapterOutlines, refreshOutlines, refreshVolumes])
 
-  // 全局智能助笔改了章纲 / 总纲（改总纲会把卷纲和章纲标成「上游已改」）或规划了卷纲：刷新
+  // 全局智能助笔改了章纲 / 总纲（改总纲会把卷纲和章纲标成「上游已改」）、改了卷纲或剧情单元、规划了卷纲：刷新
   const onAssistantData = useCallback((change: AssistantDataChange) => {
     if (!projectId) return
-    if (change.entity === 'chapter_outline' || change.entity === 'story_outline' || change.entity === 'volume') {
+    if (['chapter_outline', 'story_outline', 'volume', 'volume_unit'].includes(change.entity ?? '')) {
       void refreshChapterOutlines(projectId)
       void refreshVolumes(projectId)
     }

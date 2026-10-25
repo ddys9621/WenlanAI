@@ -2,21 +2,25 @@
 
 - POST /api/book-dissect/upload  上传 txt/md → 切分 → 返回 task_id + 章节预览（不接 LLM）
 - GET  /api/book-dissect/{task_id}  查询任务状态
+- GET  /api/book-dissect/{task_id}/chapters  章节目录（切章结果 + 每章拆书卡状态）
 - POST /api/book-dissect/{task_id}/extraction-plan  启动前预估分批 / 调用次数（不接 LLM）
-- POST /api/book-dissect/{task_id}/start-extraction  启动抽取（拆书卡 → 剧情单元 → 分卷 / 骨架 → 文风；跑在 AIJobManager 后台任务里，可停止）
+- POST /api/book-dissect/{task_id}/start-extraction  启动抽取（mode：full 全部重抽 / resume 继续 / rebuild_post 只重建后续产物；
+  跑在 AIJobManager 后台任务里，可停止）
 - POST /api/book-dissect/{task_id}/cancel  手动停止运行中的抽取
 - DELETE /api/book-dissect/{task_id}  删除任务并清理磁盘（运行中会先停止）
 
 抽取任务注册在 ai_jobs（scope=book_dissect:{task_id}），托盘里也能看到 / 停止；
-任务的持久状态仍以 book_dissect_tasks.status 为准（pending/running/completed/failed/cancelled）。
+任务的持久状态仍以 book_dissect_tasks.status 为准（pending/running/completed/failed/cancelled）。库里还是 running、
+本进程没有任务、也没有别的进程持锁 = 服务重启前没跑完：读取时显示为 interrupted（不在读路径写库），可直接继续抽取。
 ai_jobs 只管本进程：同一 data 目录被多个后端实例共用时，另按 task 持 OS 文件锁（run_lock）判断
 流水线是否真的在跑，start / cancel / delete 遇到别的进程持锁一律 409，不动 DB 状态。
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -38,6 +42,7 @@ from app.schemas.book_dissect import (
     BookDissectUploadResponse,
     ChapterCardDetail,
     ChapterCardListItem,
+    ChapterDirectoryItem,
     ChapterMetaSchema,
     ExtractionPlanResponse,
     StoryArcSchema,
@@ -49,8 +54,10 @@ from app.services.book_dissect.batch_planner import plan_arc_window, plan_batche
 from app.services.book_dissect.chapter_splitter import split_bytes
 from app.services.book_dissect.extractor_v5 import (
     CANCELLED_MESSAGE,
+    RUN_MODES,
     run_extraction_v5_background,
 )
+from app.services.book_dissect.llm_chapter_splitter import decision_cache_path
 from app.services.book_dissect.run_lock import is_run_locked, try_acquire_run_lock
 from app.services.knowledge.kb_import import delete_dissect_source
 from app.user_manager import User
@@ -72,6 +79,9 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # 切分预览返回的最大章节数（仅截取前 N 章给前端）
 PREVIEW_LIMIT = 10
+
+INTERRUPTED_MESSAGE = "抽取中断了（服务重启或程序退出）；已抽出的拆书卡都保留着，可「继续抽取」接着跑"
+_MODE_TITLES = {"full": "拆书抽取", "resume": "拆书续抽", "rebuild_post": "拆书重建结果"}
 
 
 def _validate_filename(name: str) -> None:
@@ -133,9 +143,9 @@ async def upload_book(
             detail=f"文件过大（{len(raw)} 字节），上限 {MAX_UPLOAD_BYTES} 字节",
         )
 
-    # 切分
+    # 切分（纯 CPU，几百万字的书放线程里跑，不卡事件循环）
     try:
-        chapters, encoding = split_bytes(raw)
+        chapters, encoding = await asyncio.to_thread(split_bytes, raw)
     except UnicodeDecodeError as e:
         logger.warning("拆书：编码识别失败 file=%s err=%s", file.filename, e)
         raise HTTPException(
@@ -223,22 +233,45 @@ def _parse_chapters_meta(raw_json: Optional[str]) -> Optional[List[ChapterMetaSc
     return out
 
 
-def _to_response(task: BookDissectTask) -> BookDissectTaskResponse:
+PackState = tuple[str, Optional[str]]
+
+
+def _utc(value: Optional[datetime]) -> Optional[datetime]:
+    """created_at 是 SQLite CURRENT_TIMESTAMP（UTC、不带时区）：标上 UTC，前端才不会当成本地时间读差 8 小时。"""
+    return value.replace(tzinfo=timezone.utc) if value is not None and value.tzinfo is None else value
+
+
+def _local(value: Optional[datetime]) -> Optional[datetime]:
+    """started_at / completed_at 是 datetime.now()（服务器本地时间、不带时区）：标上服务器时区。"""
+    return value.astimezone() if value is not None and value.tzinfo is None else value
+
+
+def _projected_status(task: BookDissectTask, job: Optional[AIJob]) -> tuple[str, Optional[str]]:
+    """库里还是 running、本进程没有任务、也没有别的进程持锁：服务重启前没跑完，只在读取时显示为「已中断」，不在读路径写库。"""
+    if task.status == "running" and job is None and not is_run_locked(task.id):
+        return "interrupted", task.error_message or INTERRUPTED_MESSAGE
+    return task.status, task.error_message
+
+
+def _to_response(task: BookDissectTask, *, pack: Optional[PackState] = None) -> BookDissectTaskResponse:
     job = ai_jobs.current(_job_scope(task.id))
+    status, error_message = _projected_status(task, job)
     return BookDissectTaskResponse(
         job_id=job.id if job is not None else None,
         id=task.id,
         user_id=task.user_id,
-        status=task.status,
+        status=status,
         progress=task.progress or 0,
         stage=task.stage,
-        error_message=task.error_message,
+        error_message=error_message,
         file_name=task.file_name,
         file_size=task.file_size or 0,
         encoding=task.encoding,
         chapter_count=task.chapter_count or 0,
         total_words=task.total_words or 0,
-        chapters_meta=_parse_chapters_meta(task.chapters_meta),
+        chapters_meta=None,
+        pack_status=pack[0] if pack else None,
+        pack_error=pack[1] if pack else None,
         # 引擎版本：老任务可能为 1（仅用于识别），新任务统一为 2
         version=task.version or 5,
         extraction_phase=task.extraction_phase,
@@ -251,10 +284,17 @@ def _to_response(task: BookDissectTask) -> BookDissectTaskResponse:
         extraction_engine=(task.extraction_engine or "auto"),
         chapters_per_request=task.chapters_per_request or 0,
         chapter_limit=task.chapter_limit or 0,
-        created_at=task.created_at,
-        started_at=task.started_at,
-        completed_at=task.completed_at,
+        created_at=_utc(task.created_at),
+        started_at=_local(task.started_at),
+        completed_at=_local(task.completed_at),
     )
+
+
+async def _pack_states(db: AsyncSession, user_id: str, task_id: Optional[str] = None) -> dict[str, PackState]:
+    stmt = select(ReferencePack.task_id, ReferencePack.status, ReferencePack.error_message).where(ReferencePack.user_id == user_id)
+    if task_id is not None:
+        stmt = stmt.where(ReferencePack.task_id == task_id)
+    return {tid: (status, error) for tid, status, error in (await db.execute(stmt)).all()}
 
 
 @router.get("/{task_id}", response_model=BookDissectTaskResponse)
@@ -263,7 +303,7 @@ async def get_task(
     user: User = Depends(require_login),
     db: AsyncSession = Depends(get_db),
 ):
-    """查询拆书任务的当前状态、进度和结果。"""
+    """查询拆书任务的当前状态、进度和结果状态。"""
     result = await db.execute(
         select(BookDissectTask).where(
             BookDissectTask.id == task_id,
@@ -273,7 +313,31 @@ async def get_task(
     task = result.scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在或无权访问")
-    return _to_response(task)
+    packs = await _pack_states(db, user.user_id, task_id)
+    return _to_response(task, pack=packs.get(task.id))
+
+
+@router.get("/{task_id}/chapters", response_model=List[ChapterDirectoryItem])
+async def list_chapters(
+    task_id: str,
+    user: User = Depends(require_login),
+    db: AsyncSession = Depends(get_db),
+):
+    """章节目录：切章结果 + 每章拆书卡状态（切章检查、目录面板用；任务列表 / 轮询不带 chapters_meta）。"""
+    task = await _ensure_task_owned(db, task_id, user.user_id)
+    facts = {num: (status, error) for num, status, error in (await db.execute(
+        select(BookDissectChapterFact.chapter_number, BookDissectChapterFact.extraction_status, BookDissectChapterFact.extraction_error)
+        .where(BookDissectChapterFact.task_id == task_id)
+    )).all()}
+    out: List[ChapterDirectoryItem] = []
+    for meta in _parse_chapters_meta(task.chapters_meta) or []:
+        status, error = facts.get(meta.number, (None, None))
+        ok = status == "success"
+        out.append(ChapterDirectoryItem(
+            **meta.model_dump(), status=None if status is None else ("success" if ok else "failed"),
+            error=None if ok or not error else error[:200],
+        ))
+    return out
 
 
 # ============================================================
@@ -286,14 +350,15 @@ async def list_tasks(
     user: User = Depends(require_login),
     db: AsyncSession = Depends(get_db),
 ):
-    """列出当前用户的所有拆书任务，按创建时间倒序。"""
+    """列出当前用户的所有拆书任务，按创建时间倒序（带拆书结果状态，左侧列表据此标「部分完成」）。"""
     result = await db.execute(
         select(BookDissectTask)
         .where(BookDissectTask.user_id == user.user_id)
         .order_by(BookDissectTask.created_at.desc())
     )
     tasks = result.scalars().all()
-    return [_to_response(t) for t in tasks]
+    packs = await _pack_states(db, user.user_id)
+    return [_to_response(t, pack=packs.get(t.id)) for t in tasks]
 
 
 # ============================================================
@@ -322,6 +387,7 @@ async def start_extraction(
     """启动 LLM 抽取（分批拆书卡 → 剧情单元 → 分卷 / 全书骨架 → 文风指纹 → 参考包），跑在 ai_jobs 后台任务里，可随时 /cancel 停止。
 
     Body（可选）：
+    - `mode`: "full"（删掉拆书卡从头抽，默认）/ "resume"（保留成功的卡，只抽失败 / 没抽过的章）/ "rebuild_post"（拆书卡不动，只重建后续产物）
     - `sampling_mode`: "all" / "every_n" / "key_only"（默认 "all"）
     - `sampling_param`: int（every_n 模式下的 N，默认 1）
     - `extraction_engine`: "auto" / "chunked" / "long_context"（默认 "auto"）
@@ -330,10 +396,9 @@ async def start_extraction(
     """
     task = await _ensure_task_owned(db, task_id, user.user_id)
 
-    # 幂等校验：避免对正在跑的任务重复触发。
-    # 已完成的任务允许重新抽取：流水线各阶段写库前都会先 delete 本 task 旧数据，
-    # ReferencePack 走 upsert，重抽是幂等的（此前 409 强迫用户删任务重传全书）。
-    if task.status == "running" or ai_jobs.current(_job_scope(task_id)) is not None:
+    # 本进程正在跑就拒绝；库里 running 但本进程没有任务 = 服务重启前没跑完（已中断），允许直接继续，
+    # 真在另一个进程里跑的由下面的运行锁挡住
+    if ai_jobs.current(_job_scope(task_id)) is not None:
         raise HTTPException(status_code=409, detail="任务正在运行中，请勿重复触发")
 
     # 校验全文文件仍然存在
@@ -341,6 +406,11 @@ async def start_extraction(
         raise HTTPException(status_code=400, detail="全文文件已丢失，请重新上传")
 
     opts = _normalize_extraction_options(payload, chapter_count=task.chapter_count or 0)
+    mode = opts["mode"]
+    if mode == "rebuild_post" and not await _success_chapters(db, task_id):
+        raise HTTPException(status_code=400, detail="还没有可用的拆书卡，请先「继续抽取」或「全部重抽」")
+    # 结果状态先查好：ai_jobs.start 之后不能再 await，否则很快结束的任务已经收尾，响应会被投影成「已中断」
+    packs = await _pack_states(db, user.user_id, task_id)
 
     # 跨进程互斥先于改状态：拿不到锁就什么都不动
     lock = try_acquire_run_lock(task_id)
@@ -352,12 +422,12 @@ async def start_extraction(
     async def runner(_job: AIJob) -> None:
         # 锁随流水线生命周期：正常结束 / 失败 / 取消都在这里释放；进程崩溃由 OS 回收
         try:
-            await run_extraction_v5_background(task_id=task_id, user_id=user_id, ai_service=ai_service)
+            await run_extraction_v5_background(task_id=task_id, user_id=user_id, ai_service=ai_service, mode=mode)
         finally:
             lock.release()
 
     try:
-        # 立即标记 queued，避免前端轮询时短暂看到旧状态
+        # 立即标记 queued，避免前端轮询时短暂看到旧状态；继续 / 重建时拆书卡计数保留（流水线按表重算）
         task.status = "running"
         task.stage = "queued"
         task.progress = 0
@@ -367,9 +437,10 @@ async def start_extraction(
         task.version = 5
         task.sampling_mode = opts["sampling_mode"]
         task.sampling_param = opts["sampling_param"]
-        task.chapters_total = 0
-        task.chapters_extracted = 0
-        task.chapters_failed = 0
+        if mode == "full":
+            task.chapters_total = 0
+            task.chapters_extracted = 0
+            task.chapters_failed = 0
         task.extraction_phase = None
         task.extraction_engine = opts["extraction_engine"]  # V3.1
         task.chapters_per_request = opts["chapters_per_request"]
@@ -379,7 +450,7 @@ async def start_extraction(
 
         await ai_jobs.start(
             kind="book_dissect",
-            title=f"拆书抽取：{task.file_name or task_id[:8]}",
+            title=f"{_MODE_TITLES[mode]}：{task.file_name or task_id[:8]}",
             user_id=user_id,
             runner=runner,
             scope=_job_scope(task_id),
@@ -395,12 +466,11 @@ async def start_extraction(
         raise
 
     logger.info(
-        "拆书V5：已排队 user=%s task=%s sampling=%s/%d engine=%s per_request=%d limit=%d",
-        user_id, task_id, opts["sampling_mode"], opts["sampling_param"],
+        "拆书V5：已排队 user=%s task=%s mode=%s sampling=%s/%d engine=%s per_request=%d limit=%d",
+        user_id, task_id, mode, opts["sampling_mode"], opts["sampling_param"],
         opts["extraction_engine"], opts["chapters_per_request"], opts["chapter_limit"],
     )
-
-    return _to_response(task)
+    return _to_response(task, pack=packs.get(task_id))
 
 
 @router.post("/{task_id}/cancel", response_model=BookDissectTaskResponse)
@@ -413,8 +483,8 @@ async def cancel_extraction(
 
     - 进程内有对应 ai_job：取消它，流水线的 CancelledError 分支把任务落库为 cancelled
     - 没有但 run_lock 被持有：流水线在另一个后端进程里跑，409（改状态只会让人再触发重抽撞库）
-    - 都没有（服务重启后残留的 running）：直接落库修复，否则任务永远卡在 running 无法重抽
-    已完成批次的章节事实保留；随后可「重新抽取」。
+    - 都没有（服务重启后残留的 running，读取时显示为已中断）：直接落库为 cancelled
+    已抽出的拆书卡保留；随后可「继续抽取」接着跑。
     """
     task = await _ensure_task_owned(db, task_id, user.user_id)
     if task.status != "running":
@@ -430,15 +500,14 @@ async def cancel_extraction(
     if task.status == "running":
         # 无进程内任务 / 流水线写终态失败：这里兜底落库
         task.status = "cancelled"
-        task.error_message = CANCELLED_MESSAGE if job is not None else (
-            "服务重启后任务已中断，已标记为停止；可重新抽取"
-        )
+        task.error_message = CANCELLED_MESSAGE if job is not None else INTERRUPTED_MESSAGE
         task.completed_at = datetime.now()
         await db.commit()
         await db.refresh(task)
 
-    logger.info("拆书V2：已停止 user=%s task=%s job=%s", user.user_id, task_id, job.id if job else None)
-    return _to_response(task)
+    logger.info("拆书V5：已停止 user=%s task=%s job=%s", user.user_id, task_id, job.id if job else None)
+    packs = await _pack_states(db, user.user_id, task_id)
+    return _to_response(task, pack=packs.get(task_id))
 
 
 def _normalize_extraction_options(
@@ -447,18 +516,22 @@ def _normalize_extraction_options(
     chapter_count: int,
 ) -> dict:
     """校验并归一化抽取参数（start-extraction 与 extraction-plan 共用）。"""
+    mode = "full"
     sampling_mode = "all"
     sampling_param = 1
     extraction_engine = "auto"
     chapters_per_request = 0
     chapter_limit = 0
     if payload is not None:
+        mode = (payload.mode or "full").lower()
         sampling_mode = payload.sampling_mode or "all"
         sampling_param = max(1, payload.sampling_param or 1)
         extraction_engine = (payload.extraction_engine or "auto").lower()
         chapters_per_request = max(0, payload.chapters_per_request or 0)
         chapter_limit = max(0, payload.chapter_limit or 0)
 
+    if mode not in RUN_MODES:
+        raise HTTPException(status_code=400, detail=f"mode 非法值：{mode}（应为 {'/'.join(RUN_MODES)}）")
     if sampling_mode not in ("all", "every_n", "key_only"):
         raise HTTPException(
             status_code=400,
@@ -474,12 +547,21 @@ def _normalize_extraction_options(
         chapter_limit = 0
 
     return {
+        "mode": mode,
         "sampling_mode": sampling_mode,
         "sampling_param": sampling_param,
         "extraction_engine": extraction_engine,
         "chapters_per_request": chapters_per_request,
         "chapter_limit": chapter_limit,
     }
+
+
+async def _success_chapters(db: AsyncSession, task_id: str) -> set[int]:
+    return set((await db.execute(
+        select(BookDissectChapterFact.chapter_number).where(
+            BookDissectChapterFact.task_id == task_id, BookDissectChapterFact.extraction_status == "success",
+        )
+    )).scalars().all())
 
 
 # V5 拆书卡之后的 LLM 调用估算（与 extractor_v5 各阶段对应）：
@@ -511,32 +593,40 @@ async def preview_extraction_plan(
 ):
     """启动前预估分批方案与 LLM 调用次数（不调 LLM，按 chapters_meta 的字数估算）。
 
-    与 start-extraction 接收同一份 Body，前端调参时实时刷新预估。
+    与 start-extraction 接收同一份 Body，前端调参时实时刷新预估。拆书卡只算这次要抽的章
+    （resume 跳过已成功的，rebuild_post 一章不抽）；剧情单元及之后按整个范围算。
     """
     task = await _ensure_task_owned(db, task_id, user.user_id)
     metas = _parse_chapters_meta(task.chapters_meta) or []
     chapter_count = len(metas) or (task.chapter_count or 0)
     opts = _normalize_extraction_options(payload, chapter_count=chapter_count)
+    mode = opts["mode"]
 
     indices = select_target_indices(
         len(metas), opts["sampling_mode"], opts["sampling_param"],
         chapter_limit=opts["chapter_limit"],
     )
+    done = await _success_chapters(db, task_id) if mode != "full" else set()
+    existing = sum(1 for i in indices if metas[i].number in done)
+    todo = [] if mode == "rebuild_post" else [i for i in indices if metas[i].number not in done]
     plan = plan_batches(
-        [metas[i].word_count for i in indices],
+        [metas[i].word_count for i in todo],
         model=getattr(ai_service, "default_model", None),
         max_tokens=getattr(ai_service, "default_max_tokens", None),
         extraction_engine=opts["extraction_engine"],
         chapters_per_request=opts["chapters_per_request"],
     )
     post_calls, arc_calls, arc_window = _estimate_post_extraction_calls(
-        plan.target_count,
+        len(indices),
         model=getattr(ai_service, "default_model", None),
         max_tokens=getattr(ai_service, "default_max_tokens", None),
     )
     return ExtractionPlanResponse(
+        run_mode=mode,
+        existing_cards=existing,
+        pending_chapters=len(todo),
         chapter_count=chapter_count,
-        target_chapters=plan.target_count,
+        target_chapters=len(indices),
         batch_count=plan.batch_count,
         mode=plan.mode,
         chapters_per_request=plan.chapters_per_request,
@@ -591,11 +681,14 @@ async def v5_list_cards(task_id: str, user: User = Depends(require_login), db: A
     out: List[ChapterCardListItem] = []
     for row in rows:
         card = _load_card(row)
+        status = row.extraction_status or "success"
         out.append(ChapterCardListItem(
             chapter_number=row.chapter_number, title=card.get("title") or row.chapter_title or "",
             function_tags=card.get("function_tags") or [], pace=card.get("pace") or "中", tension=int(card.get("tension") or 3),
             ending_hook_type=card.get("ending_hook_type") or "无", payoff_count=len(card.get("payoff_points") or []),
-            word_count=int(card.get("word_count") or 0), extraction_status=row.extraction_status or "success",
+            word_count=int(card.get("word_count") or 0), extraction_status=status,
+            truncated_input=bool(card.get("truncated_input")),
+            extraction_error=None if status == "success" else (row.extraction_error or "未知原因")[:200],
         ))
     return out
 
@@ -675,14 +768,14 @@ async def delete_task(
     elif is_run_locked(task_id):
         raise HTTPException(status_code=409, detail=OTHER_PROCESS_DETAIL)
 
-    # 删磁盘文件（即使失败也继续删 DB 记录）
+    # 删磁盘文件：全文 + 切章决策（即使失败也继续删 DB 记录）
     if task.storage_path:
-        path = Path(task.storage_path)
-        if path.exists():
-            try:
-                path.unlink()
-            except OSError as e:
-                logger.warning("拆书：删除磁盘文件失败 path=%s err=%s", path, e)
+        for path in (Path(task.storage_path), decision_cache_path(task.storage_path)):
+            if path.exists():
+                try:
+                    path.unlink()
+                except OSError as e:
+                    logger.warning("拆书：删除磁盘文件失败 path=%s err=%s", path, e)
 
     # 1. 拆书结果（各维度产物，pack 与 task 1:1）
     pack_result = await db.execute(

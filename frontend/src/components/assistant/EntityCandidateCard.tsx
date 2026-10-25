@@ -1,13 +1,13 @@
 /**
- * 新建对象候选：列出拟新建的角色 / 组织 / 设定条目 / 世界规则字段（名称、顺序由后端照页面给），作者「建档」才真正写入，可放弃；
- * 建过档、书里却找不到了（被删了或当时没写进去）就标出来，可以重新建档。与内容修改候选并列。
+ * 新建对象候选：列出拟新建的世界规则 / 设定条目 / 角色 / 组织 / 关系 / 组织成员的字段（名称、顺序、选项的中文由后端照页面给），
+ * 作者「建档」才真正写入，可放弃；建过档、书里却找不到了（被删了或当时没写进去）就标出来，可以重新建档。与内容修改候选并列。
  */
 import { useState } from 'react';
 import { ArrowUpRight, Check, Loader2, RotateCcw } from 'lucide-react';
 import { toast } from 'sonner';
 import type { AssistantEntityCandidate } from '@/types/assistant';
 import { getRoleDisplayName } from '@/utils/characterRole';
-import { entityKind } from '@/utils/cocreation';
+import { entityKind, entityTitle } from '@/utils/cocreation';
 import { entityAction, errorDetail } from './changeActions';
 import { StatusDot, type StatusTone } from './CocreationParts';
 
@@ -40,7 +40,7 @@ export function EntityCandidateCard({ projectId, candidate, onChange, onOpenPage
   const fields = candidate.payload;
   const rows = (candidate.fields ?? [])
     .filter((f) => fields[f.key])
-    .map((f) => ({ key: f.key, label: f.label, value: valueLabel(f.key, fields[f.key]) }));
+    .map((f) => ({ key: f.key, label: f.label, value: f.text || valueLabel(f.key, fields[f.key]) }));
   const pending = showActions && candidate.status === 'candidate';
   const rebuild = showActions && missing;
   const canOpen = candidate.status === 'applied' && !missing && candidate.page && onOpenPage;
@@ -64,7 +64,7 @@ export function EntityCandidateCard({ projectId, candidate, onChange, onOpenPage
           <span className="as-kind">新建{entityKind(candidate)}</span>
           <span className="ml-auto"><StatusDot tone={status.tone} label={status.label} /></span>
         </div>
-        <p className="mt-1.5 truncate text-[14px] font-semibold text-content">{fields.name || fields.title || candidate.label}</p>
+        <p className="mt-1.5 truncate text-[14px] font-semibold text-content">{entityTitle(candidate)}</p>
         {candidate.reason && <p className="mt-1 text-[13px] leading-[1.6] text-content-secondary">{candidate.reason}</p>}
       </header>
       <div className="max-h-64 overflow-y-auto px-4 pb-3.5">

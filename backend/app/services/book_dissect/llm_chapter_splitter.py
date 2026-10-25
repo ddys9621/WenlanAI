@@ -7,6 +7,8 @@ LLM 推断边界模式，或降级到固定字数切分。
 - 仅在必要时调用（`_needs_llm_fallback` 门控）
 - LLM 失败不抛：降级到 fixed_size_split
 - 不改动现有 `chapter_splitter.split_into_chapters` 行为，作为外层兜底
+- 决策固化：拆书任务传 decision_path（全文旁的 .split.json），第一次成功的 LLM 决策存下来，之后的「继续抽取 /
+  重建结果」沿用它，切出来的章号和已有拆书卡对得上（LLM 失败不存，下次再问）
 
 设计文档：agent-docs/features/book_dissect_v31_quality_optimization.md §6
 """
@@ -14,10 +16,12 @@ LLM 推断边界模式，或降级到固定字数切分。
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Optional, Union
 
 from app.services.book_dissect.chapter_splitter import (
     Chapter,
@@ -142,15 +146,43 @@ class LlmChapterSplitter:
 # ---------------------------------------------------------------------------
 
 
+def decision_cache_path(storage_path: Union[str, Path]) -> Path:
+    """切章决策的旁路文件：{全文文件名}.split.json，拆书任务删除时一起删。"""
+    path = Path(storage_path)
+    return path.with_name(path.name + ".split.json")
+
+
+def _load_decision(path: Optional[Path]) -> Optional[LlmBoundaryDecision]:
+    if path is None or not path.exists():
+        return None
+    try:
+        return LlmBoundaryDecision(**json.loads(path.read_text(encoding="utf-8"))["decision"])
+    except Exception as exc:  # noqa: BLE001 - 坏文件当没有，重新问一次
+        logger.warning("[拆书V3.1-LLM切分] 切章决策文件读不出来，重新判断: %s (%s)", path, exc)
+        return None
+
+
+def _save_decision(path: Optional[Path], decision: LlmBoundaryDecision) -> None:
+    if path is None:
+        return
+    try:
+        path.write_text(json.dumps({"version": 1, "decision": asdict(decision)}, ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:
+        logger.warning("[拆书V3.1-LLM切分] 切章决策写不进 %s：%s（下次会重新判断，切出的章可能不同）", path, exc)
+
+
 async def split_with_llm_fallback(
     raw_text: str,
     ai_service,
+    *,
+    decision_path: Optional[Path] = None,
 ) -> list[Chapter]:
     """主对外接口：先跑正则切分，必要时调 LLM 兜底。
 
     Args:
         raw_text: 已解码的全文
         ai_service: app.services.ai_service.AIService 实例
+        decision_path: 切章决策的固化文件；有就沿用（不调 LLM），没有就把这次成功的决策存进去
 
     Returns:
         list[Chapter]，长度 ≥ 1
@@ -168,10 +200,15 @@ async def split_with_llm_fallback(
         max((len(c.content or "") for c in chapters), default=0),
     )
 
-    # 3. 调 LLM 分析边界
-    splitter = LlmChapterSplitter(ai_service=ai_service)
+    # 3. 调 LLM 分析边界（有固化的决策就沿用）
     normalized = _normalize_text(raw_text)
-    decision = await splitter.analyze(normalized)
+    decision = _load_decision(decision_path)
+    if decision is not None:
+        logger.info("[拆书V3.1-LLM切分] 沿用已固化的切章决策：%s", decision_path)
+    else:
+        decision = await LlmChapterSplitter(ai_service=ai_service).analyze(normalized)
+        if decision is not None:
+            _save_decision(decision_path, decision)
 
     if decision is None:
         # LLM 失败 → 固定字数兜底
@@ -203,10 +240,12 @@ async def split_with_llm_fallback(
 async def split_bytes_with_llm_fallback(
     raw: bytes,
     ai_service,
+    *,
+    decision_path: Optional[Path] = None,
 ) -> tuple[list[Chapter], str]:
     """从原始字节一键切分 + LLM 兜底。返回 (chapters, encoding_used)。"""
     text, enc = decode_text(raw)
-    chapters = await split_with_llm_fallback(text, ai_service=ai_service)
+    chapters = await split_with_llm_fallback(text, ai_service=ai_service, decision_path=decision_path)
     return chapters, enc
 
 

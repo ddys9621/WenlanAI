@@ -106,9 +106,35 @@ export interface ChangeItem {
   status: string
 }
 
-const ENTITY_KIND: Record<string, string> = { character: '角色', organization: '组织', setting_entry: '设定条目' }
+const ENTITY_KIND: Record<string, string> = {
+  character: '角色', organization: '组织', setting_entry: '设定条目', relationship: '关系', membership: '组织成员',
+}
 const WORLD_RULE_KIND: Record<string, string> = {
   cultivation_realm: '修炼境界', equipment_template: '装备模板', map_location: '地图位置',
+}
+
+/**
+ * 创作顺序（世界设定 → 世界规则 → 设定条目 → 地图 → 角色与组织 → 关系 → 总纲 → 卷纲 → 剧情单元 → 章纲 → 正文）：
+ * 改动清单和待确认栏都按它排，「全部采用」也就照这个顺序写入（关系排在人物之后，两头先建好）。
+ */
+const LAYER: Record<string, number> = {
+  project: 0, world_rule: 1, setting_entry: 2, location: 3, character: 4, organization: 4, relationship: 5, membership: 5,
+  story_outline: 6, volume: 7, volume_unit: 8, chapter_outline: 9, chapter: 10,
+}
+const PLAN_LAYER: Record<AssistantPlan['kind'], string> = { volumes: 'volume', units: 'volume_unit', outlines: 'chapter_outline' }
+
+function changeLayer(ref: ChangeRef): number {
+  const entity = ref.kind === 'field' ? ref.candidate.entity ?? ''
+    : ref.kind === 'entity' ? ref.candidate.entity_type
+      : ref.kind === 'plan' ? PLAN_LAYER[ref.plan.kind] : 'chapter'
+  return LAYER[entity] ?? Object.keys(LAYER).length
+}
+
+/** 按创作顺序排；同一层里保持出现的先后 */
+function inCreativeOrder(items: ChangeItem[]): ChangeItem[] {
+  return items.map((item, i) => ({ item, i, layer: changeLayer(item.ref) }))
+    .sort((a, b) => a.layer - b.layer || a.i - b.i)
+    .map(({ item }) => item)
 }
 const PLAN_KIND: Record<AssistantPlan['kind'], string> = { volumes: '分卷草案', units: '剧情单元草案', outlines: '章纲草案' }
 const FIELD_STATUS: Record<AssistantFieldCandidate['status'], [ChangeState, string]> = {
@@ -123,6 +149,11 @@ export function entityKind(c: Pick<AssistantEntityCandidate, 'entity_type' | 'pa
   return ENTITY_KIND[c.entity_type] ?? '对象'
 }
 
+/** 卡片标题：后端给的 title（关系「甲 → 乙」、成员「人物 · 组织」）；旧数据没有就用名字，再不行用标签 */
+export function entityTitle(c: Pick<AssistantEntityCandidate, 'title' | 'payload' | 'label'>): string {
+  return c.title || c.payload.name || c.payload.title || c.label
+}
+
 function fieldChange(c: AssistantFieldCandidate): ChangeItem {
   const [state, status] = FIELD_STATUS[c.status]
   return { key: `field:${c.id}`, ref: { kind: 'field', candidate: c }, tag: '修改', title: c.label, state, status }
@@ -132,7 +163,7 @@ function entityChange(c: AssistantEntityCandidate): ChangeItem {
   const [state, status] = c.status === 'applied' && c.entity_missing ? ['missing', '已不在书里'] as const : ENTITY_STATUS[c.status]
   return {
     key: `entity:${c.id}`, ref: { kind: 'entity', candidate: c }, tag: `新建${entityKind(c)}`,
-    title: c.payload.name || c.payload.title || c.label, state, status,
+    title: entityTitle(c), state, status,
   }
 }
 
@@ -143,9 +174,9 @@ function planChange(plan: AssistantPlan, confirmedPlans: Set<string>): ChangeIte
   return { key, ref: { kind: 'plan', plan }, tag: PLAN_KIND[plan.kind], title: plan.title, state, status }
 }
 
-/** 一条发言提出的改动，每张卡一行（顺序：修改、新建、候选稿、草案；已经找不到的卡不列） */
+/** 一条发言提出的改动，每张卡一行（按创作顺序；同一层里先修改、后新建、再草案 / 候选稿；已经找不到的卡不列） */
 export function changeItems(cards: ChangeCards, lookups: ChangeLookups): ChangeItem[] {
-  return [
+  return inCreativeOrder([
     ...cards.candidates.flatMap((id) => {
       const c = lookups.fields.get(id)
       return c ? [fieldChange(c)] : []
@@ -159,7 +190,7 @@ export function changeItems(cards: ChangeCards, lookups: ChangeLookups): ChangeI
       title: `第 ${item.chapter_number} 章《${item.chapter_title}》`, state: 'open', status: '去审阅',
     })),
     ...cards.plans.map((plan) => planChange(plan, lookups.confirmedPlans)),
-  ]
+  ])
 }
 
 /** 回复里那一行：「改动 4 项 · 待确认 2 · 已采用 2」 */
@@ -173,7 +204,7 @@ export function changeSummary(items: ChangeItem[]): string {
 }
 
 /**
- * 待确认栏：整段对话里还没处理的改动，按出现顺序、同一张卡只列一次；
+ * 待确认栏：整段对话里还没处理的改动，按创作顺序排（同一层里按出现先后）、同一张卡只列一次——「全部采用」就照这个顺序写入；
  * 没挂在任何发言下的待确认卡（刚推来、还没落到消息里）也列上。候选稿要去章节页审阅，不在这里处理。
  */
 export function pendingChanges(cardGroups: ChangeCards[], lookups: ChangeLookups): ChangeItem[] {
@@ -187,7 +218,7 @@ export function pendingChanges(cardGroups: ChangeCards[], lookups: ChangeLookups
   cardGroups.forEach((cards) => changeItems(cards, lookups).forEach(add))
   lookups.fields.forEach((c) => add(fieldChange(c)))
   lookups.entities.forEach((c) => add(entityChange(c)))
-  return out
+  return inCreativeOrder(out)
 }
 
 /** 待确认栏收起时的一行：「新建设定条目 2 · 修改 1」 */

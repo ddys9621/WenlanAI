@@ -2,10 +2,20 @@
 用户密码管理模块 - 使用数据库存储
 """
 import hashlib
+import hmac
+import secrets
 from typing import Optional
 from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+# 密码哈希用标准库 scrypt 加盐，存储格式：scrypt$n$r$p$salt_hex$hash_hex
+# n=2**14, r=8, p=1 ≈ 16MB 内存，桌面 / 服务端都能接受；旧的无盐 SHA256 在验证通过时就地升级
+_SCRYPT_N = 2 ** 14
+_SCRYPT_R = 8
+_SCRYPT_P = 1
+_SCRYPT_DKLEN = 32
+_SCRYPT_PREFIX = "scrypt$"
 
 
 class UserPasswordManager:
@@ -30,7 +40,29 @@ class UserPasswordManager:
         return session_maker()
     
     def _hash_password(self, password: str) -> str:
-        """密码哈希"""
+        """新密码一律用 scrypt 加盐，返回 scrypt$n$r$p$salt_hex$hash_hex"""
+        salt = secrets.token_bytes(16)
+        dk = hashlib.scrypt(
+            password.encode(), salt=salt, n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=_SCRYPT_DKLEN
+        )
+        return f"{_SCRYPT_PREFIX}{_SCRYPT_N}${_SCRYPT_R}${_SCRYPT_P}${salt.hex()}${dk.hex()}"
+
+    @staticmethod
+    def _verify_scrypt(password: str, stored: str) -> bool:
+        try:
+            _algo, n, r, p, salt_hex, hash_hex = stored.split("$")
+            dk = hashlib.scrypt(
+                password.encode(),
+                salt=bytes.fromhex(salt_hex),
+                n=int(n), r=int(r), p=int(p),
+                dklen=len(bytes.fromhex(hash_hex)),
+            )
+            return hmac.compare_digest(dk.hex(), hash_hex)
+        except (ValueError, TypeError):
+            return False
+
+    @staticmethod
+    def _hash_sha256_legacy(password: str) -> str:
         return hashlib.sha256(password.encode()).hexdigest()
     
     async def set_password(self, user_id: str, username: str, password: Optional[str] = None) -> str:
@@ -100,9 +132,18 @@ class UserPasswordManager:
             
             if not pwd_record:
                 return False
-            
-            password_hash = self._hash_password(password)
-            return pwd_record.password_hash == password_hash
+
+            stored = pwd_record.password_hash
+            if stored.startswith(_SCRYPT_PREFIX):
+                return self._verify_scrypt(password, stored)
+
+            # 旧的无盐 SHA256：验证通过后就地升级为 scrypt
+            if hmac.compare_digest(stored, self._hash_sha256_legacy(password)):
+                pwd_record.password_hash = self._hash_password(password)
+                pwd_record.updated_at = datetime.now()
+                await session.commit()
+                return True
+            return False
     
     async def has_password(self, user_id: str) -> bool:
         """

@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
+from app.services.book_dissect.failure_policy import ExtractionAborted, call_with_retry
 from app.utils.json_cleaner import repair_json_with_llm, safe_parse_json
 
 logger = logging.getLogger(__name__)
@@ -63,13 +64,19 @@ class BaseV3Generator:
             return None
 
         # ---------- 1. 调 LLM（流式累积：长 JSON 输出非流式会被中转网关 100s 超时掐断）----------
+        # 断流 / 超时 / 5xx / 限流先原样重试；鉴权 / 余额 / 模型不存在抛 ExtractionFatal 中止整个拆书任务
         try:
-            resp = await ai_service.generate_text_stream_collect(
-                prompt=prompt,
-                system_prompt=system_prompt,
-                temperature=temperature,
-                context=label.strip("[]"),
+            resp = await call_with_retry(
+                lambda: ai_service.generate_text_stream_collect(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    temperature=temperature,
+                    context=label.strip("[]"),
+                ),
+                label=label,
             )
+        except ExtractionAborted:
+            raise
         except Exception as exc:
             logger.error("%s LLM 调用失败: %s", label, exc)
             return None

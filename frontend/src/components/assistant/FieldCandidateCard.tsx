@@ -26,8 +26,9 @@ interface FieldCandidateCardProps {
 
 export function FieldCandidateCard({ projectId, candidate, onChange, onOpenPage, showActions = true }: FieldCandidateCardProps) {
   const [busy, setBusy] = useState(false);
-  const before = formatFieldValue(candidate.before);
-  const after = formatFieldValue(candidate.after);
+  // 选项字段（关系状态、角色类型、分类…）按页面写法对比，不显示英文代码
+  const before = formatFieldValue(candidate.before_text ?? candidate.before);
+  const after = formatFieldValue(candidate.after_text ?? candidate.after);
   const blocks = useMemo(() => diffBlocks(before, after), [before, after]);
   const changes = blocks.filter((b) => b.kind === 'change').length;
   const status = STATUS[candidate.status];

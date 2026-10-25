@@ -122,10 +122,12 @@ export default function Organizations() {
 
   useEffect(() => { fetchOrgs() }, [fetchOrgs])
 
-  // 智能助笔建了组织 / 改了组织详情：刷新列表
+  // 智能助笔建了组织 / 改了组织详情，或加了 / 改了成员：刷新列表（展开着的成员列表一起刷新）
   const onAssistantData = useCallback((change: AssistantDataChange) => {
-    if (change.entity === 'organization') void fetchOrgs()
-  }, [fetchOrgs])
+    if (change.entity !== 'organization' && change.entity !== 'membership') return
+    void fetchOrgs()
+    if (change.entity === 'membership' && expandedOrgId) void fetchMembers(expandedOrgId)
+  }, [expandedOrgId, fetchMembers, fetchOrgs])
   useAssistantDataChange(onAssistantData)
 
   /* ---- 组织 CRUD ---- */

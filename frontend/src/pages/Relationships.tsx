@@ -6,6 +6,8 @@ import { cn } from '@/lib/utils'
 import { useStore } from '@/store/index'
 import { relationshipApi, characterApi } from '@/services/api'
 import { Modal } from '@/components/ui/Modal'
+import { useAssistantDataChange } from '@/hooks/useAssistantPage'
+import type { AssistantDataChange } from '@/store/assistantStore'
 import type { Character } from '@/types'
 
 /** 后端 RelationshipTypeResponse */
@@ -112,6 +114,12 @@ export default function Relationships() {
   }, [projectId])
 
   useEffect(() => { fetchData() }, [fetchData])
+
+  // 智能助笔建了 / 改了关系（或建了、改名了人物）：刷新列表
+  const onAssistantData = useCallback((change: AssistantDataChange) => {
+    if (change.entity === 'relationship' || change.entity === 'character') void fetchData()
+  }, [fetchData])
+  useAssistantDataChange(onAssistantData)
 
   const charMap = new Map(characters.filter(c => !c.is_organization).map(c => [c.id, c]))
   const typeMap = new Map(types.map(t => [t.id, t]))

@@ -13,6 +13,18 @@ export interface User {
   last_login: string;
 }
 
+// 管理员操作记录（用户管理页「操作记录」卡；detail 不含密码）
+export interface AdminAuditLog {
+  id: string;
+  actor_id: string;
+  actor_name: string | null;
+  action: string;
+  target_id: string | null;
+  target_name: string | null;
+  detail: Record<string, unknown>;
+  created_at: string | null;
+}
+
 // 登录页可用的登录方式（后端返回的是「有效开关」：开关开着且凭据齐全）
 export interface AuthConfig {
   local_auth_enabled: boolean;
@@ -1126,7 +1138,10 @@ export interface BookDissectChapterMeta {
 
 // V1 采样式 schema（DissectResult / DissectProjectSchema 等）已随 V1 逻辑一并移除。
 
-export type BookDissectStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+/** interrupted：库里还是 running、但没有流水线在跑（服务重启 / 程序退出前没跑完），只在读取时这样显示，可直接继续抽取 */
+export type BookDissectStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+/** 运行方式：full 删掉拆书卡从头抽 / resume 只抽失败和没抽过的章 / rebuild_post 拆书卡不动，只重建后续产物 */
+export type BookDissectRunMode = 'full' | 'resume' | 'rebuild_post';
 /** 拆书流水线阶段：切章 → 拆书卡 → 剧情单元 → 分卷 / 骨架 → 文风 → 拆书结果 */
 export type BookDissectStage =
   | 'split_done'
@@ -1167,6 +1182,10 @@ export interface BookDissectTask {
   chapter_limit?: number;
   /** 正在运行的抽取对应的通用 AI 任务 id（接入弹窗 / 托盘）；未运行为 null */
   job_id?: string | null;
+  /** 拆书结果状态：ready / partial / failed；还没有结果为 null */
+  pack_status?: string | null;
+  /** 拆书结果不完整的原因（缺哪些维度 / 章节覆盖率） */
+  pack_error?: string | null;
   created_at: string;
   started_at?: string | null;
   completed_at?: string | null;
@@ -1175,6 +1194,7 @@ export interface BookDissectTask {
 export type BookDissectExtractionEngine = 'auto' | 'chunked' | 'long_context';
 
 export interface BookDissectExtractionOptions {
+  mode?: BookDissectRunMode;
   sampling_mode?: string;
   sampling_param?: number;
   extraction_engine?: BookDissectExtractionEngine;
@@ -1202,6 +1222,24 @@ export interface BookDissectExtractionPlan {
   arc_window: number;
   estimated_llm_calls: number;
   warnings: string[];
+  /** 这份预估对应的运行方式 */
+  run_mode: BookDissectRunMode;
+  /** 范围内已经成功的拆书卡数 */
+  existing_cards: number;
+  /** 这次要抽拆书卡的章数（继续只算失败 / 没抽过的；只重建为 0） */
+  pending_chapters: number;
+}
+
+/** 章节目录一行（GET /book-dissect/{id}/chapters）：切章结果 + 这一章拆书卡的状态 */
+export interface BookDissectChapterItem {
+  number: number;
+  title: string;
+  raw_title: string;
+  word_count: number;
+  kind: string;
+  /** success / failed；null = 还没抽 */
+  status: 'success' | 'failed' | null;
+  error: string | null;
 }
 
 export interface BookDissectUploadResponse {
@@ -1230,6 +1268,10 @@ export interface BookDissectChapterCardListItem {
   payoff_count: number;
   word_count: number;
   extraction_status: string;
+  /** 单章超长、只送了章首章尾 */
+  truncated_input?: boolean;
+  /** 失败原因（截前 200 字）；成功为 null */
+  extraction_error?: string | null;
 }
 
 /** 整张拆书卡（GET /book-dissect/{id}/cards/{chapter_number}） */

@@ -16,6 +16,8 @@ from datetime import datetime, timedelta, timezone
 from app.user_manager import user_manager, is_email_user, normalize_email
 from app.user_password import password_manager
 from app.database import init_db
+from app.services.session_token import get_session_secret, sign_session
+from app.services.user_status_service import is_disabled, revoke_sessions
 from app.logger import get_logger
 from app.config import settings
 from app.services.auth_settings_service import AuthSettings, auth_settings_store
@@ -187,9 +189,11 @@ async def _init_user_db(user_id: str, label: str):
 
 async def _set_session_cookies(response: Response, user_id: str):
     max_age = settings.SESSION_EXPIRE_MINUTES * 60
+    secret = await get_session_secret()
+    token = sign_session(user_id, secret, settings.SESSION_EXPIRE_MINUTES)
     response.set_cookie(
         key="user_id",
-        value=user_id,
+        value=token,
         max_age=max_age,
         httponly=True,
         samesite="lax",
@@ -322,7 +326,7 @@ async def linuxdo_callback(
         avatar_url=user_info.get("avatar_url"),
         trust_level=int(user_info.get("trust_level") or 0),
     )
-    if user.trust_level == -1:
+    if await is_disabled(user.user_id):
         logger.warning(f"[Linux.do] 禁用用户尝试登录: {user.user_id} ({user.username})")
         return _login_error_redirect("user_disabled")
 
@@ -435,7 +439,7 @@ async def email_login(request: EmailLoginRequest, response: Response):
     if not user or not await password_manager.verify_password(user.user_id, request.password):
         logger.info(f"[邮箱登录] 邮箱或密码错误: {email}")
         raise HTTPException(status_code=401, detail="邮箱或密码错误")
-    if user.trust_level == -1:
+    if await is_disabled(user.user_id):
         logger.warning(f"[邮箱登录] 禁用用户尝试登录: {user.user_id} ({email})")
         raise HTTPException(status_code=403, detail="账号已被禁用，请联系管理员")
 
@@ -526,8 +530,8 @@ async def get_password_status(request: Request):
 
 
 @router.post("/password/set", response_model=SetPasswordResponse)
-async def set_user_password(request: Request, password_req: SetPasswordRequest):
-    """设置当前用户的密码"""
+async def set_user_password(request: Request, password_req: SetPasswordRequest, response: Response):
+    """设置当前用户的密码；其它设备的登录态随之失效，当前设备重签令牌不掉线"""
     if not hasattr(request.state, "user") or not request.state.user:
         raise HTTPException(status_code=401, detail="未登录")
 
@@ -538,6 +542,9 @@ async def set_user_password(request: Request, password_req: SetPasswordRequest):
 
     await password_manager.set_password(user.user_id, user.username, password_req.password)
     await mark_config_password_superseded(user.user_id)
+    # 其它设备下线；当前设备立刻重签（吊销按「iat < 吊销秒」判定，同一秒内重签的令牌仍有效）
+    await revoke_sessions(user.user_id)
+    await _set_session_cookies(response, user.user_id)
     logger.info(f"用户 {user.user_id} ({user.username}) 设置了自定义密码")
 
     return SetPasswordResponse(

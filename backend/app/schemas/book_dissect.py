@@ -35,7 +35,10 @@ class BookDissectTaskResponse(BaseModel):
     """拆书任务的完整状态响应"""
     id: str
     user_id: str
-    status: str = Field(..., description="pending/running/completed/failed/cancelled")
+    status: str = Field(
+        ...,
+        description="pending/running/completed/failed/cancelled；interrupted = 库里还是 running 但没有流水线在跑（服务重启前没跑完，只在读取时这样显示）",
+    )
     progress: int = Field(0, description="0-100")
     stage: Optional[str] = Field(None, description="当前阶段")
     error_message: Optional[str] = None
@@ -45,7 +48,11 @@ class BookDissectTaskResponse(BaseModel):
     encoding: Optional[str] = None
     chapter_count: int = 0
     total_words: int = 0
-    chapters_meta: Optional[List[ChapterMetaSchema]] = None
+    chapters_meta: Optional[List[ChapterMetaSchema]] = Field(
+        default=None, description="任务列表 / 轮询不再带（大书几百 KB）；章节目录走 GET /book-dissect/{id}/chapters",
+    )
+    pack_status: Optional[str] = Field(default=None, description="拆书结果状态：ready / partial / failed；还没有结果为 null")
+    pack_error: Optional[str] = Field(default=None, description="拆书结果不完整的原因（缺哪些维度 / 章节覆盖率）")
 
     # 引擎版本字段：老任务 2（V2-V4 知识图谱抽取，只读）；新任务统一为 5
     version: int = Field(default=5, description="拆书流水线版本")
@@ -116,6 +123,10 @@ class V2StartExtractionRequest(BaseModel):
         default=0, ge=0,
         description="只抽取前 N 章（先截取再采样）；0 = 全部章节",
     )
+    mode: str = Field(
+        default="full",
+        description="full = 删掉拆书卡从头抽；resume = 保留成功的卡，只抽失败 / 没抽过的章；rebuild_post = 拆书卡不动，只重建剧情单元及之后",
+    )
 
 
 class ExtractionPlanResponse(BaseModel):
@@ -137,6 +148,9 @@ class ExtractionPlanResponse(BaseModel):
         ..., description="预计 LLM 调用总数下限 = batch_count + post_calls（不含批失败拆半重试与 JSON 二次修复）",
     )
     warnings: List[str] = Field(default_factory=list)
+    run_mode: str = Field(default="full", description="这份预估对应的运行方式：full / resume / rebuild_post")
+    existing_cards: int = Field(default=0, description="范围内已经成功的拆书卡数")
+    pending_chapters: int = Field(default=0, description="这次要抽拆书卡的章数（resume 只算失败 / 没抽过的；rebuild_post 为 0）")
 
 
 # ============================================================
@@ -155,6 +169,19 @@ class ChapterCardListItem(BaseModel):
     payoff_count: int = 0
     word_count: int = 0
     extraction_status: str = "success"
+    truncated_input: bool = False
+    extraction_error: Optional[str] = Field(default=None, description="失败原因（截前 200 字）；成功为 null")
+
+
+class ChapterDirectoryItem(BaseModel):
+    """章节目录一行：切章结果 + 这一章拆书卡的状态（success / failed / null = 还没抽）。"""
+    number: int
+    title: str = ""
+    raw_title: str = ""
+    word_count: int = 0
+    kind: str = "chapter"
+    status: Optional[str] = None
+    error: Optional[str] = None
 
 
 class ChapterCardDetail(BaseModel):

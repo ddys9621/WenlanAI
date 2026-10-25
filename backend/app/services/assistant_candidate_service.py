@@ -40,6 +40,8 @@ async def create_field_candidate(
 
 
 def candidate_view(candidate: AssistantFieldCandidate) -> dict:
+    spec = fields.FIELD_SPECS.get(candidate.field_id)
+    before, after = _loads(candidate.before_json), _loads(candidate.after_json)
     return {
         "id": candidate.id,
         "field_id": candidate.field_id,
@@ -47,8 +49,11 @@ def candidate_view(candidate: AssistantFieldCandidate) -> dict:
         "entity": fields.entity_of(candidate.field_id),
         "label": candidate.target_label,
         "page": candidate.page,
-        "before": _loads(candidate.before_json),
-        "after": _loads(candidate.after_json),
+        "before": before,
+        "after": after,
+        # 选项字段按页面写法给卡片对比（active → 进行中）；其余为 null，照原值显示
+        "before_text": fields.display_value(spec, before),
+        "after_text": fields.display_value(spec, after),
         "reason": candidate.reason or "",
         "status": candidate.status,
         "run_id": candidate.run_id,

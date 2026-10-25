@@ -66,6 +66,7 @@ class BatchPlan:
     max_chapters_by_output: int        # 输出预算允许的单批章数
     chapters_per_request: int          # 实际生效的单批章数上限（0 = 仅按 token 装箱）
     warnings: list[str] = field(default_factory=list)
+    pack_budget: Optional[int] = None  # 装箱用的输入预算（None = 只按章数切）；运行时按它和自适应上限现切批次
 
     @property
     def batch_count(self) -> int:
@@ -135,13 +136,13 @@ def plan_batches(
     )
     warnings: list[str] = []
 
-    def _plan(batches: list[list[int]], mode: str, cap: int) -> BatchPlan:
+    def _plan(batches: list[list[int]], mode: str, cap: int, pack_budget: Optional[int] = None) -> BatchPlan:
         return BatchPlan(
             batches=batches, mode=mode, model=model_str,
             context_window=ctx_known, context_known=bool(ctx_known),
             input_budget_tokens=input_budget, output_budget_tokens=output_budget,
             max_chapters_by_output=max_by_output, chapters_per_request=cap,
-            warnings=warnings,
+            warnings=warnings, pack_budget=pack_budget,
         )
 
     if n == 0:
@@ -198,7 +199,22 @@ def plan_batches(
         mode = "single"
     else:
         mode = "batched"
-    return _plan(batches, mode, cap)
+    return _plan(batches, mode, cap, pack_budget)
+
+
+def take_batch(char_counts: Sequence[int], start: int, *, input_budget: Optional[int], cap: int) -> int:
+    """从 start 起取下一批的章数（至少 1）：章数到 cap 或 token 到预算就停；单章超预算独占一批（单章路径会截头留尾）。
+
+    input_budget=None 表示不按 token 预算切（上下文未知且用户显式指定了每批章数时，只按 cap 切）。
+    """
+    count = tokens = 0
+    for chars in char_counts[start:]:
+        need = estimate_chapter_tokens(chars)
+        if count and (count >= cap or (input_budget is not None and tokens + need > input_budget)):
+            break
+        count += 1
+        tokens += need
+    return max(1, count)
 
 
 def _pack_by_budget(
@@ -207,23 +223,13 @@ def _pack_by_budget(
     input_budget: Optional[int],
     cap: int,
 ) -> list[list[int]]:
-    """顺序贪心装箱：章数到 cap 或 token 到预算就开新批；单章超预算独占一批（单章路径会再分段）。
-
-    input_budget=None 表示不按 token 预算切（上下文未知且用户显式指定了每批章数时，只按 cap 切）。
-    """
+    """顺序贪心装箱（与运行时 take_batch 同一规则，预估的批数 = 不出错时实际的批数）。"""
     batches: list[list[int]] = []
-    current: list[int] = []
-    current_tokens = 0
-    for idx, chars in enumerate(char_counts):
-        tokens = estimate_chapter_tokens(chars)
-        over_budget = input_budget is not None and current_tokens + tokens > input_budget
-        if current and (len(current) >= cap or over_budget):
-            batches.append(current)
-            current, current_tokens = [], 0
-        current.append(idx)
-        current_tokens += tokens
-    if current:
-        batches.append(current)
+    start = 0
+    while start < len(char_counts):
+        size = take_batch(char_counts, start, input_budget=input_budget, cap=cap)
+        batches.append(list(range(start, start + size)))
+        start += size
     return batches
 
 

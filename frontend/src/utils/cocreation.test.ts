@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import type { AssistantEntityCandidate, AssistantFieldCandidate, AssistantPlan, AssistantQuestion } from '@/types/assistant'
 import {
-  batchConfirmText, changeItems, changeSummary, liveCardOwner, memberTone, mentionMember, pendingChanges, pendingSummary,
-  planConfirmTargets, planEntity, planKey, planLink, questionCardKey,
+  batchConfirmText, changeItems, changeSummary, entityKind, entityTitle, liveCardOwner, memberTone, mentionMember, pendingChanges,
+  pendingSummary, planConfirmTargets, planEntity, planKey, planLink, questionCardKey,
 } from './cocreation'
 
-const field = (id: string, status: AssistantFieldCandidate['status'], label = '作品设定·主题'): AssistantFieldCandidate => ({
-  id, field_id: 'project.theme', target_id: 'p', entity: 'project', label, page: 'world-setting', before: '', after: '新主题',
+const field = (id: string, status: AssistantFieldCandidate['status'], label = '作品设定·主题', entity = 'project'): AssistantFieldCandidate => ({
+  id, field_id: `${entity}.x`, target_id: 'p', entity, label, page: 'world-setting', before: '', after: '新主题',
   reason: '', status, run_id: 'r', created_at: null, decided_at: null,
 })
 const entity = (id: string, status: AssistantEntityCandidate['status'], payload: Record<string, string>, entityType = 'setting_entry'): AssistantEntityCandidate => ({
@@ -15,7 +15,7 @@ const entity = (id: string, status: AssistantEntityCandidate['status'], payload:
 })
 
 describe('改动清单（对话里一行摘要 + 输入框上方的待确认栏）', () => {
-  const fields = new Map([['f1', field('f1', 'candidate')], ['f2', field('f2', 'applied', '总纲·全书主线')]])
+  const fields = new Map([['f1', field('f1', 'candidate')], ['f2', field('f2', 'applied', '总纲·全书主线', 'story_outline')]])
   const entities = new Map([
     ['e1', entity('e1', 'candidate', { title: '歪理成道·四律' })],
     ['e2', entity('e2', 'applied', { category: 'cultivation_realm', name: '炼气' }, 'world_rule')],
@@ -26,17 +26,48 @@ describe('改动清单（对话里一行摘要 + 输入框上方的待确认栏�
   }
   const cards = { candidates: ['f1', 'f2', 'gone'], entity_candidates: ['e1', 'e2', 'e3'], chapter_candidates: [], plans: [plan] }
 
-  it('每张卡一行：类别、名称、状态；找不到的卡（已删除）不列', () => {
+  it('每张卡一行：类别、名称、状态，按创作顺序排（世界设定 → 世界规则 → 设定条目 → 角色与组织 → 总纲 → 卷纲）；找不到的卡（已删除）不列', () => {
     const items = changeItems(cards, { fields, entities, confirmedPlans: new Set() })
     expect(items.map((i) => [i.tag, i.title, i.status])).toEqual([
       ['修改', '作品设定·主题', '待确认'],
-      ['修改', '总纲·全书主线', '已应用'],
-      ['新建设定条目', '歪理成道·四律', '待确认'],
       ['新建修炼境界', '炼气', '已建档'],
+      ['新建设定条目', '歪理成道·四律', '待确认'],
       ['新建组织', '守墨人', '没有采用'],
+      ['修改', '总纲·全书主线', '已应用'],
       ['分卷草案', '四卷分卷', '待确认'],
     ])
     expect(changeSummary(items)).toBe('改动 6 项 · 待确认 3 · 已采用 2 · 没采用 1')
+  })
+
+  it('待确认栏按创作顺序写入：先提的总纲修改排在后提的人物、关系之后，关系排在人物之后（全部采用时两头已经建好）', () => {
+    const lookups = {
+      fields: new Map([['o1', field('o1', 'candidate', '总纲·全书主线', 'story_outline')], ['u1', field('u1', 'candidate', '单元经过', 'volume_unit')]]),
+      entities: new Map([
+        ['r1', entity('r1', 'candidate', { from_name: '陈默', to_name: '苏雪', relationship_name: '师徒' }, 'relationship')],
+        ['c1', entity('c1', 'candidate', { name: '苏雪' }, 'character')],
+        ['m1', entity('m1', 'candidate', { character_name: '陈默', organization_name: '青云宗', position: '弟子' }, 'membership')],
+        ['w1', entity('w1', 'candidate', { category: 'map_location', name: '青云山' }, 'world_rule')],
+      ]),
+      confirmedPlans: new Set<string>(),
+    }
+    const first = { candidates: ['o1', 'u1'], entity_candidates: ['r1'], chapter_candidates: [], plans: [] }
+    const later = { candidates: [], entity_candidates: ['c1', 'm1', 'w1'], chapter_candidates: [], plans: [plan] }
+    const pending = pendingChanges([first, later], lookups)
+    expect(pending.map((i) => i.key)).toEqual([
+      'entity:w1', 'entity:c1', 'entity:r1', 'entity:m1', 'field:o1', planKey(plan), 'field:u1',
+    ])
+  })
+
+  it('关系 / 组织成员卡：类别和标题（后端给的 title：甲 → 乙、人物 · 组织）', () => {
+    const rel = entity('r1', 'candidate', { from_name: '陈默', to_name: '苏雪', relationship_name: '师徒' }, 'relationship')
+    expect(entityKind(rel)).toBe('关系')
+    expect(entityTitle({ ...rel, title: '陈默 → 苏雪' })).toBe('陈默 → 苏雪')
+    const member = entity('m1', 'candidate', { character_name: '陈默', organization_name: '青云宗' }, 'membership')
+    expect(entityKind(member)).toBe('组织成员')
+    expect(entityTitle({ ...member, title: undefined })).toBe(member.label) // 旧数据没有 title：退回标签
+    expect(changeItems({ candidates: [], entity_candidates: ['r1'], chapter_candidates: [], plans: [] },
+      { fields: new Map(), entities: new Map([['r1', { ...rel, title: '陈默 → 苏雪' }]]), confirmedPlans: new Set() })[0])
+      .toMatchObject({ tag: '新建关系', title: '陈默 → 苏雪' })
   })
 
   it('草案在卡片上确认过（或服务端说已确认）就不再算待确认', () => {
@@ -53,10 +84,10 @@ describe('改动清单（对话里一行摘要 + 输入框上方的待确认栏�
     expect(pendingSummary(pending)).toBe('修改 1 · 新建设定条目 1 · 分卷草案 1')
   })
 
-  it('没挂在任何发言下的待确认卡（比如刚推来的）也进待确认栏', () => {
+  it('没挂在任何发言下的待确认卡（比如刚推来的）也进待确认栏，照样按创作顺序排', () => {
     const orphan = new Map([...entities, ['e9', entity('e9', 'candidate', { name: '青云宗' }, 'organization')]])
     const pending = pendingChanges([cards], { fields, entities: orphan, confirmedPlans: new Set() })
-    expect(pending.at(-1)?.key).toBe('entity:e9')
+    expect(pending.map((i) => i.key)).toEqual(['field:f1', 'entity:e1', 'entity:e9', planKey(plan)])
   })
 
   it('已建档、书里却没有了（被删了或当时没建成）：单独标出来，不算已采用，也不进待确认栏', () => {

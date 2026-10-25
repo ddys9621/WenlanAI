@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.logger import get_logger
+from app.models.setting_entry import SETTING_CATEGORY_LABELS as CATEGORY_LABELS
 from app.models.setting_entry import SettingEntry
 from app.services.embedding_runtime import (
     collection_suffix, encode_texts, get_chroma_client, get_embedding_model, query_instruction, register_consumer,
@@ -22,9 +23,6 @@ from app.services.generation_trace import trace_reference
 
 logger = get_logger(__name__)
 
-CATEGORY_LABELS = {
-    "term": "术语", "law": "铁律", "faction": "势力", "rule": "规则", "other": "其他",
-}
 VALID_CATEGORIES = tuple(CATEGORY_LABELS)
 SUMMARY_BUDGET = 6000
 

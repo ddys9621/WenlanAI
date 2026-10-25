@@ -8,8 +8,9 @@ from sqlalchemy.sql import func
 from app.db_base import Base
 import uuid
 
-# 分类的合法取值（字段白名单 / 新建候选共用；中文标签在 setting_entry_service.CATEGORY_LABELS）
-SETTING_CATEGORIES = ("term", "law", "faction", "rule", "other")
+# 分类的合法取值与中文标签（字段白名单 / 新建候选 / setting_entry_service 共用）
+SETTING_CATEGORY_LABELS = {"term": "术语", "law": "铁律", "faction": "势力", "rule": "规则", "other": "其他"}
+SETTING_CATEGORIES = tuple(SETTING_CATEGORY_LABELS)
 
 
 class SettingEntry(Base):

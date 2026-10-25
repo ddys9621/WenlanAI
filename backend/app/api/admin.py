@@ -5,9 +5,11 @@ from fastapi import APIRouter, HTTPException, Request, Depends, File, UploadFile
 from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime, timezone
+import asyncio
 import hashlib
 import os
 import uuid
+import weakref
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.auth import mark_config_password_superseded
@@ -16,6 +18,7 @@ from app.models.user import User
 from app.user_manager import user_manager
 from app.user_password import password_manager
 from app.services import announcement_service
+from app.services import admin_audit_service, user_status_service
 from app.services.announcement_service import AnnouncementUpdate, announcement_store
 from app.services.auth_settings_service import AuthSettingsUpdate, auth_settings_store
 from app.services.email_service import BRAND_NAME, SmtpConfig, send_email
@@ -69,6 +72,22 @@ class TestEmailRequest(BaseModel):
     to: str = Field(..., min_length=3, max_length=200, description="收件邮箱")
 
 
+# ==================== 并发串行锁 ====================
+
+# 用户增 / 改 / 禁 / 删按事件循环共用一把锁，串行化「读—判定—写」临界区：
+# 避免同名并发建两个、并发禁用 / 降权把最后一个活跃管理员清零（所有会话共用一个 SQLite 连接）。
+_admin_lock_by_loop: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def _admin_mutation_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _admin_lock_by_loop.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _admin_lock_by_loop[loop] = lock
+    return lock
+
+
 # ==================== 权限检查依赖 ====================
 
 async def check_admin(request: Request) -> User:
@@ -93,12 +112,13 @@ async def get_users(
     """获取用户列表（仅管理员）"""
     try:
         all_users = await user_manager.get_all_users()
-        
+
+        disabled_ids = await user_status_service.disabled_user_ids([u.user_id for u in all_users])
         users_data = []
         for user in all_users:
             # user_manager 返回的是 Pydantic User 对象，直接转为 dict
             user_dict = user.model_dump()
-            user_dict["is_active"] = user.trust_level != -1
+            user_dict["is_active"] = user.user_id not in disabled_ids
             users_data.append(user_dict)
         
         logger.info(f"管理员 {admin.user_id} 获取用户列表，共 {len(users_data)} 个用户")
@@ -119,6 +139,8 @@ async def create_user(
     db: AsyncSession = Depends(get_db)
 ):
     """添加用户（仅管理员）"""
+    lock = _admin_mutation_lock()
+    await lock.acquire()
     try:
         # 检查用户名是否已存在
         all_users = await user_manager.get_all_users()
@@ -154,6 +176,10 @@ async def create_user(
             logger.error(f"用户 {new_user.user_id} 数据库初始化失败: {e}")
         
         logger.info(f"管理员 {admin.user_id} 创建了新用户 {new_user.user_id} ({data.username})")
+        await admin_audit_service.record(
+            admin, "user.create", new_user,
+            detail={"username": data.username, "is_admin": data.is_admin, "generated_password": not data.password},
+        )
         
         return CreateUserResponse(
             success=True,
@@ -167,6 +193,8 @@ async def create_user(
     except Exception as e:
         logger.error(f"创建用户失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"创建用户失败: {str(e)}")
+    finally:
+        lock.release()
 
 
 @router.put("/users/{user_id}")
@@ -177,6 +205,8 @@ async def update_user(
     db: AsyncSession = Depends(get_db)
 ):
     """编辑用户信息（仅管理员）"""
+    lock = _admin_mutation_lock()
+    await lock.acquire()
     try:
         # 获取目标用户
         target_user = await user_manager.get_user(user_id)
@@ -215,8 +245,12 @@ async def update_user(
         logger.info(f"管理员 {admin.user_id} 更新了用户 {user_id} 的信息")
         
         updated_user = await user_manager.get_user(user_id)
+        await admin_audit_service.record(
+            admin, "user.update", updated_user,
+            detail={"changed": sorted(data.model_dump(exclude_none=True).keys())},
+        )
         user_dict = updated_user.model_dump()
-        user_dict["is_active"] = updated_user.trust_level != -1
+        user_dict["is_active"] = not await user_status_service.is_disabled(user_id)
         
         return {
             "success": True,
@@ -229,6 +263,8 @@ async def update_user(
     except Exception as e:
         logger.error(f"更新用户失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"更新用户失败: {str(e)}")
+    finally:
+        lock.release()
 
 
 @router.post("/users/{user_id}/toggle-status")
@@ -239,38 +275,38 @@ async def toggle_user_status(
     db: AsyncSession = Depends(get_db)
 ):
     """切换用户状态（启用/禁用）（仅管理员）"""
+    lock = _admin_mutation_lock()
+    await lock.acquire()
     try:
         # 不允许禁用自己
         if user_id == admin.user_id:
             raise HTTPException(status_code=400, detail="不能禁用自己的账号")
-        
+
         # 获取目标用户
         target_user = await user_manager.get_user(user_id)
         if not target_user:
             raise HTTPException(status_code=404, detail="用户不存在")
-        
-        # 更新状态
-        async with await user_manager._get_session() as session:
-            result = await session.execute(
-                select(User).where(User.user_id == user_id)
-            )
-            db_user = result.scalar_one_or_none()
-            
-            if not db_user:
-                raise HTTPException(status_code=404, detail="用户不存在")
-            
-            if data.is_active:
-                # 启用用户：恢复trust_level为0（或之前的值）
-                db_user.trust_level = 0
-            else:
-                # 禁用用户：设置trust_level为-1
-                db_user.trust_level = -1
-            
-            await session.commit()
-        
+
+        # 禁用管理员前，确保禁用后仍有至少一个活跃管理员
+        if not data.is_active and target_user.is_admin:
+            all_users = await user_manager.get_all_users()
+            disabled_ids = await user_status_service.disabled_user_ids([u.user_id for u in all_users])
+            others_active_admin = [
+                u for u in all_users
+                if u.is_admin and u.user_id != user_id and u.user_id not in disabled_ids
+            ]
+            if not others_active_admin:
+                raise HTTPException(status_code=400, detail="不能禁用最后一个活跃管理员")
+
+        # 禁用状态独立于 trust_level（后者只作信任等级展示），启用不再冲掉真实等级
+        await user_status_service.set_disabled(user_id, not data.is_active)
+        if not data.is_active:
+            await user_status_service.revoke_sessions(user_id)
+
         status_text = "启用" if data.is_active else "禁用"
         logger.info(f"管理员 {admin.user_id} {status_text}了用户 {user_id}")
-        
+        await admin_audit_service.record(admin, "user.enable" if data.is_active else "user.disable", target_user)
+
         return {
             "success": True,
             "message": f"用户已{status_text}",
@@ -282,6 +318,8 @@ async def toggle_user_status(
     except Exception as e:
         logger.error(f"切换用户状态失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"切换用户状态失败: {str(e)}")
+    finally:
+        lock.release()
 
 
 @router.post("/users/{user_id}/reset-password")
@@ -305,8 +343,13 @@ async def reset_password(
             password=data.new_password
         )
         await mark_config_password_superseded(user_id)
+        # 密码被重置，该用户已有的登录态全部作废
+        await user_status_service.revoke_sessions(user_id)
         
         logger.info(f"管理员 {admin.user_id} 重置了用户 {user_id} 的密码")
+        await admin_audit_service.record(
+            admin, "user.reset_password", target_user, detail={"generated": data.new_password is None},
+        )
         
         return {
             "success": True,
@@ -321,6 +364,24 @@ async def reset_password(
         raise HTTPException(status_code=500, detail=f"重置密码失败: {str(e)}")
 
 
+@router.post("/users/{user_id}/revoke-sessions")
+async def revoke_user_sessions(
+    user_id: str,
+    admin: User = Depends(check_admin),
+):
+    """强制下线（仅管理员）：让该用户此刻之前签发的所有会话令牌失效，下次请求即需重新登录"""
+    if user_id == admin.user_id:
+        raise HTTPException(status_code=400, detail="不能强制下线自己，请直接退出登录")
+    target_user = await user_manager.get_user(user_id)
+    if not target_user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    await user_status_service.revoke_sessions(user_id)
+    logger.info(f"管理员 {admin.user_id} 强制下线了用户 {user_id}")
+    await admin_audit_service.record(admin, "user.revoke_sessions", target_user)
+    return {"success": True, "message": "已强制下线，该用户需重新登录"}
+
+
 @router.delete("/users/{user_id}")
 async def delete_user(
     user_id: str,
@@ -328,6 +389,8 @@ async def delete_user(
     db: AsyncSession = Depends(get_db)
 ):
     """删除用户（仅管理员，慎用）"""
+    lock = _admin_mutation_lock()
+    await lock.acquire()
     try:
         # 不允许删除自己
         if user_id == admin.user_id:
@@ -367,6 +430,9 @@ async def delete_user(
             await session.commit()
         
         logger.warning(f"管理员 {admin.user_id} 删除了用户 {user_id}")
+        await admin_audit_service.record(
+            admin, "user.delete", target_user, detail={"username": target_user.username, "was_admin": target_user.is_admin},
+        )
         
         return {
             "success": True,
@@ -378,6 +444,20 @@ async def delete_user(
     except Exception as e:
         logger.error(f"删除用户失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"删除用户失败: {str(e)}")
+    finally:
+        lock.release()
+
+
+# ==================== 操作审计 API ====================
+
+@router.get("/audit-logs", summary="管理员操作记录（倒序分页）")
+async def get_audit_logs(
+    limit: int = 50,
+    offset: int = 0,
+    admin: User = Depends(check_admin),
+):
+    total, items = await admin_audit_service.list_logs(limit=limit, offset=offset)
+    return {"total": total, "items": items, "limit": limit, "offset": offset}
 
 
 # ==================== 登录方式设置 API ====================

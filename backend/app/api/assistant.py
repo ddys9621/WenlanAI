@@ -375,7 +375,8 @@ async def set_member_model(project_id: str, member_id: str, body: AssistantTeamM
     return await _team_payload(db, project_id, request)
 
 
-@router.get("/progress", summary="创作进度：总纲 / 卷纲 / 章纲 / 正文各到哪一步与建议的下一步")
+@router.get("/progress", summary="创作进度：世界设定 → 世界规则 → 设定条目 → 角色与组织 → 关系 → 总纲 → 卷纲 → 章纲 → 正文 "
+                                 "各到哪一步与建议的下一步")
 async def story_progress(project_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     await verify_request_project(request, project_id, db)
     return await progress_snapshot(db, project_id)

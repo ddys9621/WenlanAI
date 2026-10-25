@@ -13,7 +13,7 @@ TASK_MARK_CARD = "【任务：拆书卡】"
 
 SYSTEM_CARD = """你是资深网文拆书编辑。任务：阅读给定的一批连续章节正文，为每一章产出一张「拆书卡」JSON。
 规则：
-1. 只输出一个 JSON 对象 {"cards":[...]}，不要解释、不要 Markdown 代码块、不要前后空白
+1. 只输出一个 JSON 对象 {"cards":[...],"end":true}（最后一个字段固定写 "end":true），不要解释、不要 Markdown 代码块、不要前后空白
 2. 每章一张卡，chapter_number 必须用输入里的真实章号，一章都不能漏、不能多
 3. 只写正文里确实发生的内容，不虚构；人名用正文中最规范的称呼，「已知角色」里有的优先复用
 4. 字符串值里出现引号一律用「」，禁止英文双引号；禁止换行符
@@ -43,10 +43,15 @@ CARD_PROMPT = TASK_MARK_CARD + """
  "characters": ["本章出场角色规范名（只写名字）"],
  "protagonist_delta": "主角本章的实力/身份/处境/认知/关系变化，无变化写「无」",
  "new_settings": ["本章首次出现的设定要素，格式「名称：一句话」；没有给 []"]
-}}]}}
+}}],"end":true}}
 
 【本批章节正文】共 {count} 章，边界标记为 === 第 N 章 标题 ===
 {full_text}"""
+
+# 单章输出被截断后的精简重试：追加在 user prompt 末尾
+CARD_COMPACT_NOTE = """
+
+【本次输出务必精简】outline 不超过 200 字；payoff_points / highlights / new_settings 各不超过 2 条；characters 不超过 8 个；ending_hook_text 不超过 30 字。"""
 
 
 # ============================================================

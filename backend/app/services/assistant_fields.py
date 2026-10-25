@@ -1,9 +1,11 @@
 """全局智能助笔 · 可修改内容目录（参考岚笺 assistant-field-catalog：静态白名单，不开放任意字段 / 删除 / 密钥）。
 
-每一项 = 字段（field_id）+ 目标（target_id，所属对象）：作品设定、人物、组织（含组织详情）、章纲、卷纲、
-总纲（梗概 / 全书主线等分字段；本书还没有总纲时目标是 new，作者应用时才建出来）、地图地点、世界设定条目、世界规则条目。
-读写都在这里校验类型与长度；写入时补上与手动编辑相同的连带处理（改总纲 → 卷纲 / 章纲标「上游已改」，改卷纲 → 本卷章纲标「上游已改」，
-改地点 → 地图版本号前移，改设定条目 / 世界规则 → 向量索引重同步，「地图位置」规则改名 → 地图跟着改，人物改名 → 别处的名字快照跟着改）。
+每一项 = 字段（field_id）+ 目标（target_id，所属对象），按创作顺序列：作品设定（世界设定页）、世界规则条目、世界设定条目、
+地图地点、人物、组织（含组织详情）、人物关系（关系页）、组织成员（组织页）、总纲（梗概 / 全书主线等分字段；本书还没有总纲时
+目标是 new，作者应用时才建出来）、卷纲、剧情单元（卷纲 units 的一项，目标是「卷 id:单元序号」）、章纲。
+读写都在这里校验类型、长度与取值（选项字段也认页面上的中文写法）；写入时补上与手动编辑相同的连带处理（改总纲 → 卷纲 / 章纲标
+「上游已改」，改卷纲 / 剧情单元 → 本卷章纲标「上游已改」，改地点 → 地图版本号前移，改设定条目 / 世界规则 → 向量索引重同步，
+「地图位置」规则改名 → 地图跟着改，人物改名 → 别处的名字快照跟着改，改关系名称 → 关系类型跟着认）。
 """
 from __future__ import annotations
 
@@ -19,8 +21,8 @@ from app.logger import get_logger
 from app.models.character import Character
 from app.models.chapter_outline import ChapterOutline
 from app.models.project import Project
-from app.models.relationship import Organization
-from app.models.setting_entry import SETTING_CATEGORIES, SettingEntry
+from app.models.relationship import CharacterRelationship, Organization, OrganizationMember
+from app.models.setting_entry import SETTING_CATEGORY_LABELS, SettingEntry
 from app.models.story_outline import StoryOutline
 from app.models.volume import Volume
 from app.models.world_map import WorldMapLocation
@@ -28,6 +30,7 @@ from app.models.world_rule import WorldRule
 from app.services import outline_review_service as outline_review
 from app.services import world_map_service as wms
 from app.services.character_rename_service import propagate_character_rename
+from app.services.volume_planning import loads_units
 from app.services.world_map_service import load_map
 from app.utils.character_names import record_former_name
 from app.utils.data_consistency import ensure_organization_record
@@ -55,7 +58,7 @@ class FieldSpec:
     entity: str
     attr: str
     name: str
-    kind: str = "text"  # text | list
+    kind: str = "text"  # text | list | number（整数，存成数字列）
     max_length: int = 20000
     max_items: int = 30
     page: str = ""
@@ -66,31 +69,44 @@ class FieldSpec:
     hidden: bool = False  # 不在目录里列出（只为让以前生成的候选还能应用 / 撤销）
     aliases: str = ""  # 页面上 / 作者口中的别的叫法，定位内容时一起比对（如「时代背景」也叫「时间背景」）
     detail: bool = False  # 值存在组织详情表（organizations，按 character_id 一对一），不在 characters 表上
+    labels: tuple[tuple[str, str], ...] = ()  # 选项的中文含义（取值, 页面上的写法）：给模型看、卡片对比用，写入时也认中文
+    min_value: int = 0  # number 字段的取值范围
+    max_value: int = 0
 
 
+# 按创作顺序（世界设定 → 世界规则 → 设定条目 → 地图 → 角色与组织 → 关系 → 总纲 → 卷纲 → 章纲）：定位内容时也按这个顺序列
 ENTITY_PAGES = {
-    "project": "world-setting", "character": "characters", "organization": "characters",
-    "chapter_outline": "outline", "volume": "outline", "story_outline": "outline", "location": "world-map",
-    "setting_entry": "setting-entries", "world_rule": "world-rules",
+    "project": "world-setting", "world_rule": "world-rules", "setting_entry": "setting-entries", "location": "world-map",
+    "character": "characters", "organization": "characters", "relationship": "relationships",
+    "membership": "organizations", "story_outline": "outline", "volume": "outline", "volume_unit": "outline",
+    "chapter_outline": "outline",
 }
 ENTITY_GROUPS = {
-    "project": "设定", "character": "人物", "organization": "组织", "chapter_outline": "谋篇",
-    "volume": "卷纲", "story_outline": "总纲", "location": "地图", "setting_entry": "设定条目",
-    "world_rule": "世界规则",
+    "project": "设定", "world_rule": "世界规则", "setting_entry": "设定条目", "location": "地图", "character": "人物",
+    "organization": "组织", "relationship": "关系", "membership": "组织成员", "story_outline": "总纲",
+    "volume": "卷纲", "volume_unit": "剧情单元", "chapter_outline": "谋篇",
 }
 # 同一类对象共用的别的叫法（和每个字段自己的 aliases 一起比对）
 ENTITY_ALIASES = {
     "chapter_outline": "章纲", "volume": "谋篇 分卷", "story_outline": "大纲 故事大纲", "location": "地点",
-    "world_rule": "境界 装备 地图位置",
+    "world_rule": "境界 装备 地图位置", "relationship": "人物关系 关系网", "membership": "成员 归属",
+    "volume_unit": "卷纲 单元",
 }
 NEW_OUTLINE = "new"  # 本书还没有总纲时总纲各字段的目标：先当一份空白总纲列出，作者应用修改时才真正建
 WORLD_RULE_LABELS = {"cultivation_realm": "修炼境界", "equipment_template": "装备模板", "map_location": "地图位置"}
-ROLE_TYPES = ("protagonist", "supporting", "antagonist", "mentor", "ally", "extra")
-PLATFORM_PRESETS = ("qidian", "fanqie", "jinjiang", "qimao")
+ROLE_LABELS = {"protagonist": "主角", "supporting": "配角", "antagonist": "反派", "mentor": "导师", "ally": "盟友",
+               "extra": "路人"}
+PLATFORM_LABELS = {"qidian": "起点", "fanqie": "番茄", "jinjiang": "晋江", "qimao": "七猫"}
+# 与关系页 / 组织页的下拉一致
+RELATIONSHIP_STATUS_LABELS = {"active": "进行中", "broken": "已破裂", "past": "已结束", "complicated": "复杂"}
+MEMBER_STATUS_LABELS = {"active": "在职", "retired": "已退出", "expelled": "被逐出", "deceased": "已故"}
+UNKNOWN_CAST = "（已删除的角色）"
 
 
 def _spec(entity: str, attr: str, name: str, **kw: Any) -> FieldSpec:
     field_id = f"{entity}.{attr}"
+    if kw.get("labels") and not kw.get("choices"):
+        kw["choices"] = tuple(value for value, _label in kw["labels"])
     return FieldSpec(id=field_id, entity=entity, attr=attr, name=name, page=ENTITY_PAGES[entity],
                      group=ENTITY_GROUPS[entity], **kw)
 
@@ -99,15 +115,17 @@ def _spec(entity: str, attr: str, name: str, **kw: Any) -> FieldSpec:
 _SPECS = [
     _spec("project", "title", "书名", max_length=200, required=True),
     _spec("project", "genre", "类型", max_length=50, aliases="题材"),
-    _spec("project", "platform_preset", "目标平台", max_length=20, choices=PLATFORM_PRESETS, aliases="平台"),
+    _spec("project", "platform_preset", "目标平台", max_length=20, labels=tuple(PLATFORM_LABELS.items()), aliases="平台"),
     _spec("project", "description", "简介", max_length=5000),
     _spec("project", "theme", "主题", max_length=2000),
     _spec("project", "world_time_period", "时代背景", max_length=5000, aliases="时间背景 年代 历史"),
     _spec("project", "world_location", "地点设定", max_length=5000, aliases="地理位置 地理 舞台"),
     _spec("project", "world_atmosphere", "氛围基调", max_length=5000, aliases="氛围 基调"),
     _spec("project", "world_rules", "世界规则", max_length=20000, aliases="规则 禁忌 代价"),
+    _spec("project", "generation_prompt", "最终提示词", max_length=5000, aliases="补充要求 写作要求 提示词"),
     _spec("character", "name", "姓名", max_length=100, required=True, aliases="名字 改名"),
-    _spec("character", "role_type", "角色类型", max_length=50, choices=ROLE_TYPES, aliases="定位 主角 配角 反派"),
+    _spec("character", "role_type", "角色类型", max_length=50, labels=tuple(ROLE_LABELS.items()),
+          aliases="定位 主角 配角 反派"),
     _spec("character", "gender", "性别", max_length=50),
     _spec("character", "age", "年龄", max_length=50),
     _spec("character", "personality", "性格", max_length=5000, aliases="性格特点"),
@@ -136,6 +154,10 @@ _SPECS = [
     _spec("volume", "climax", "卷末高潮", max_length=5000, aliases="高潮"),
     _spec("volume", "ending_hook", "卷末钩子", max_length=5000, aliases="钩子"),
     _spec("volume", "threads", "线索编排", kind="list", max_length=500, max_items=30, aliases="线索 感情线 支线 伏笔"),
+    # 剧情单元（卷纲 units 的一项）：只开放文字，章号区间仍由细化 / 谋篇页定（长度与 normalize_units 的截断一致）
+    _spec("volume_unit", "title", "单元标题", max_length=60, required=True, aliases="标题 单元名"),
+    _spec("volume_unit", "story", "经过", max_length=3000, aliases="单元故事 故事 事件 剧情"),
+    _spec("volume_unit", "turn", "结束时", max_length=800, aliases="转折 局面变化 结果"),
     # 总纲是一份 JSON（梗概 / 全书主线 / 主角特殊能力 / 卖点…，谋篇页按字段编辑）：整段改会把它换成纯文本、冲掉其余字段
     _spec("story_outline", "content", "故事前提", max_length=50000, hidden=True),
     _spec("story_outline", "premise", "故事梗概", json_key="premise", max_length=5000),
@@ -149,12 +171,25 @@ _SPECS = [
     _spec("location", "description", "地点档案", max_length=4000),
     _spec("location", "region", "所属区域", max_length=100),
     _spec("setting_entry", "title", "名称", max_length=200, required=True),
-    _spec("setting_entry", "category", "分类", max_length=50, choices=SETTING_CATEGORIES),
+    _spec("setting_entry", "category", "分类", max_length=50, labels=tuple(SETTING_CATEGORY_LABELS.items())),
     _spec("setting_entry", "summary", "简述", max_length=2000),
     _spec("setting_entry", "content", "详细设定", max_length=20000),
     _spec("world_rule", "name", "名称", max_length=200, required=True),
     _spec("world_rule", "summary", "简述", max_length=2000),
     _spec("world_rule", "details", "详细设定", max_length=20000),
+    # 关系页：人物两两之间的关系（改关系名称时关系类型跟着认）
+    _spec("relationship", "relationship_name", "关系名称", max_length=100, required=True,
+          aliases="自定义关系名称 关系类型 关系"),
+    _spec("relationship", "intimacy_level", "亲密度", kind="number", min_value=-100, max_value=100, aliases="好感 敌对"),
+    _spec("relationship", "status", "状态", max_length=20, labels=tuple(RELATIONSHIP_STATUS_LABELS.items()),
+          aliases="关系状态"),
+    _spec("relationship", "description", "关系描述", max_length=5000, aliases="描述"),
+    # 组织页：谁在哪个组织、什么职位
+    _spec("membership", "position", "职位", max_length=100, required=True, aliases="身份 职务"),
+    _spec("membership", "rank", "等级", kind="number", min_value=0, max_value=100, aliases="职位等级"),
+    _spec("membership", "loyalty", "忠诚度", kind="number", min_value=0, max_value=100, aliases="忠诚"),
+    _spec("membership", "status", "状态", max_length=20, labels=tuple(MEMBER_STATUS_LABELS.items()),
+          aliases="在职 去留"),
 ]
 FIELD_SPECS: dict[str, FieldSpec] = {s.id: s for s in _SPECS}
 LIST_LIMIT = 60
@@ -171,6 +206,19 @@ class NewOutline:
     content: str = ""
 
 
+@dataclass
+class UnitTarget:
+    """卷纲里的一个剧情单元（units JSON 的一项）：target_id =「卷 id:单元序号」，和知识库引用的写法一致。"""
+    id: str
+    project_id: str
+    volume: Any
+    unit: dict
+
+
+def unit_target_id(volume_id: str, index: Any) -> str:
+    return f"{volume_id}:{index}"
+
+
 def _target_label(entity: str, obj: Any) -> str:
     if entity == "project":
         return "作品设定"
@@ -182,12 +230,20 @@ def _target_label(entity: str, obj: Any) -> str:
         return f"第{obj.chapter_number}章章纲《{obj.title}》"
     if entity == "volume":
         return f"第{obj.volume_number}卷《{obj.title}》"
+    if entity == "volume_unit":
+        unit = obj.unit
+        return (f"第{obj.volume.volume_number}卷《{obj.volume.title}》·单元 {unit.get('index')}《{unit.get('title') or ''}》"
+                f"（第 {unit.get('chapter_start')}-{unit.get('chapter_end')} 章）")
     if entity == "story_outline":
         return f"总纲《{obj.title}》"
     if entity == "setting_entry":
         return f"设定条目「{obj.title}」"
     if entity == "world_rule":
         return f"{WORLD_RULE_LABELS.get(obj.category, '世界规则')}「{obj.name}」"
+    if entity == "relationship":
+        return f"关系「{obj._from_name} → {obj._to_name}」"
+    if entity == "membership":
+        return f"{obj._org_name}成员「{obj._member_name}」"
     return f"地点「{obj.name}」"
 
 
@@ -203,6 +259,28 @@ async def _org_details(db: AsyncSession, characters: list[Character]) -> None:
     )).scalars()} if ids else {}
     for c in characters:
         c._org_detail = found.get(c.id)
+
+
+async def _cast_names(db: AsyncSession, project_id: str) -> dict[str, str]:
+    return dict((await db.execute(select(Character.id, Character.name).where(Character.project_id == project_id))).all())
+
+
+async def _name_relationships(db: AsyncSession, project_id: str, rows: list[CharacterRelationship]) -> None:
+    """关系两头的名字挂到关系上（_from_name / _to_name），标签和查找都用它。"""
+    names = await _cast_names(db, project_id) if rows else {}
+    for r in rows:
+        r._from_name = names.get(r.character_from_id, UNKNOWN_CAST)
+        r._to_name = names.get(r.character_to_id, UNKNOWN_CAST)
+
+
+async def _name_members(db: AsyncSession, project_id: str, rows: list[OrganizationMember],
+                        orgs: dict[str, Organization]) -> None:
+    """成员记录挂上组织名和人物名（_org_name / _member_name）：成员表只记组织详情 id 和人物 id。"""
+    names = await _cast_names(db, project_id) if rows else {}
+    for m in rows:
+        org = orgs.get(m.organization_id)
+        m._org_name = names.get(org.character_id, UNKNOWN_CAST) if org is not None else UNKNOWN_CAST
+        m._member_name = names.get(m.character_id, UNKNOWN_CAST)
 
 
 async def _entity_rows(db: AsyncSession, project_id: str, entity: str) -> list[Any]:
@@ -245,12 +323,35 @@ async def _entity_rows(db: AsyncSession, project_id: str, entity: str) -> list[A
             select(WorldRule).where(WorldRule.project_id == project_id)
             .order_by(WorldRule.category, WorldRule.order_index, WorldRule.created_at)
         )).scalars().all())
+    if entity == "relationship":
+        rows = list((await db.execute(
+            select(CharacterRelationship).where(CharacterRelationship.project_id == project_id)
+            .order_by(CharacterRelationship.created_at)
+        )).scalars().all())
+        await _name_relationships(db, project_id, rows)
+        return rows
+    if entity == "membership":
+        orgs = {o.id: o for o in (await db.execute(
+            select(Organization).where(Organization.project_id == project_id)
+        )).scalars()}
+        rows = list((await db.execute(
+            select(OrganizationMember).where(OrganizationMember.organization_id.in_(list(orgs)))
+            .order_by(OrganizationMember.created_at)
+        )).scalars().all()) if orgs else []
+        await _name_members(db, project_id, rows, orgs)
+        return rows
+    if entity == "volume_unit":
+        volumes = await _entity_rows(db, project_id, "volume")
+        return [UnitTarget(unit_target_id(v.id, u.get("index")), project_id, v, u)
+                for v in volumes for u in loads_units(v.units)]
     return list((await db.execute(
         select(WorldMapLocation).where(WorldMapLocation.project_id == project_id).order_by(WorldMapLocation.name)
     )).scalars().all())
 
 
 def get_value(spec: FieldSpec, obj: Any) -> Any:
+    if spec.entity == "volume_unit":
+        return str(obj.unit.get(spec.attr) or "")
     if spec.json_key:
         value = parse_story_outline_fields(obj.content).get(spec.json_key)
         return [str(x) for x in value or []] if spec.kind == "list" else str(value or "")
@@ -313,6 +414,17 @@ def spec_of(field_id: str) -> FieldSpec:
     return spec
 
 
+async def _load_unit(db: AsyncSession, project_id: str, target_id: str) -> UnitTarget:
+    volume_id, _sep, index = (target_id or "").rpartition(":")
+    volume = await db.get(Volume, volume_id) if volume_id else None
+    if volume is None or volume.project_id != project_id:
+        raise FieldNotFound(f"在本书里找不到这个剧情单元（{target_id}）：目标写成「卷 id:单元序号」，先用 list_fields 查")
+    unit = next((u for u in loads_units(volume.units) if str(u.get("index")) == index), None)
+    if unit is None:
+        raise FieldNotFound(f"第{volume.volume_number}卷现在没有单元 {index}（可能重新细化过）：先用 list_fields 再查")
+    return UnitTarget(unit_target_id(volume.id, unit.get("index")), project_id, volume, unit)
+
+
 async def load_target(db: AsyncSession, project_id: str, spec: FieldSpec, target_id: str) -> Any:
     if spec.entity == "story_outline" and target_id == NEW_OUTLINE:
         # 待建的空白总纲；这期间作者在谋篇页建了总纲的话，就是那份生效的总纲
@@ -320,19 +432,29 @@ async def load_target(db: AsyncSession, project_id: str, spec: FieldSpec, target
         if not rows:
             raise FieldNotFound("在本书里找不到这项内容：总纲")
         return rows[0]
+    if spec.entity == "volume_unit":
+        return await _load_unit(db, project_id, target_id)
     model = {
         "project": Project, "character": Character, "organization": Character, "chapter_outline": ChapterOutline,
         "volume": Volume, "story_outline": StoryOutline, "location": WorldMapLocation, "setting_entry": SettingEntry,
-        "world_rule": WorldRule,
+        "world_rule": WorldRule, "relationship": CharacterRelationship, "membership": OrganizationMember,
     }[spec.entity]
     obj = await db.get(model, target_id) if target_id else None
-    owner = getattr(obj, "id" if spec.entity == "project" else "project_id", None) if obj is not None else None
+    org = await db.get(Organization, obj.organization_id) if obj is not None and spec.entity == "membership" else None
+    if spec.entity == "membership":  # 成员表不记项目：按所属组织认
+        owner = org.project_id if org is not None else None
+    else:
+        owner = getattr(obj, "id" if spec.entity == "project" else "project_id", None) if obj is not None else None
     if obj is None or owner != project_id:
         raise FieldNotFound(f"在本书里找不到这项内容：{spec.name}（{target_id}）")
     if spec.entity in ("character", "organization") and bool(obj.is_organization) != (spec.entity == "organization"):
         raise FieldNotFound(f"「{obj.name}」不是{'组织' if spec.entity == 'organization' else '人物'}")
     if spec.entity == "organization":
         await _org_details(db, [obj])
+    if spec.entity == "relationship":
+        await _name_relationships(db, project_id, [obj])
+    if spec.entity == "membership":
+        await _name_members(db, project_id, [obj], {org.id: org})
     return obj
 
 
@@ -364,16 +486,43 @@ def normalize_value(spec: FieldSpec, value: Any) -> Any:
     if isinstance(value, bool) or not isinstance(value, (str, int, float)):
         raise FieldError(f"{spec.name}应是一段文字")
     text = str(value).strip()
+    if spec.kind == "number":
+        return _normalize_number(spec, text)
     if spec.id == "character.role_type":  # 和页面一样认「主角 / 配角 / 反派」等中文写法
         text = normalize_role_type(text) or ""
+    text = {label: code for code, label in spec.labels}.get(text, text)  # 页面上的中文写法（「已破裂」）也认
     if spec.required and not text:
         raise FieldError(f"{spec.name}不能为空")
     if len(text) > spec.max_length:
         raise FieldError(f"{spec.name}不超过 {spec.max_length} 字（现在 {len(text)} 字）")
     optional = spec.id == "project.platform_preset"  # 目标平台留空 = 通用
     if spec.choices and text not in spec.choices and not (optional and not text):
-        raise FieldError(f"{spec.name}只能是 {'/'.join(spec.choices)}" + ("（留空 = 通用）" if optional else ""))
+        raise FieldError(f"{spec.name}只能是 {choice_text(spec)}" + ("（留空 = 通用）" if optional else ""))
     return text
+
+
+def _normalize_number(spec: FieldSpec, text: str) -> str:
+    try:
+        number = int(float(text))
+    except (ValueError, OverflowError):
+        raise FieldError(f"{spec.name}应是整数（{spec.min_value} 到 {spec.max_value}）") from None
+    if not spec.min_value <= number <= spec.max_value:
+        raise FieldError(f"{spec.name}应在 {spec.min_value} 到 {spec.max_value} 之间（现在 {number}）")
+    return str(number)
+
+
+def choice_text(spec: FieldSpec) -> str:
+    """选项字段能填的值（带中文含义），给模型看、报错时说明。"""
+    if spec.labels:
+        return " / ".join(f"{value}（{label}）" for value, label in spec.labels)
+    return "/".join(spec.choices)
+
+
+def display_value(spec: Optional[FieldSpec], value: Any) -> Optional[str]:
+    """选项字段的值按页面写法显示（active → 进行中）；不是选项字段返回 None（卡片照原值显示）。"""
+    if spec is None or not spec.labels or not isinstance(value, str):
+        return None
+    return dict(spec.labels).get(value, value)
 
 
 def _with_outline_key(content: Optional[str], key: str, value: Any) -> str:
@@ -404,11 +553,20 @@ async def write_field(db: AsyncSession, project_id: str, field_id: str, target_i
     changed = get_value(spec, obj) != normalized
     if isinstance(obj, NewOutline):
         obj = await _create_outline(db, obj)
-    if spec.entity == "volume":  # 与谋篇页保存卷纲同一处理：内容真的变了 → 本卷章纲标「上游已改」
+    if spec.entity in ("volume", "volume_unit"):  # 与谋篇页保存卷纲同一处理：内容真的变了 → 本卷章纲标「上游已改」
         from app.services import volume_service  # 延迟导入：卷纲服务依赖多，不放进目录模块的导入链
 
-        await volume_service.update_volume(db, obj, {spec.attr: normalized})
+        if spec.entity == "volume":
+            await volume_service.update_volume(db, obj, {spec.attr: normalized})
+        else:  # 剧情单元：整份 units 按原样带回，只换这一项的这一栏（章号区间不动）
+            units = [{**u, spec.attr: normalized} if str(u.get("index")) == str(obj.unit.get("index")) else u
+                     for u in loads_units(obj.volume.units)]
+            await volume_service.update_volume(db, obj.volume, {"units": units})
         return normalized
+    if changed and spec.id == "relationship.relationship_name":
+        from app.services.relationship_matcher import match_relationship_type
+
+        obj.relationship_type_id = await match_relationship_type(db, normalized)  # 和 AI 生成关系一样认关系类型
     renames_place = changed and spec.entity == "world_rule" and spec.attr == "name" and obj.category == wms.RULE_CATEGORY
     if renames_place:  # 「地图位置」规则和世界地图上的地点一一对应：先查重名
         try:
@@ -424,6 +582,8 @@ async def write_field(db: AsyncSession, project_id: str, field_id: str, target_i
     elif spec.detail:
         detail = getattr(obj, "_org_detail", None) or await ensure_organization_record(obj, db)
         setattr(detail, spec.attr, normalized or None)
+    elif spec.kind == "number":
+        setattr(obj, spec.attr, int(normalized))
     else:
         setattr(obj, spec.attr, json.dumps(normalized, ensure_ascii=False) if spec.kind == "list" else normalized)
     if changed and spec.entity == "story_outline":

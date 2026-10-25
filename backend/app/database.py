@@ -55,6 +55,8 @@ from app.models.relationship import (  # noqa: F401
 from app.models.relationship_event import RelationshipEvent  # noqa: F401
 from app.models.settings import Settings  # noqa: F401
 from app.models.setting_entry import SettingEntry  # noqa: F401
+from app.models.user_account_status import UserAccountStatus  # noqa: F401
+from app.models.admin_audit_log import AdminAuditLog  # noqa: F401
 from app.models.story_outline import StoryOutline  # noqa: F401
 from app.models.system_setting import SystemSetting  # noqa: F401
 from app.models.timeline_event import TimelineEvent  # noqa: F401

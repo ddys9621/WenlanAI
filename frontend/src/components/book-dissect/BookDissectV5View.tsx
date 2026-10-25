@@ -7,9 +7,10 @@
  *   4. 文风指纹   —— pack.style（prompt_content / 量化指标 / 例句），可复制 / 导入写作风格库
  *   5. 人物功能谱 —— pack.character_archive
  *
- * 拆书卡 / 剧情单元直接读任务表，抽取进行中也能逐步看到；维度 tab 依赖拆书结果就绪。
+ * 拆书卡 / 剧情单元直接读任务表，抽取进行中随 refreshKey（任务计数 / 阶段变化）重新拉取，逐步看到；
+ * 维度 tab 依赖拆书结果就绪。作者没手动点过页签时，initialTab 变了（抽取完成）就跟着切过去。
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
   BookMarked,
@@ -21,6 +22,7 @@ import {
   GitBranch,
   LayoutList,
   Palette,
+  RotateCcw,
   Sparkles,
   Users,
 } from 'lucide-react'
@@ -70,12 +72,38 @@ export interface BookDissectV5ViewProps {
   /** 拆书结果；null = 尚未生成 / 加载失败 */
   pack: ReferencePackDetail | null
   packLoading?: boolean
-  /** 初始 tab（任务页抽取中默认落到逐章拆书表） */
+  /** 初始 tab（任务页抽取中默认落到逐章拆书表）；作者没手动切过时，它变了就跟着切 */
   initialTab?: V5Tab
+  /** 变了就重新拉拆书卡 / 剧情单元（任务页传「状态 + 阶段 + 成功 / 失败章数」） */
+  refreshKey?: string
+  /** 每次变化都切到逐章拆书表并只看失败的章 */
+  focusFailedNonce?: number
+  /** 拆书表里「重试失败章节」按钮；不传不显示 */
+  onRetryFailed?: () => void
 }
 
-export function BookDissectV5View({ taskId, pack, packLoading = false, initialTab = 'skeleton' }: BookDissectV5ViewProps) {
+export function BookDissectV5View({
+  taskId,
+  pack,
+  packLoading = false,
+  initialTab = 'skeleton',
+  refreshKey,
+  focusFailedNonce = 0,
+  onRetryFailed,
+}: BookDissectV5ViewProps) {
   const [tab, setTab] = useState<V5Tab>(initialTab)
+  const pickedByHand = useRef(false)
+
+  useEffect(() => {
+    if (!pickedByHand.current) setTab(initialTab)
+  }, [initialTab])
+
+  useEffect(() => {
+    if (focusFailedNonce > 0) {
+      pickedByHand.current = true
+      setTab('cards')
+    }
+  }, [focusFailedNonce])
 
   const availability: Record<V5Tab, boolean> = {
     skeleton: pack?.synopsis != null || pack?.methodology != null || pack?.structure != null,
@@ -95,7 +123,10 @@ export function BookDissectV5View({ taskId, pack, packLoading = false, initialTa
             <button
               key={t.key}
               type="button"
-              onClick={() => setTab(t.key)}
+              onClick={() => {
+                pickedByHand.current = true
+                setTab(t.key)
+              }}
               title={t.hint}
               className={`flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-medium transition-colors ${
                 active
@@ -125,8 +156,10 @@ export function BookDissectV5View({ taskId, pack, packLoading = false, initialTa
             )}
           </PackGate>
         )}
-        {tab === 'arcs' && <ArcsTab taskId={taskId} units={(pack?.bridges as UnitsData | null) ?? null} />}
-        {tab === 'cards' && <CardsTab taskId={taskId} />}
+        {tab === 'arcs' && <ArcsTab taskId={taskId} refreshKey={refreshKey} units={(pack?.bridges as UnitsData | null) ?? null} />}
+        {tab === 'cards' && (
+          <CardsTab taskId={taskId} refreshKey={refreshKey} focusFailedNonce={focusFailedNonce} onRetryFailed={onRetryFailed} />
+        )}
         {tab === 'style' && (
           <PackGate pack={pack} loading={packLoading}>
             {(p) => <StyleTab style={p.style as StyleFingerprintData | null} sourceBookTitle={p.source_book_title} />}
@@ -401,7 +434,7 @@ function StructureSection({ data }: { data: StructureStatsData | null }) {
 // Tab 2：剧情单元（剧情单元库聚合 + 单元列表）
 // ============================================================
 
-function ArcsTab({ taskId, units }: { taskId: string; units: UnitsData | null }) {
+function ArcsTab({ taskId, units, refreshKey }: { taskId: string; units: UnitsData | null; refreshKey?: string }) {
   const [arcs, setArcs] = useState<BookDissectStoryArc[] | null>(null)
   const [loading, setLoading] = useState(true)
 
@@ -415,7 +448,7 @@ function ArcsTab({ taskId, units }: { taskId: string; units: UnitsData | null })
       })
       .catch(() => {
         if (!cancelled) {
-          setArcs([])
+          setArcs((prev) => prev ?? [])
           toast.error('加载剧情单元失败')
         }
       })
@@ -425,7 +458,7 @@ function ArcsTab({ taskId, units }: { taskId: string; units: UnitsData | null })
     return () => {
       cancelled = true
     }
-  }, [taskId])
+  }, [taskId, refreshKey])
 
   return (
     <div className="space-y-4">
@@ -433,7 +466,7 @@ function ArcsTab({ taskId, units }: { taskId: string; units: UnitsData | null })
       {loading && !arcs ? (
         <CenterLoader text="加载剧情单元…" />
       ) : !arcs || arcs.length === 0 ? (
-        <NoDataHint label="剧情单元" hint="剧情单元在拆书卡全部抽完后划分；抽取进行中请稍后再看" />
+        <NoDataHint label="剧情单元" hint="剧情单元在拆书卡全部抽完后划分，划好后这里会自动出现" />
       ) : (
         <ArcList arcs={arcs} />
       )}
@@ -558,14 +591,32 @@ function ArcDetail({ arc }: { arc: BookDissectStoryArc }) {
 // Tab 3：逐章拆书表
 // ============================================================
 
-function CardsTab({ taskId }: { taskId: string }) {
+type CardStatusFilter = 'all' | 'failed' | 'truncated'
+
+function CardsTab({
+  taskId,
+  refreshKey,
+  focusFailedNonce = 0,
+  onRetryFailed,
+}: {
+  taskId: string
+  refreshKey?: string
+  focusFailedNonce?: number
+  onRetryFailed?: () => void
+}) {
   const [rows, setRows] = useState<BookDissectChapterCardListItem[] | null>(null)
   const [loading, setLoading] = useState(true)
   const [selected, setSelected] = useState<number | null>(null)
   const [detail, setDetail] = useState<BookDissectChapterCard | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [tagFilter, setTagFilter] = useState<string | null>(null)
+  const [statusFilter, setStatusFilter] = useState<CardStatusFilter>(focusFailedNonce > 0 ? 'failed' : 'all')
 
+  useEffect(() => {
+    if (focusFailedNonce > 0) setStatusFilter('failed')
+  }, [focusFailedNonce])
+
+  // 抽取进行中每完成一批 refreshKey 就变：重新拉列表（保留旧数据，不闪加载态）
   useEffect(() => {
     let cancelled = false
     setLoading(true)
@@ -576,7 +627,7 @@ function CardsTab({ taskId }: { taskId: string }) {
       })
       .catch(() => {
         if (!cancelled) {
-          setRows([])
+          setRows((prev) => prev ?? [])
           toast.error('加载拆书卡失败')
         }
       })
@@ -586,7 +637,7 @@ function CardsTab({ taskId }: { taskId: string }) {
     return () => {
       cancelled = true
     }
-  }, [taskId])
+  }, [taskId, refreshKey])
 
   useEffect(() => {
     if (selected == null) {
@@ -609,7 +660,7 @@ function CardsTab({ taskId }: { taskId: string }) {
     return () => {
       cancelled = true
     }
-  }, [taskId, selected])
+  }, [taskId, selected, refreshKey])
 
   const tagCounts = useMemo(() => {
     const counts = new Map<string, number>()
@@ -617,35 +668,70 @@ function CardsTab({ taskId }: { taskId: string }) {
     return [...counts.entries()].sort((a, b) => b[1] - a[1])
   }, [rows])
 
-  const visible = useMemo(() => (tagFilter ? (rows ?? []).filter((r) => r.function_tags.includes(tagFilter)) : rows ?? []), [rows, tagFilter])
+  const failed = useMemo(() => (rows ?? []).filter((r) => r.extraction_status !== 'success').length, [rows])
+  const truncated = useMemo(() => (rows ?? []).filter((r) => r.truncated_input).length, [rows])
+  // 补抽成功后失败的章没了：筛选自动回到「全部」，不留一张空表
+  const activeFilter: CardStatusFilter =
+    (statusFilter === 'failed' && failed === 0) || (statusFilter === 'truncated' && truncated === 0) ? 'all' : statusFilter
+
+  const visible = useMemo(() => {
+    let list = rows ?? []
+    if (activeFilter === 'failed') list = list.filter((r) => r.extraction_status !== 'success')
+    if (activeFilter === 'truncated') list = list.filter((r) => r.truncated_input)
+    return tagFilter ? list.filter((r) => r.function_tags.includes(tagFilter)) : list
+  }, [rows, activeFilter, tagFilter])
 
   if (loading && !rows) return <CenterLoader text="加载拆书卡…" />
-  if (!rows || rows.length === 0) return <NoDataHint label="拆书卡" hint="启动抽取后，每批章节完成即可在此看到拆书卡" />
+  if (!rows || rows.length === 0) return <NoDataHint label="拆书卡" hint="开始抽取后，每完成一批这里会自动刷新" />
 
-  const failed = rows.filter((r) => r.extraction_status !== 'success').length
+  const statusChips: Array<[CardStatusFilter, string, number]> = [
+    ['all', '全部', rows.length],
+    ['failed', '失败', failed],
+    ['truncated', '输入被截断', truncated],
+  ]
 
   return (
     <div className="grid gap-4 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
       <div className="min-w-0 space-y-3">
         <div className="flex flex-wrap items-center gap-1.5 text-xs">
-          <span className="text-content-secondary">
-            共 {rows.length} 章{failed > 0 && <span className="ml-1 text-rose-500">（{failed} 章抽取失败）</span>}
-          </span>
-          {tagCounts.length > 0 && <span className="mx-1 text-content-tertiary">|</span>}
-          <button type="button" onClick={() => setTagFilter(null)} className={`hh-chip !py-0.5 ${tagFilter == null ? 'hh-chip--active' : ''}`}>
-            全部
-          </button>
-          {tagCounts.slice(0, 10).map(([tag, n]) => (
-            <button
-              key={tag}
-              type="button"
-              onClick={() => setTagFilter(tagFilter === tag ? null : tag)}
-              className={`hh-chip !py-0.5 ${tagFilter === tag ? 'hh-chip--active' : ''}`}
-            >
-              {tag} <span className="opacity-70">{n}</span>
+          {statusChips
+            .filter(([key, , n]) => key === 'all' || n > 0)
+            .map(([key, label, n]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setStatusFilter(key)}
+                className={`hh-chip !py-0.5 ${activeFilter === key ? 'hh-chip--active' : ''} ${key === 'failed' && activeFilter !== key ? '!text-rose-700' : ''}`}
+                title={key === 'truncated' ? '单章超长，只送了章首和章末给模型' : undefined}
+              >
+                {label} <span className="opacity-70">{n}</span>
+              </button>
+            ))}
+          {failed > 0 && onRetryFailed && (
+            <button type="button" onClick={onRetryFailed} className="hh-chip !py-0.5 !border-rose-200 !text-rose-700 hover:!bg-rose-50">
+              <RotateCcw className="h-3 w-3" />
+              重试失败章节
             </button>
-          ))}
+          )}
         </div>
+        {tagCounts.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5 text-xs">
+            <span className="text-content-tertiary">功能：</span>
+            <button type="button" onClick={() => setTagFilter(null)} className={`hh-chip !py-0.5 ${tagFilter == null ? 'hh-chip--active' : ''}`}>
+              不限
+            </button>
+            {tagCounts.slice(0, 10).map(([tag, n]) => (
+              <button
+                key={tag}
+                type="button"
+                onClick={() => setTagFilter(tagFilter === tag ? null : tag)}
+                className={`hh-chip !py-0.5 ${tagFilter === tag ? 'hh-chip--active' : ''}`}
+              >
+                {tag} <span className="opacity-70">{n}</span>
+              </button>
+            ))}
+          </div>
+        )}
         <div className="max-h-[640px] overflow-auto rounded-lg border border-surface-border-light">
           <table className="w-full text-xs">
             <thead className="sticky top-0 bg-surface text-left text-content-tertiary">
@@ -663,6 +749,13 @@ function CardsTab({ taskId }: { taskId: string }) {
               {visible.map((r) => (
                 <ChapterCardRow key={r.chapter_number} row={r} active={selected === r.chapter_number} onClick={() => setSelected(r.chapter_number)} />
               ))}
+              {visible.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="px-2 py-6 text-center text-content-tertiary">
+                    {activeFilter === 'failed' ? '没有失败的章' : '没有符合筛选的章'}
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
@@ -684,15 +777,34 @@ function CardsTab({ taskId }: { taskId: string }) {
 
 function ChapterCardRow({ row, active, onClick }: { row: BookDissectChapterCardListItem; active: boolean; onClick: () => void }) {
   const failed = row.extraction_status !== 'success'
+  if (failed) {
+    return (
+      <tr
+        onClick={onClick}
+        className={`cursor-pointer border-t border-surface-border-light transition-colors ${active ? 'bg-rose-50' : 'hover:bg-rose-50/60'}`}
+      >
+        <td className="px-2 py-1.5 tabular-nums text-content-secondary">{row.chapter_number}</td>
+        <td className="max-w-[180px] truncate px-2 py-1.5 text-content" title={row.title}>
+          {row.title || '—'}
+        </td>
+        <td colSpan={5} className="px-2 py-1.5">
+          <span className="mr-1.5 rounded bg-rose-50 px-1.5 py-0.5 text-[11px] font-medium text-rose-700">失败</span>
+          <span className="text-rose-700/80" title={row.extraction_error ?? undefined}>
+            {(row.extraction_error ?? '未知原因').slice(0, 60)}
+          </span>
+        </td>
+      </tr>
+    )
+  }
   return (
     <tr
       onClick={onClick}
-      className={`cursor-pointer border-t border-surface-border-light transition-colors ${active ? 'bg-brand/10' : 'hover:bg-brand/5'} ${failed ? 'opacity-60' : ''}`}
+      className={`cursor-pointer border-t border-surface-border-light transition-colors ${active ? 'bg-brand/10' : 'hover:bg-brand/5'}`}
     >
       <td className="px-2 py-1.5 tabular-nums text-content-secondary">{row.chapter_number}</td>
       <td className="max-w-[180px] truncate px-2 py-1.5 text-content" title={row.title}>
         {row.title || '—'}
-        {failed && <span className="ml-1 text-rose-500">失败</span>}
+        {row.truncated_input && <span className="ml-1 text-[11px] text-amber-700" title="单章超长，只送了章首和章末">截</span>}
       </td>
       <td className="px-2 py-1.5">
         <div className="flex flex-wrap gap-1">
@@ -733,7 +845,10 @@ export function ChapterCardDetail({ card }: { card: BookDissectChapterCard }) {
         第 {card.chapter_number} 章 {card.title}
       </CardTitle>
       {card.extraction_status !== 'success' && (
-        <p className="mb-2 rounded bg-rose-500/10 px-2 py-1 text-xs text-rose-700">抽取失败：{card.extraction_error || '未知原因'}</p>
+        <p className="mb-2 rounded bg-rose-50 px-2 py-1 text-xs leading-5 text-rose-700">
+          抽取失败：{card.extraction_error || '未知原因'}
+          <span className="block text-rose-700/70">点「继续抽取」或「重试失败章节」只会补抽失败和没抽过的章，已成功的不会重抽。</span>
+        </p>
       )}
       <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
         <TagList items={card.function_tags} />

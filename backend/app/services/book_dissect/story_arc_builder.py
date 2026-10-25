@@ -4,6 +4,7 @@
   大模型一轮几十张；未闭合的尾部自然留在下一窗口开头）；单元 ≤ max_arc_len 章
 - 连续性按「窗口内位置」判定（采样模式章号不连续也能用）：必须从窗口首卡开始、首尾相接
 - 失败（LLM 异常 / 输出截断 / 未接受任何单元）：
+  - 断流 / 超时 / 5xx / 限流先原样重试（failure_policy.call_with_retry）；鉴权 / 余额 / 模型不存在直接中止整个任务
   - 大窗口（> max_arc_len）：多半是输出过长被截断或 JSON 坏掉，窗口减半重试（下限 max_arc_len），不硬凑兜底
   - 小窗口、非最终：模型说尚未闭合 → 扩窗继续（最多扩到 max_arc_len）
   - 小窗口已到 max_arc_len 或最终窗口：规则兜底切一段
@@ -15,6 +16,7 @@ import json
 import logging
 from typing import Any, Callable, Optional, Sequence
 
+from app.services.book_dissect.failure_policy import ExtractionAborted, call_with_retry
 from app.services.book_dissect.prompts_v5 import ARC_PROMPT, SYSTEM_ARC
 from app.services.book_dissect.v5_types import NO_PAYOFF, ChapterCard, StoryArc, normalize_chapter_roles
 from app.utils.json_cleaner import safe_parse_json
@@ -72,13 +74,19 @@ class StoryArcBuilder:
             max_len=self.max_arc_len, is_final="是" if is_final else "否",
             cards_json=json.dumps([self._compact(c) for c in window], ensure_ascii=False),
         )
+        span = f"窗口 {window[0].chapter_number}-{window[-1].chapter_number}"
         try:
-            resp = await self.ai_service.generate_text_stream_collect(
-                prompt=prompt, system_prompt=SYSTEM_ARC, temperature=self.DEFAULT_TEMPERATURE,
-                context="拆书-剧情单元",
+            resp = await call_with_retry(
+                lambda: self.ai_service.generate_text_stream_collect(
+                    prompt=prompt, system_prompt=SYSTEM_ARC, temperature=self.DEFAULT_TEMPERATURE,
+                    context="拆书-剧情单元",
+                ),
+                label=f"{_LOG} {span}",
             )
+        except ExtractionAborted:
+            raise
         except Exception as exc:
-            logger.warning("%s 窗口 %d-%d LLM 失败: %s", _LOG, window[0].chapter_number, window[-1].chapter_number, exc)
+            logger.warning("%s %s LLM 失败: %s", _LOG, span, exc)
             return None
         content = (resp or {}).get("content") if isinstance(resp, dict) else None
         if isinstance(resp, dict) and resp.get("finish_reason") == "length":

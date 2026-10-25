@@ -170,7 +170,8 @@ class UserManager:
     ) -> User:
         """Linux.do 授权登录：不存在则创建普通用户，存在则同步资料。
 
-        被管理员禁用（trust_level == -1）的用户保持 -1，不能被远端 trust_level 覆盖回启用状态。
+        禁用状态独立存 user_account_status 表，trust_level 照实同步远端信任等级即可
+        （被禁用的用户由 linuxdo_callback 的 is_disabled 判定挡在登录外）。
         """
         from app.models.user import User as UserModel
 
@@ -185,8 +186,7 @@ class UserManager:
                 user.username = username
                 user.display_name = display_name
                 user.avatar_url = avatar_url
-                if user.trust_level != -1:
-                    user.trust_level = trust_level
+                user.trust_level = trust_level
                 user.last_login = datetime.now()
             else:
                 user = UserModel(

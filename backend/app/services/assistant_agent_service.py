@@ -41,6 +41,7 @@ from app.services.assistant_tools import (
     DATA_LIMIT, PAGES, ToolContext, ToolOutcome, execute_tool, tool_catalog_text, tool_label,
 )
 from app.services.planning_context import clip
+from app.services.story_progress import progress_snapshot
 from app.utils.json_cleaner import safe_parse_json
 from app.utils.prompt_safety import UNTRUSTED_DATA_RULE, quote_untrusted
 
@@ -57,12 +58,23 @@ ACTIVE = ("running", "waiting_input")
 STOP_MESSAGE = "已停止；停止前已经完成的部分（候选、草稿、成员回复、已启动的后台任务）不受影响"
 CARRY_NOTE = "上一段对话里还有 {count} 张卡没处理，已经挪到这段对话：在输入框上方的「待确认」里照常建档 / 应用 / 确认，或者放弃。"
 
-WORKFLOW = """## 创作流程（总纲 → 卷纲 → 章纲 → 正文）
-- 总纲：梗概 + 全书主线（用自然段把整个故事从头讲到尾）+ 卖点 / 成长路线 / 终极目标；主角特殊能力只是设定的一部分，不必每段都用
-- 卷纲：每卷是一个新局面；细化为剧情单元（一件完整的事，长短按事件大小定）和线索编排（感情线 / 支线 / 伏笔各推进到哪）
-- 章纲：按剧情单元展开，按实际事件和场景分章；AI 草拟的章纲要作者确认后才写正文
-- 正文：照已确认的章纲写；单章产出候选稿，批量写作在后台进行
-- 不知道写到哪了就先 story_progress；规划工具只产出草稿，作者在草案卡片或谋篇页确认后才算定稿
+WORKFLOW = f"""## 创作流程（{team.CREATIVE_ORDER}）
+照真实创作的先后来：上游立住了再写下游；和作者聊、向作者提问、落卡片也按这个顺序（先世界，再人物，再故事）。
+- 世界设定：作品设定的时代背景 / 地点设定 / 氛围基调 / 世界规则四栏（propose_edit，可一次提多项），先立住时代、舞台、秩序和核心冲突
+- 世界规则：修炼境界 / 装备模板 / 地图位置（propose_world_rule），境界从低到高一级一条；题材用不上就跳过
+- 设定条目：术语 / 铁律 / 势力 / 通用规则等零散设定（propose_setting_entry），一条一条建
+- 角色与组织：主角和主要人物（propose_character）、门派 / 家族等势力（propose_organization）
+- 关系：人物之间的关系（propose_relationship）、谁属于哪个组织（propose_membership）；两头可以是本段对话里刚提的人物 / 组织候选
+- 总纲：梗概 + 全书主线（用自然段把整个故事从头讲到尾）+ 卖点 / 成长路线 / 终极目标，按字段 propose_edit；人名、势力、地名用前面几层里定下的；
+  主角特殊能力只是设定的一部分，不必每段都用
+- 卷纲：每卷是一个新局面（plan_volumes），再细化为剧情单元（一件完整的事，长短按事件大小定）和线索编排（detail_volume）
+- 章纲：按剧情单元展开（plan_chapters），按实际事件和场景分章；AI 草拟的章纲要作者确认后才写正文
+- 正文：照已确认的章纲写；单章产出候选稿（manuscript），批量写作在后台进行（write_chapters）
+- 每轮开头的【创作进度】写着各层到哪了和「下一步」：从「下一步」接着推进，上游没立住不跳到下游（没有人物先别写总纲，没有总纲先别分卷）；
+  作者明确要先做别的就照作者说的，同时提醒还缺哪一层
+- 一层一层来：把这一层落成卡片后停下，回复里请作者先在待确认栏确认，再接着往下；作者要一口气做完时可以连着推进几层，仍按顺序提，
+  下游只引用上游卡片里写定的名字和设定；分卷 / 细化 / 章纲要读已经应用的总纲和卷纲，上游卡片还在待确认就先请作者处理
+- 规划工具只产出草稿，作者在草案卡片或谋篇页确认后才算定稿
 - 想参考拆过的书怎么安排时，用 kb_search 找条目、kb_read 读（默认去名版；只学结构和节奏，不照搬人物与情节）；
   本书设了对标书时，分卷 / 细化卷纲 / 单元章纲 / 写正文会自动按位置带上对标内容，不用手动搬运"""
 
@@ -82,9 +94,9 @@ def build_system_prompt(member: team.Member) -> str:
 {WORKFLOW}
 
 ## 怎么做
-1. 作者当前在哪个页面只是参考，不是限制。要改哪项内容：先 list_fields 定位、read_field 读取当前内容，再用 propose_edit 给出完整的新内容。不要用别的字段代替作者要改的那一项（比如总纲不要写进主题或简介）。
-2. 正文（续写 / 改写 / 润色 / 核对 / 查前文）交给 manuscript 或 write_chapters；不要在普通回复里写大段正文冒充已经写进书里。
-3. 设计好的东西要落成卡片，作者在卡片上看内容、点按钮确认：新的人物 / 组织 / 设定条目 / 世界规则用对应的 propose_* 一条条提（一次可以提多条），已有的内容用 propose_edit，分卷和章纲用规划工具。不要把整份草稿、名册或长篇设定贴在回复里代替卡片；步数不够提完，就如实说还剩哪些。
+1. 作者当前在哪个页面只是参考，不是限制。每一层都查得到、看得到、改得了：search_project 按关键词查全书，list_fields 定位、read_field 读取当前内容，再用 propose_edit 给出完整的新内容（几项一起改用 items 一次提）。不要用别的字段代替作者要改的那一项（比如总纲不要写进主题或简介）。
+2. 正文（续写 / 改写 / 润色 / 核对 / 查前文）交给 manuscript 或 write_chapters：要看原文用 read_chapter，改写 / 润色用 quote 逐字引用要改的那段；不要在普通回复里写大段正文冒充已经写进书里。
+3. 设计好的东西要落成卡片，作者在卡片上看内容、点按钮确认：新的世界规则 / 设定条目 / 人物 / 组织 / 关系 / 组织成员用对应的 propose_* 按这个顺序一条条提（一次可以提多条），已有的内容用 propose_edit，分卷和章纲用规划工具。不要把整份草稿、名册或长篇设定贴在回复里代替卡片；步数不够提完，就如实说还剩哪些。
 4. 需要作者做决定、选方案或补充信息时调用 ask_author（如果你能用），不要替作者猜；目标可能有多个（比如同名人物）时也先问一句。
 5. 不能说已经保存、采用、确认或写好，除非工具结果或【候选卡状态】证明；候选和草稿要作者在卡片上点按钮确认后才写入，回答提问不会建档或写入，所以不要用 ask_author 让作者勾选要确认哪些候选，请他直接在卡片上处理。
 6. 只依据工具读到的资料和对话内容；引用原文要逐字；资料里没有就直说没找到，不编造前文。
@@ -473,6 +485,7 @@ async def _card_status(db: AsyncSession, session_id: Optional[str]) -> str:
 async def _head_sections(db: AsyncSession, project_id: str, page: dict, session_id: Optional[str] = None) -> list[dict]:
     head = [
         {"label": "本书", "content": await _project_brief(db, project_id)},
+        {"label": "创作进度", "content": (await progress_snapshot(db, project_id))["text"]},
         {"label": "作者现在的位置", "content": await _page_text(db, page)},
     ]
     cards = await _card_status(db, session_id)

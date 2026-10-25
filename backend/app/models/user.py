@@ -47,7 +47,7 @@ class UserPassword(Base):
     
     user_id = Column(String(100), primary_key=True, index=True, comment="用户ID")
     username = Column(String(100), nullable=False, comment="用户名")
-    password_hash = Column(String(64), nullable=False, comment="密码哈希（SHA256）")
+    password_hash = Column(String(255), nullable=False, comment="密码哈希（scrypt 加盐；旧库可能是无盐 SHA256，登录验证时就地升级）")
     has_custom_password = Column(Boolean, default=False, comment="是否为自定义密码")
     created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间")

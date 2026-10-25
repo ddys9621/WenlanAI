@@ -237,8 +237,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
 
   useEffect(() => {
     void assistantApi.team(projectId).then(setTeam).catch(() => setTeam(null));
-    void loadProgress();
-  }, [loadProgress, projectId]);
+  }, [projectId]);
 
   useEffect(() => { sessionStorage.setItem(`assistant-draft:${projectId}`, draft); }, [draft, projectId]);
 
@@ -349,10 +348,9 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
       setLive(null);
       setCompacting(false);
       flushPending();
-      void loadProgress();
       scrollToEnd();
     }
-  }, [flushPending, handleEvent, loadProgress, reload, scrollToEnd]);
+  }, [flushPending, handleEvent, reload, scrollToEnd]);
 
   useEffect(() => {
     let cancelled = false;
@@ -407,7 +405,6 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
       setLive(null);
       setCompacting(false);
       flushPending();
-      void loadProgress();
       scrollToEnd();
     }
   };
@@ -538,6 +535,13 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
     ...messages.map(attachmentsOf),
     ...(live ? [live.cards, ...live.delegations.map((d) => d.cards)] : []),
   ], lookups);
+
+  // 创作进度（输入框上方的「下一步」）：一轮跑完、作者在卡片 / 待确认栏处理了改动（待确认的数目变了）、重新打开抽屉时重读——
+  // 建了档、应用了修改，下一步就该往下走了（以前只在一轮结束时读，作者处理完卡片后看到的还是旧的下一步）
+  const pendingCount = pending.length;
+  useEffect(() => {
+    if (visible && !busy) void loadProgress();
+  }, [busy, loadProgress, pendingCount, visible]);
 
   /** 改动的明细：点开一行看到的完整卡片（按钮和待确认栏里的是同一套操作；待确认栏里按钮在行上，卡片只给看） */
   const renderDetail: RenderDetail = (item, { showActions }) => {
