@@ -2,7 +2,8 @@
 
 - 技能固定：continue 续写 / rewrite 改写 / polish 润色 / review 核对 / query 提问
 - 判定：显式选择优先；问句优先于顺带出现的改写类动词；普通讨论落到只读的 query
-- 工具全是只读投影（不接受前端传路径 / 任意工具）：本章正文、章纲契约、前文证据（只取本章之前的章节）、一致性问题
+- 工具全是只读投影（不接受前端传路径 / 任意工具）：本章正文、章纲契约、前文证据（只取本章之前的章节）、一致性问题、
+  出场人物与世界观要点（续写 / 改写 / 润色时带上，人物和设定别走样）
 - 修改类结果只是候选稿：改写 / 润色 = 替换选区（replace_range），续写 = 接在末尾（append）；采用走候选稿接口
 - 提问 / 核对只回答，不产生候选稿、不动正文
 """
@@ -17,11 +18,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.chapter import Chapter
 from app.models.chapter_consistency_issue import ChapterConsistencyIssue
 from app.models.chapter_outline import ChapterOutline
+from app.models.character import Character
+from app.models.project import Project
 from app.services.chapter_candidate_service import candidate_summary, create_candidate
 from app.services.chapter_context_service import parse_json_list
 from app.services.chapter_version_service import content_hash
 from app.services.narrative_tasks import render_narrative_tasks
 from app.services.outline_contract import forbidden_items
+from app.services.planning_context import clip
 from app.utils.prompt_safety import UNTRUSTED_DATA_RULE, quote_untrusted
 
 SKILL_LABELS = {"continue": "续写", "rewrite": "改写", "polish": "润色", "review": "核对", "query": "提问"}
@@ -49,6 +53,8 @@ EVIDENCE_EXCERPT = 60
 CURRENT_CONTEXT_CHARS = 6000
 CONTINUE_TAIL_CHARS = 1800
 REWRITE_MARGIN_CHARS = 300
+CAST_LIMIT = 8
+WORLD_LIMIT = 600
 
 ASSISTANT_SYSTEM = (
     "你是这本小说作者的写作助手，只围绕当前这一章工作。只依据给出的资料作答：引用正文必须逐字复制；"
@@ -143,6 +149,25 @@ def _clip_around(content: str, start: int, end: int, limit: int) -> str:
     return ("…" if lo > 0 else "") + content[lo:hi] + ("…" if hi < len(content) else "")
 
 
+def cast_text(cast: list) -> str:
+    """本章出场人物（章纲里的涉及角色）：性格 + 说话方式，续写 / 改写时人物别走样。"""
+    lines = []
+    for c in cast[:CAST_LIMIT]:
+        brief = "｜".join(p for p in (clip(c.personality, 60), f"说话：{clip(c.speech_style, 40)}" if c.speech_style else "") if p)
+        lines.append(f"- {c.name}：{brief}" if brief else f"- {c.name}")
+    return "\n".join(lines)
+
+
+def world_text(project: Any) -> str:
+    """世界观要点：时代 / 地点 / 规则（截短），续写 / 改写时别违背设定。"""
+    if project is None:
+        return ""
+    parts = (f"时代：{clip(project.world_time_period, 120)}" if project.world_time_period else "",
+             f"地点：{clip(project.world_location, 120)}" if project.world_location else "",
+             f"规则：{clip(project.world_rules, WORLD_LIMIT)}" if project.world_rules else "")
+    return "\n".join(p for p in parts if p)
+
+
 def build_prompt(
     skill: str,
     *,
@@ -152,10 +177,13 @@ def build_prompt(
     selection: Optional[dict] = None,
     evidence: Optional[list[dict]] = None,
     issues: Optional[list[str]] = None,
+    cast: str = "",
+    world: str = "",
 ) -> str:
     content = chapter.content or ""
     header = f"当前是第{chapter.chapter_number}章《{chapter.title}》。\n作者的指令：{message.strip()}"
     contract = f"【本章章纲】\n{contract_text(outline)}"
+    background = [b for b in (f"【出场人物】\n{cast}" if cast else "", f"【世界观要点】\n{world}" if world else "") if b]
     sel_start, sel_end = (selection["start"], selection["end"]) if selection else (0, 0)
 
     if skill == "query":
@@ -192,6 +220,7 @@ def build_prompt(
         return "\n\n".join([
             header,
             contract,
+            *background,
             "选段前文：\n" + quote_untrusted(before, "前文"),
             "要处理的选段：\n" + quote_untrusted(selection["text"], "选段"),
             "选段后文：\n" + quote_untrusted(after, "后文"),
@@ -202,6 +231,7 @@ def build_prompt(
     return "\n\n".join([
         header,
         contract,
+        *background,
         "本章已写正文（结尾部分）：\n" + quote_untrusted(tail, "已写正文"),
         "请紧接着最后一个字往下写 600-1200 字：照章纲推进还没写到的关键事件，写到退出状态就停，不写禁止事项里的事；"
         "不要重复已写内容，只输出新写的正文，不要解释、不要加标题。",
@@ -224,7 +254,7 @@ def selection_matches(content: str, selection: Optional[dict]) -> bool:
 
 
 async def load_tools(db: AsyncSession, chapter: Chapter) -> dict:
-    """只读投影：章纲、本章之前的章节、本章未解决的一致性问题。"""
+    """只读投影：章纲、本章之前的章节、本章未解决的一致性问题、出场人物与世界观要点（文字）。"""
     outline = await db.get(ChapterOutline, chapter.chapter_outline_id) if chapter.chapter_outline_id else None
     prior = list((await db.execute(
         select(Chapter)
@@ -235,7 +265,12 @@ async def load_tools(db: AsyncSession, chapter: Chapter) -> dict:
         select(ChapterConsistencyIssue).where(ChapterConsistencyIssue.chapter_id == chapter.id)
     )).scalars().all()
     issues = [f"[{i.severity}] {i.title}：{i.details or ''}".rstrip("：") for i in issue_rows]
-    return {"outline": outline, "prior": prior, "issues": issues}
+    project = await db.get(Project, chapter.project_id)
+    names = parse_json_list(outline.characters_involved) if outline is not None else []
+    cast = list((await db.execute(select(Character).where(
+        Character.project_id == chapter.project_id, Character.name.in_(names),
+    ))).scalars().all()) if names else []
+    return {"outline": outline, "prior": prior, "issues": issues, "cast": cast_text(cast), "world": world_text(project)}
 
 
 async def execute_skill(
@@ -262,7 +297,7 @@ async def execute_skill(
         notify("consistencyGate", f"一致性问题 {len(tools['issues'])} 条")
 
     prompt = build_prompt(skill, message=message, chapter=chapter, outline=tools["outline"], selection=selection,
-                          evidence=evidence, issues=tools["issues"])
+                          evidence=evidence, issues=tools["issues"], cast=tools["cast"], world=tools["world"])
     full = ""
     async for chunk in ai_service.generate_text_stream(
         prompt=prompt, system_prompt=ASSISTANT_SYSTEM, creative=skill in MODIFYING_SKILLS,

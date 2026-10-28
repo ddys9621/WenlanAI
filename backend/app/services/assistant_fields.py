@@ -97,6 +97,7 @@ WORLD_RULE_LABELS = {"cultivation_realm": "修炼境界", "equipment_template": 
 ROLE_LABELS = {"protagonist": "主角", "supporting": "配角", "antagonist": "反派", "mentor": "导师", "ally": "盟友",
                "extra": "路人"}
 PLATFORM_LABELS = {"qidian": "起点", "fanqie": "番茄", "jinjiang": "晋江", "qimao": "七猫"}
+PERSPECTIVES = ("第一人称", "第三人称", "全知视角")  # 与建项目向导的叙事视角选项一致
 # 与关系页 / 组织页的下拉一致
 RELATIONSHIP_STATUS_LABELS = {"active": "进行中", "broken": "已破裂", "past": "已结束", "complicated": "复杂"}
 MEMBER_STATUS_LABELS = {"active": "在职", "retired": "已退出", "expelled": "被逐出", "deceased": "已故"}
@@ -116,6 +117,10 @@ _SPECS = [
     _spec("project", "title", "书名", max_length=200, required=True),
     _spec("project", "genre", "类型", max_length=50, aliases="题材"),
     _spec("project", "platform_preset", "目标平台", max_length=20, labels=tuple(PLATFORM_LABELS.items()), aliases="平台"),
+    _spec("project", "chapter_count", "全书章数", kind="number", min_value=1, max_value=10000, aliases="章数 章节数 总章数"),
+    _spec("project", "narrative_perspective", "叙事视角", max_length=50, choices=PERSPECTIVES, aliases="视角 人称"),
+    _spec("project", "target_words", "目标字数", kind="number", min_value=1000, max_value=100_000_000,
+          aliases="字数 总字数"),
     _spec("project", "description", "简介", max_length=5000),
     _spec("project", "theme", "主题", max_length=2000),
     _spec("project", "world_time_period", "时代背景", max_length=5000, aliases="时间背景 年代 历史"),

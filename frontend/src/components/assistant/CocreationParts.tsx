@@ -4,11 +4,13 @@
  * 外观是 AI 助手面板（globals.css 的 as-*），配色沿用全站 token。
  */
 import { useEffect, useRef, useState } from 'react';
-import { AtSign, Check, Compass, Loader2, SlidersHorizontal, X } from 'lucide-react';
+import { AtSign, Check, Compass, Hourglass, Loader2, SlidersHorizontal, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { assistantApi } from '@/services/api';
-import type { AssistantContextUsage, AssistantMember, AssistantPlan, AssistantProgress, AssistantTeam } from '@/types/assistant';
+import type {
+  AssistantContextUsage, AssistantDeferred, AssistantMember, AssistantPlan, AssistantProgress, AssistantTeam,
+} from '@/types/assistant';
 import { memberTone, planLink } from '@/utils/cocreation';
 import { confirmPlan, errorDetail } from './changeActions';
 import { formatTokens, parseWindowInput, sourceText, usageTitle, usageTone, windowChoice } from '@/utils/contextUsage';
@@ -268,6 +270,20 @@ export function NextStepHint({ progress, onAsk, disabled }: { progress: Assistan
       {step.action !== 'done' && (
         <button onClick={() => onAsk(step.label)} disabled={disabled} className="as-link">让主编推进</button>
       )}
+    </div>
+  );
+}
+
+/** 挂起的要求：上游卡片还没处理完时说明「处理完会接着做什么」；处理完了（又不是在这里处理的）给一个接着做的按钮 */
+export function DeferredHint({ deferred, onContinue, disabled }: { deferred: AssistantDeferred; onContinue: () => void; disabled?: boolean }) {
+  return (
+    <div className="mb-2 flex items-center gap-2 px-1 text-[12px]">
+      <Hourglass className="h-3.5 w-3.5 flex-none text-gold-500" />
+      <span className="min-w-0 flex-1 truncate text-content-tertiary">
+        {deferred.ready ? '上游卡片处理好了，可以接着：' : `处理完待确认的 ${deferred.pending} 张卡，团队会接着：`}
+        <span className="text-content-secondary">{deferred.label}</span>
+      </span>
+      {deferred.ready && <button onClick={onContinue} disabled={disabled} className="as-link">接着做</button>}
     </div>
   );
 }

@@ -22,6 +22,7 @@ from app.services.ai_jobs import AIJob, Runner
 from app.services.ai_service import AIService
 from app.services.generation_trace import stage_scope
 from app.services.knowledge.kb_context import traced_kb_context
+from app.services.planning_context import story_direction_block
 from app.services.prompt_service import prompt_service
 from app.services.relationship_matcher import match_relationship_type
 from app.services.world_setting_context import build_world_context, world_query
@@ -115,6 +116,9 @@ async def generate_character_for_project(
 
 {world.detail}
 """)
+        story = await story_direction_block(db, project.id)
+        if story:
+            project_context_parts.append(f"\n{story}\n")
         user_input = f"""
 用户要求：
 - 角色名称：{request.name or '请AI生成'}

@@ -41,7 +41,7 @@ export function AuthorQuestionCard({ question, busy, onSubmit }: AuthorQuestionC
         <HelpCircle className="mt-0.5 h-4 w-4 flex-none text-brand" />
         <div className="min-w-0">
           <p className="text-[14px] font-semibold text-content">需要你决定</p>
-          <p className="as-meta">推荐项只是建议；提交后团队才会继续</p>
+          <p className="as-meta">{question.note || '推荐项只是建议；提交后团队才会继续'}</p>
         </div>
       </header>
       <div className="space-y-5 px-4 pb-4 pt-3">
@@ -97,7 +97,7 @@ export function AuthorQuestionCard({ question, busy, onSubmit }: AuthorQuestionC
                   value={a.text}
                   onChange={(e) => update(q.id, { text: e.target.value, skipped: false })}
                   rows={q.mode === 'text' ? 3 : 1}
-                  placeholder={q.mode === 'text' ? '写下你的回答' : '补充说明（可选）'}
+                  placeholder={q.mode === 'text' ? '写下你的回答' : q.write ? '都不满意就写你想要的（会用你写的）' : '补充说明（可选）'}
                   className="as-field mt-2 resize-none py-2 text-[13px] leading-5"
                 />
               </div>

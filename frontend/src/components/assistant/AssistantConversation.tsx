@@ -17,9 +17,9 @@ import { assistantApi } from '@/services/api';
 import { AIJobError, runAIJob, useAIJobsStore, waitForAIJob } from '@/store/aiJobsStore';
 import { emitAssistantData, pageContextOf, useAssistantStore, type AssistantDataChange } from '@/store/assistantStore';
 import type {
-  AssistantAnswer, AssistantChapterCandidateRef, AssistantContextUsage, AssistantEntityCandidate, AssistantFieldCandidate,
-  AssistantMember, AssistantMessageView, AssistantPageContext, AssistantPlan, AssistantPreview, AssistantProgress,
-  AssistantRunResult, AssistantSessionView, AssistantTeam,
+  AssistantAnswer, AssistantChapterCandidateRef, AssistantContextUsage, AssistantDeferred, AssistantEntityCandidate,
+  AssistantFieldCandidate, AssistantMember, AssistantMessageView, AssistantPageContext, AssistantPlan, AssistantPreview,
+  AssistantProgress, AssistantRunResult, AssistantSessionView, AssistantTeam,
 } from '@/types/assistant';
 import { appendQuote, appendRequest } from '@/utils/assistantText';
 import {
@@ -32,7 +32,9 @@ import { AuthorQuestionCard } from './AuthorQuestionCard';
 import { confirmPlan, entityAction, errorDetail, fieldAction } from './changeActions';
 import { EntityCandidateCard } from './EntityCandidateCard';
 import { FieldCandidateCard } from './FieldCandidateCard';
-import { ContextMeter, MemberAvatar, MemberPicker, NextStepHint, PlanCard, RichText, TeamSettings } from './CocreationParts';
+import {
+  ContextMeter, DeferredHint, MemberAvatar, MemberPicker, NextStepHint, PlanCard, RichText, TeamSettings,
+} from './CocreationParts';
 
 const MAX_CHARS = 4000;
 const REVIEW_KEY = 'assistant-review-before-send';
@@ -527,6 +529,20 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
   };
 
   const markPlanConfirmed = (plan: AssistantPlan) => setConfirmedPlans((prev) => new Set(prev).add(planKey(plan)));
+  const deferred = view?.deferred ?? null;
+  /** 每条挂起的要求只自动接一次（作者在别处处理的卡，用提示条上的按钮接着做） */
+  const continuedRef = useRef(new Set<string>());
+  const continueDeferred = async (d: AssistantDeferred) => {
+    continuedRef.current.add(d.message_id);
+    await runJob(d.label, (o) => assistantApi.continueStream(projectId, d.message_id, o));
+  };
+  /** 作者在这里处理了卡片：有挂起的要求就读回对话，等的卡都处理完了就自动接着做 */
+  const afterDecision = async () => {
+    if (!view?.deferred || busy) return;
+    const next = await reload();
+    const d = next?.deferred;
+    if (d?.ready && !continuedRef.current.has(d.message_id)) await continueDeferred(d);
+  };
   const lookups = useMemo(
     () => ({ fields: candidatesById, entities: entityCandidatesById, confirmedPlans }),
     [candidatesById, entityCandidatesById, confirmedPlans],
@@ -549,21 +565,24 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
     if (ref.kind === 'field') {
       return (
         <FieldCandidateCard
-          projectId={projectId} candidate={ref.candidate} onChange={updateCandidate} onOpenPage={(p) => onNavigate(p)} showActions={showActions}
+          projectId={projectId} candidate={ref.candidate} onChange={(next) => { updateCandidate(next); void afterDecision(); }}
+          onOpenPage={(p) => onNavigate(p)} showActions={showActions}
         />
       );
     }
     if (ref.kind === 'entity') {
       return (
         <EntityCandidateCard
-          projectId={projectId} candidate={ref.candidate} onChange={updateEntityCandidate} onOpenPage={(p) => onNavigate(p)} showActions={showActions}
+          projectId={projectId} candidate={ref.candidate} onChange={(next) => { updateEntityCandidate(next); void afterDecision(); }}
+          onOpenPage={(p) => onNavigate(p)} showActions={showActions}
         />
       );
     }
     if (ref.kind === 'plan') {
       return (
         <PlanCard
-          plan={ref.plan} confirmed={confirmedPlans.has(item.key)} onConfirmed={markPlanConfirmed} onFailed={() => void reload()}
+          plan={ref.plan} confirmed={confirmedPlans.has(item.key)}
+          onConfirmed={(p) => { markPlanConfirmed(p); void afterDecision(); }} onFailed={() => void reload()}
           onNavigate={(p) => onNavigate(p)} showActions={showActions}
         />
       );
@@ -596,6 +615,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
       } else if (ref.kind === 'chapter') {
         openChapterCandidate(ref.item);
       }
+      if (!quiet) void afterDecision();
       return true;
     } catch (err) {
       toast.error(`「${item.title}」没处理成：${errorDetail(err)}`);
@@ -606,6 +626,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
   const flushBatchChanges = () => {
     batchChangesRef.current.forEach((entity) => emitAssistantData({ entity }));
     batchChangesRef.current.clear();
+    void afterDecision();
   };
 
   /** 回复正文；成员几千字的长回复先折起来 */
@@ -655,6 +676,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
   );
 
   const renderMessage = (m: AssistantMessageView): ReactNode => {
+    if (m.role === 'user' && m.auto) return <p key={m.id} className="as-meta text-center">{m.content}</p>;
     if (m.role === 'user') {
       // 操作按钮浮在下方的间隔里（悬停才出现），不占行高
       return (
@@ -820,7 +842,8 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
           onDecide={decide}
           onBatchEnd={flushBatchChanges}
         />
-        {progress && !busy && !pending.length && <NextStepHint progress={progress} onAsk={askEditor} disabled={busy} />}
+        {deferred && !busy && <DeferredHint deferred={deferred} onContinue={() => void continueDeferred(deferred)} disabled={busy} />}
+        {progress && !busy && !pending.length && !deferred && <NextStepHint progress={progress} onAsk={askEditor} disabled={busy} />}
         {notice && <p className="as-meta mb-2 px-1">{notice}</p>}
         {busy && <p className="mb-2 px-1 text-[12px] text-brand">正在处理本轮要求…可以先写下一条，处理完再发。</p>}
         {waitingRun && !busy && <p className="mb-2 px-1 text-[12px] text-gold-500">团队在等你回答上面的问题；直接发新要求会结束那轮提问。</p>}

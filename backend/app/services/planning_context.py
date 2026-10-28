@@ -111,3 +111,14 @@ def pov_line(narrative_perspective: str | None) -> str:
     if "第一" in perspective:
         return "叙事视角：第一人称（“我”= 主角；章纲 pov 字段固定填主角名，章纲用第三人称记录）"
     return f"叙事视角：{perspective}"
+
+
+async def story_direction_block(db: AsyncSession, project_id: str) -> str:
+    """【🧭 故事走向】已有总纲 / 卷纲时给角色 / 组织生成带上（后补的人物要放得进这个故事）；都没有返回空串。"""
+    from app.services.volume_service import list_volumes, story_fields  # 延迟导入：卷纲服务依赖本模块
+
+    fields = await story_fields(db, project_id)
+    lines = story_core_lines(fields)[1:] if fields.get("premise") or fields.get("main_plot") else []
+    lines += [f"- 第{v.volume_number}卷《{v.title}》第 {v.chapter_start}-{v.chapter_end} 章：{clip(v.summary, 120)}"
+              for v in (await list_volumes(db, project_id))[:8]]
+    return ("【🧭 故事走向（总纲 / 卷纲要点：新角色要放得进这个故事）】\n" + "\n".join(lines)) if lines else ""

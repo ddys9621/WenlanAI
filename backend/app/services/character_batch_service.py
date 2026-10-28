@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from types import SimpleNamespace
+from typing import Any, Callable, Iterable, Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +28,7 @@ from app.services.ai_service import AIService
 from app.services.character_generation_service import MCP_REFERENCE_MAX_CHARS, collect_search_reference
 from app.services.generation_trace import stage_scope
 from app.services.knowledge.kb_context import traced_kb_context
+from app.services.planning_context import story_direction_block
 from app.services.prompt_service import prompt_service
 from app.services.relationship_matcher import match_relationship_type
 from app.services.world_setting_context import build_world_context, world_query
@@ -113,10 +115,12 @@ async def _world_rules_summary(db: AsyncSession, project: Project) -> str:
     return world.detail
 
 
-def _extra_blocks(world_rules: str, reference: str, kb_text: str) -> str:
+def _extra_blocks(world_rules: str, reference: str, kb_text: str, story: str = "") -> str:
     blocks = []
     if world_rules:
         blocks.append(f"【详细世界规则】\n以下是本作品的详细世界规则设定，新角色与组织要符合这些规则：\n\n{world_rules}")
+    if story:
+        blocks.append(story)
     if reference:
         used = reference if len(reference) <= MCP_REFERENCE_MAX_CHARS else reference[:MCP_REFERENCE_MAX_CHARS] + "\n...(内容过长已截断)"
         blocks.append(f"【参考资料】\n以下是通过MCP工具收集的相关参考资料，可以作为灵感来源：\n\n{quote_untrusted(used, 'MCP 检索结果')}")
@@ -316,6 +320,78 @@ def _summary(created: list[Character], skipped: list[str], relationships: int, m
     }
 
 
+@dataclass
+class CastDraft:
+    """共创室用的批量生成结果：只出卡、不落库。entities 按批次排（每批组织在前），名字已和本书、前面批次、待确认的同名候选去重。"""
+    entities: list[dict] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+    refs: list[str] = field(default_factory=list)
+    error: str = ""
+
+
+def _draft_member(data: dict) -> Any:
+    """草稿实体当成「已有角色」放进后面批次的清单（_cast_block 只读这几个属性）。"""
+    is_org = _is_org(data)
+    return SimpleNamespace(
+        name=_text(data.get("name"))[:100], is_organization=is_org,
+        role_type="supporting" if is_org else normalize_role_type(_text(data.get("role_type")), "supporting"),
+        organization_type=_text(data.get("organization_type")) or None,
+        organization_purpose=_text(data.get("organization_purpose")) or None,
+        personality=_text(data.get("personality")), background=_text(data.get("background")),
+    )
+
+
+def _cast_refs(project: Project, cast: list[Character], world_rules: str, kb: Any, story: str = "") -> list[str]:
+    world = sum(1 for key in ("world_time_period", "world_location", "world_atmosphere", "world_rules")
+                if (getattr(project, key, None) or "").strip())
+    orgs = sum(1 for c in cast if c.is_organization)
+    return [r for r in (
+        "作品信息（书名、主题、类型）", f"世界设定 {world} 栏" if world else "",
+        "世界规则与设定条目检索" if world_rules else "", "总纲与卷纲要点" if story else "",
+        f"已有人物 {len(cast) - orgs} 个、组织 {orgs} 个" if cast else "",
+        f"对标书《{kb.source_title}》人物功能谱" if kb.text else "",
+    ) if r]
+
+
+async def draft_cast(
+    db: AsyncSession, *, ai_service: AIService, project: Project, request: CharacterBatchGenerateRequest,
+    taken: Iterable[str] = (), on_progress: Optional[ProgressFn] = None,
+) -> CastDraft:
+    """和 generate_cast_for_project 同一套上下文、提示词与分批（先组织后人物，每批最多 BATCH_SIZE 个），但不落库：
+    生成的实体留作草稿给共创室出新建卡，后面批次照样看得到前面批次的新名字。taken：本段对话里还在待确认的同名候选也算重名。
+    某批失败：前面批次已有草稿就带着 error 返回，一个都没有就抛 ValueError。"""
+    report = on_progress or (lambda message, pct: None)
+    cast = await _load_cast(db, project.id)
+    world_rules = await _world_rules_summary(db, project)
+    story = await story_direction_block(db, project.id)
+    kb = await traced_kb_context(db, project.id, "characters")
+    extras = _extra_blocks(world_rules, "", kb.text, story)
+    draft = CastDraft(refs=_cast_refs(project, cast, world_rules, kb, story))
+    names = set(build_name_index(cast)) | {normalize_name(n) for n in taken if n}
+    drafted: list[Any] = []
+    plan = plan_batches(request.character_count, request.organization_count)
+    for number, (characters, orgs) in enumerate(plan, 1):
+        label = f"第 {number}/{len(plan)} 批：{_count_text(characters, orgs)}"
+        report(label, 5 + 90 * (number - 1) // len(plan))
+        prompt = _batch_prompt(project, [*cast, *drafted], request, characters, orgs, extras)
+        try:
+            entities, _content = await _generate_batch(ai_service, prompt, characters, orgs, label)
+        except ValueError as e:
+            if not draft.entities:
+                raise
+            draft.error = str(e)
+            break
+        for data in entities:
+            name = _text(data.get("name"))[:100]
+            if normalize_name(name) in names:
+                draft.skipped.append(name)
+                continue
+            names.add(normalize_name(name))
+            draft.entities.append({**data, "name": name})
+            drafted.append(_draft_member(data))
+    return draft
+
+
 async def generate_cast_for_project(
     db: AsyncSession,
     *,
@@ -331,9 +407,10 @@ async def generate_cast_for_project(
     async with stage_scope("context", "整理世界观 / 世界规则 / 已有角色与组织") as st:
         cast = await _load_cast(db, project.id)
         world_rules = await _world_rules_summary(db, project)
+        story = await story_direction_block(db, project.id)
         organizations = sum(1 for c in cast if c.is_organization)
         st.note(existing_characters=len(cast) - organizations, existing_organizations=organizations,
-                world_rules_chars=len(world_rules))
+                world_rules_chars=len(world_rules), story_chars=len(story))
 
     reference = ""
     if request.enable_mcp and request.selected_plugins:
@@ -359,7 +436,7 @@ async def generate_cast_for_project(
         else:
             st.skip("项目没有对标书")
 
-    extras = _extra_blocks(world_rules, reference, kb.text)
+    extras = _extra_blocks(world_rules, reference, kb.text, story)
     plan = plan_batches(request.character_count, request.organization_count)
     created: list[Character] = []
     skipped: list[str] = []

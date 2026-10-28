@@ -1,12 +1,13 @@
-"""创作进度：世界设定 → 世界规则 → 设定条目 → 角色与组织 → 关系 → 总纲 → 卷纲 → 章纲 → 正文 各到哪一步，
+"""创作进度：作品信息 → 世界设定 → 世界规则 → 设定条目 → 角色与组织 → 关系 → 总纲 → 卷纲 → 章纲 → 正文 各到哪一步，
 以及下一步该做什么（共创室每轮都把它带进上下文，主编和成员照它推进；作者也能一眼看清）。
 
 下一步按创作顺序找第一个没做完的层：
-- 必需的层（世界设定 / 角色与组织 / 总纲）一点没写：先补它，后面写得再多也一样（地基没打）
+- 必需的层（作品信息 / 世界设定 / 角色与组织 / 总纲）一点没写：先补它，后面写得再多也一样（地基没打）
 - 必需的层写了一部分：分卷之前先补全（先把地基打完整再规划）；已经分卷 / 有章纲 / 有正文了就不再卡着，缺什么写在进度里
 - 可选的层（世界规则 / 设定条目 / 关系）：后面的层都还没开始时提示（题材用不上可以跳过），后面开始了就算跳过
-总纲之后：分卷 → 细化覆盖下一章的卷 → 生成该单元章纲 → 确认章纲 → 写正文；全书写完为 done。
-只读，不写库。
+作品信息里书名总是有的，简介 / 主题 / 类型写全才算这一层做完；全书章数 / 叙事视角 / 目标字数只列出来，写总纲 / 分卷前再问作者。
+总纲之后逐层确认：分卷 → 确认分卷草案 → 细化覆盖下一章的卷 → 确认剧情单元 → 生成该单元章纲 → 确认章纲 → 写正文；全书写完为 done。
+load_state 一次读出这些数据，生成前的就绪检查（creation_readiness）也用它。只读，不写库。
 """
 from __future__ import annotations
 
@@ -26,6 +27,8 @@ from app.models.world_rule import WorldRule
 from app.services.volume_planning import loads_units, unit_at
 from app.services.volume_service import list_volumes, story_fields
 
+BASICS_FIELDS = (("description", "简介"), ("theme", "主题"), ("genre", "类型"))
+SETTING_FIELDS = (("chapter_count", "全书章数"), ("narrative_perspective", "叙事视角"), ("target_words", "目标字数"))
 WORLD_FIELDS = (("world_time_period", "时代背景"), ("world_location", "地点设定"), ("world_atmosphere", "氛围基调"),
                 ("world_rules", "世界规则"))
 RULE_CATEGORIES = (("cultivation_realm", "修炼境界"), ("equipment_template", "装备模板"), ("map_location", "地图位置"))
@@ -42,8 +45,84 @@ class Layer:
     step: dict
 
 
+@dataclass
+class BookState:
+    """创作进度与生成前的就绪检查共用的一次读取。"""
+    project: Optional[Project]
+    cast: list
+    relationships: int
+    members: int
+    rule_counts: dict
+    entries: int
+    story: dict
+    volumes: list
+    outlines: dict
+    chapters: set
+    written: set
+
+    @property
+    def people(self) -> list:
+        return [c for c in self.cast if not c.is_organization]
+
+    @property
+    def orgs(self) -> list:
+        return [c for c in self.cast if c.is_organization]
+
+    @property
+    def heroes(self) -> list[str]:
+        return [c.name for c in self.people if c.role_type == "protagonist"]
+
+
+def missing_basics(project: Any) -> list[tuple[str, str]]:
+    return [(key, label) for key, label in BASICS_FIELDS if not (getattr(project, key, None) or "").strip()]
+
+
+def missing_settings(project: Any) -> list[tuple[str, str]]:
+    return [(key, label) for key, label in SETTING_FIELDS if not getattr(project, key, None)]
+
+
+async def load_state(db: AsyncSession, project_id: str) -> BookState:
+    cast = (await db.execute(
+        select(Character.name, Character.is_organization, Character.role_type)
+        .where(Character.project_id == project_id).order_by(Character.created_at)
+    )).all()
+    relationships = int(await db.scalar(
+        select(func.count(CharacterRelationship.id)).where(CharacterRelationship.project_id == project_id)) or 0)
+    members = int(await db.scalar(
+        select(func.count(OrganizationMember.id))
+        .join(Organization, Organization.id == OrganizationMember.organization_id)
+        .where(Organization.project_id == project_id)) or 0)
+    rule_counts = dict((await db.execute(
+        select(WorldRule.category, func.count(WorldRule.id)).where(WorldRule.project_id == project_id)
+        .group_by(WorldRule.category)
+    )).all())
+    entries = int(await db.scalar(select(func.count(SettingEntry.id)).where(SettingEntry.project_id == project_id)) or 0)
+    outlines = {o.chapter_number: o for o in (await db.execute(
+        select(ChapterOutline.id, ChapterOutline.chapter_number, ChapterOutline.review_status, ChapterOutline.upstream_stale)
+        .where(ChapterOutline.project_id == project_id)
+    )).all()}
+    chapters = set((await db.execute(select(Chapter.chapter_number).where(Chapter.project_id == project_id))).scalars().all())
+    written = set((await db.execute(
+        select(Chapter.chapter_number).where(
+            Chapter.project_id == project_id, Chapter.content.isnot(None), Chapter.content != "",
+        )
+    )).scalars().all())
+    return BookState(await db.get(Project, project_id), list(cast), relationships, members, rule_counts, entries,
+                     await story_fields(db, project_id), await list_volumes(db, project_id), outlines, chapters, written)
+
+
 def _unconfirmed(outline: Any) -> bool:
     return outline.review_status == "draft" or bool(outline.upstream_stale)
+
+
+def _basics_layer(project: Optional[Project]) -> Layer:
+    missing = [label for _key, label in missing_basics(project)]
+    unset = [label for _key, label in missing_settings(project)]
+    line = (f"作品信息：书名《{getattr(project, 'title', None) or '未命名'}》；"
+            + (f"{'、'.join(missing)}还空着" if missing else "简介、主题、类型都已写")
+            + (f"；{'、'.join(unset)}还没定" if unset else ""))
+    label = f"补全作品信息：还缺{'、'.join(missing)}（灵感模式出候选，作者选）" if missing else "作品信息已完善"
+    return Layer(line, not missing, True, True, {"action": "basics", "label": label})
 
 
 def _world_layer(project: Optional[Project]) -> Layer:
@@ -61,11 +140,7 @@ def _world_layer(project: Optional[Project]) -> Layer:
     return Layer(line, not missing, bool(filled), True, step)
 
 
-async def _rules_layer(db: AsyncSession, project_id: str) -> Layer:
-    counts = dict((await db.execute(
-        select(WorldRule.category, func.count(WorldRule.id)).where(WorldRule.project_id == project_id)
-        .group_by(WorldRule.category)
-    )).all())
+def _rules_layer(counts: dict) -> Layer:
     total = sum(counts.values())
     have = [f"{label} {counts[key]} 条" for key, label in RULE_CATEGORIES if counts.get(key)]
     lack = [label for key, label in RULE_CATEGORIES if not counts.get(key)]
@@ -76,42 +151,28 @@ async def _rules_layer(db: AsyncSession, project_id: str) -> Layer:
     return Layer(line, bool(total), bool(total), False, step)
 
 
-async def _entries_layer(db: AsyncSession, project_id: str) -> Layer:
-    count = int(await db.scalar(select(func.count(SettingEntry.id)).where(SettingEntry.project_id == project_id)) or 0)
+def _entries_layer(count: int) -> Layer:
     line = f"设定条目：{count} 条" if count else "设定条目：还没有（术语 / 铁律 / 势力 / 规则等）"
     step = {"action": "setting_entries",
             "label": "建设定条目：术语 / 铁律 / 势力 / 规则等零散设定（用不上可以跳过，接着建角色与组织）"}
     return Layer(line, bool(count), bool(count), False, step)
 
 
-async def _cast_and_relations(db: AsyncSession, project_id: str) -> tuple[Layer, Layer]:
-    cast = (await db.execute(
-        select(Character.name, Character.is_organization, Character.role_type)
-        .where(Character.project_id == project_id).order_by(Character.created_at)
-    )).all()
-    people = [c for c in cast if not c.is_organization]
-    orgs = [c for c in cast if c.is_organization]
-    heroes = [c.name for c in people if c.role_type == "protagonist"]
+def _cast_and_relations(state: BookState) -> tuple[Layer, Layer]:
+    people, orgs, heroes = state.people, state.orgs, state.heroes
     hero_text = (f"（主角：{'、'.join(heroes[:HEROES_SHOWN])}{'等' if len(heroes) > HEROES_SHOWN else ''}）" if heroes
                  else "（还没定主角）" if people else "")
     cast_layer = Layer(
-        f"角色与组织：人物 {len(people)} 个{hero_text}，组织 {len(orgs)} 个" if cast else "角色与组织：还没有",
-        bool(people), bool(cast), True,
+        f"角色与组织：人物 {len(people)} 个{hero_text}，组织 {len(orgs)} 个" if state.cast else "角色与组织：还没有",
+        bool(people), bool(state.cast), True,
         {"action": "characters", "label": "建角色与组织：先定主角和主要人物，再建门派 / 家族等势力"},
     )
-
-    relationships = int(await db.scalar(
-        select(func.count(CharacterRelationship.id)).where(CharacterRelationship.project_id == project_id)) or 0)
-    members = int(await db.scalar(
-        select(func.count(OrganizationMember.id))
-        .join(Organization, Organization.id == OrganizationMember.organization_id)
-        .where(Organization.project_id == project_id)) or 0)
-    need_rel = len(people) >= 2 and not relationships
-    need_member = bool(orgs) and bool(people) and not members
+    need_rel = len(people) >= 2 and not state.relationships
+    need_member = bool(orgs) and bool(people) and not state.members
     label = ("理清关系：人物之间是什么关系，谁属于哪个组织、什么职位" if need_rel and need_member
              else "理清人物关系：谁和谁是什么关系" if need_rel else "理清组织归属：谁属于哪个组织、什么职位")
-    relations_layer = Layer(f"关系：人物关系 {relationships} 条，组织成员 {members} 人",
-                            not (need_rel or need_member), bool(relationships or members), False,
+    relations_layer = Layer(f"关系：人物关系 {state.relationships} 条，组织成员 {state.members} 人",
+                            not (need_rel or need_member), bool(state.relationships or state.members), False,
                             {"action": "relationships", "label": label})
     return cast_layer, relations_layer
 
@@ -138,21 +199,12 @@ def _foundation_step(layers: list[Layer], planning_started: bool) -> Optional[di
 
 
 async def progress_snapshot(db: AsyncSession, project_id: str) -> dict[str, Any]:
-    project = await db.get(Project, project_id)
-    total = int(getattr(project, "chapter_count", 0) or 0)
-    cast_layer, relations_layer = await _cast_and_relations(db, project_id)
-    foundation = [_world_layer(project), await _rules_layer(db, project_id), await _entries_layer(db, project_id),
-                  cast_layer, relations_layer, _outline_layer(await story_fields(db, project_id))]
-    volumes = await list_volumes(db, project_id)
-    outlines = {o.chapter_number: o for o in (await db.execute(
-        select(ChapterOutline.chapter_number, ChapterOutline.review_status, ChapterOutline.upstream_stale)
-        .where(ChapterOutline.project_id == project_id)
-    )).all()}
-    written = set((await db.execute(
-        select(Chapter.chapter_number).where(
-            Chapter.project_id == project_id, Chapter.content.isnot(None), Chapter.content != "",
-        )
-    )).scalars().all())
+    state = await load_state(db, project_id)
+    total = int(getattr(state.project, "chapter_count", 0) or 0)
+    cast_layer, relations_layer = _cast_and_relations(state)
+    foundation = [_basics_layer(state.project), _world_layer(state.project), _rules_layer(state.rule_counts),
+                  _entries_layer(state.entries), cast_layer, relations_layer, _outline_layer(state.story)]
+    volumes, outlines, written = state.volumes, state.outlines, state.written
 
     lines = [layer.line for layer in foundation]
     if volumes:
@@ -160,8 +212,8 @@ async def progress_snapshot(db: AsyncSession, project_id: str) -> dict[str, Any]
         detailed = sum(1 for v in volumes if loads_units(v.units))
         lines.append(f"卷纲：共 {len(volumes)} 卷（已确认 {confirmed}，已细化剧情单元 {detailed}）")
         for v in volumes[:8]:
-            state = "草稿" if v.review_status == "draft" else ("上游已改" if v.upstream_stale else "已确认")
-            lines.append(f"  - 第{v.volume_number}卷《{v.title}》第 {v.chapter_start}-{v.chapter_end} 章（{state}，"
+            state_text = "草稿" if v.review_status == "draft" else ("上游已改" if v.upstream_stale else "已确认")
+            lines.append(f"  - 第{v.volume_number}卷《{v.title}》第 {v.chapter_start}-{v.chapter_end} 章（{state_text}，"
                          f"剧情单元 {len(loads_units(v.units))} 个）")
     else:
         lines.append("卷纲：还没有分卷")
@@ -187,6 +239,10 @@ def _planning_step(volumes: list, outlines: dict, written: set, total: int) -> d
     if volume is None:
         return {"action": "plan_volumes", "label": f"第 {target} 章以后还没有卷纲，继续分卷"}
     units = loads_units(volume.units)
+    if volume.review_status == "draft":
+        what = "剧情单元草案" if units else "分卷草案"
+        return {"action": "confirm_volume", "volume_number": volume.volume_number,
+                "label": f"请作者确认第{volume.volume_number}卷《{volume.title}》的{what}（逐层确认，确认后再往下）"}
     if not units:
         return {"action": "detail_volume", "volume_number": volume.volume_number,
                 "label": f"把第{volume.volume_number}卷《{volume.title}》细化为剧情单元"}

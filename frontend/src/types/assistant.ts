@@ -37,10 +37,14 @@ export interface AssistantQuestion {
   prompt: string
   mode: 'single' | 'multiple' | 'text'
   options: AssistantQuestionOption[]
+  /** 系统提问卡（作品信息 / 章数 / 视角 / 字数）：选定直接写进这一项 */
+  write?: { field_id: string } | null
 }
 
 export interface AssistantQuestionCard {
   questions: AssistantQuestion[]
+  /** 卡片顶上的说明（系统提问卡：选定直接写入，改动里可撤销） */
+  note?: string
 }
 
 export interface AssistantAnswer {
@@ -176,6 +180,17 @@ export interface AssistantMessageView {
   member?: AssistantMember | null
   /** 主编交给成员处理后，成员以自己名义的回复 */
   delegated?: boolean
+  /** 系统代发的作者消息（上游卡片处理完，接着做挂起的要求） */
+  auto?: boolean
+}
+
+/** 挂起的要求：等作者处理完上游卡片，团队自动接着做 */
+export interface AssistantDeferred {
+  message_id: string
+  label: string
+  ready: boolean
+  pending: number
+  total: number
 }
 
 export type AssistantCandidateStatus = 'candidate' | 'applied' | 'undone' | 'rejected'
@@ -257,6 +272,8 @@ export interface AssistantSessionView {
   active_run: AssistantRunView | null
   candidates: AssistantFieldCandidate[]
   entity_candidates: AssistantEntityCandidate[]
+  /** 对话最后一条回复上挂着的要求（作者之后又发了消息就没有） */
+  deferred?: AssistantDeferred | null
 }
 
 export interface AssistantRunResult {

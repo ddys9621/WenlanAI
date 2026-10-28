@@ -22,6 +22,7 @@ from app.schemas.relationship import OrganizationGenerateRequest
 from app.services.ai_jobs import AIJob, Runner
 from app.services.ai_service import AIService
 from app.services.generation_trace import stage_scope
+from app.services.planning_context import story_direction_block
 from app.services.prompt_service import prompt_service
 from app.services.world_setting_context import build_world_context, world_query
 from app.utils.json_cleaner import clean_and_parse_json
@@ -109,6 +110,9 @@ async def generate_organization_for_project(
 
 {world_rules_summary}
 """)
+        story = await story_direction_block(db, project.id)
+        if story:
+            project_context_parts.append(f"\n{story}\n")
         user_input = f"""
 用户要求：
 - 组织名称：{request.name or '请AI生成'}

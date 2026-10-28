@@ -160,6 +160,7 @@ class PromptService:
 书名：{title}
 主题：{theme}
 类型：{genre}
+简介：{description}
 
 请生成包含以下内容的世界构建框架：
 
@@ -1147,13 +1148,14 @@ class PromptService:
 {prompt_text}"""
     
     @classmethod
-    def get_world_building_prompt(cls, title: str, theme: str, genre: str = "") -> str:
-        """获取世界构建提示词"""
+    def get_world_building_prompt(cls, title: str, theme: str, genre: str = "", description: str = "") -> str:
+        """获取世界构建提示词（简介是作者最初的故事设想，世界观要撑得起它）"""
         return cls.format_prompt(
             cls.WORLD_BUILDING,
             title=title,
             theme=theme,
-            genre=genre or "通用类型"
+            genre=genre or "通用类型",
+            description=description or "未提供",
         )
     
     @classmethod

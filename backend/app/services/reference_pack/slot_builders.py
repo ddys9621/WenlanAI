@@ -76,7 +76,7 @@ async def build_project_skeleton(db: AsyncSession, ctx: Any) -> str:
         f"氛围：{project.world_atmosphere or '未设定'}",
     ]
     if project.world_rules:
-        lines.append(f"规则：{project.world_rules[:600]}")
+        lines.append(f"规则：{project.world_rules[:1500]}")
     return "\n".join(lines)
 
 
@@ -205,6 +205,48 @@ async def build_world_map(db: AsyncSession, ctx: Any) -> str:
     return f"【🗺 世界地图】\n{overview}" if overview else ""
 
 
+async def build_setting_entries(db: AsyncSession, ctx: Any) -> str:
+    """【📚 设定条目】术语 / 铁律 / 势力 / 规则（项目级缓存）：规划时别和这些设定冲突。"""
+    from app.models.setting_entry import SETTING_CATEGORY_LABELS, SettingEntry
+
+    rows = (await db.execute(
+        select(SettingEntry).where(SettingEntry.project_id == ctx.project_id)
+        .order_by(SettingEntry.order_index, SettingEntry.created_at)
+    )).scalars().all()
+    if not rows:
+        return ""
+    lines = ["【📚 设定条目（术语 / 铁律 / 势力，规划不得违背）】"]
+    for e in rows[:20]:
+        brief = _clip(e.summary or e.content, 60)
+        lines.append(f"- {e.title}（{SETTING_CATEGORY_LABELS.get(e.category, e.category)}）" + (f"：{brief}" if brief else ""))
+    return "\n".join(lines)
+
+
+async def build_cast_relations(db: AsyncSession, ctx: Any) -> str:
+    """【🔗 人物关系与组织归属】（项目级缓存）：规划冲突、站队和组织线时按它来。"""
+    from app.models.character import Character
+    from app.models.relationship import CharacterRelationship, Organization, OrganizationMember
+
+    names = dict((await db.execute(
+        select(Character.id, Character.name).where(Character.project_id == ctx.project_id))).all())
+    rels = (await db.execute(
+        select(CharacterRelationship).where(CharacterRelationship.project_id == ctx.project_id)
+        .order_by(CharacterRelationship.created_at)
+    )).scalars().all()
+    orgs = {o.id: o for o in (await db.execute(
+        select(Organization).where(Organization.project_id == ctx.project_id))).scalars()}
+    members = (await db.execute(
+        select(OrganizationMember).where(OrganizationMember.organization_id.in_(list(orgs)))
+        .order_by(OrganizationMember.created_at)
+    )).scalars().all() if orgs else []
+    lines = [f"- {names[r.character_from_id]} → {names[r.character_to_id]}：{r.relationship_name or '关系'}"
+             + (f"（{_clip(r.description, 40)}）" if r.description else "")
+             for r in rels[:20] if r.character_from_id in names and r.character_to_id in names]
+    lines += [f"- {names[m.character_id]} 属于 {names[orgs[m.organization_id].character_id]}：{m.position or '成员'}"
+              for m in members[:20] if m.character_id in names and orgs[m.organization_id].character_id in names]
+    return ("【🔗 人物关系与组织归属】\n" + "\n".join(lines)) if lines else ""
+
+
 async def build_history_full(db: AsyncSession, ctx: Any) -> str:
     """最近 N 章的完整摘要（按 HISTORICAL_CONTEXT_TABLE.full_count）。
 
@@ -260,6 +302,8 @@ SLOT_BUILDERS: dict[str, Callable[[AsyncSession, Any], Awaitable[str]]] = {
     "project_characters":     build_project_characters,     # 评审问题 A：本书角色
     "world_rules_table":      build_world_rules_table,      # 评审问题 A：世界规则表
     "world_map":              build_world_map,              # 世界地图：地点方位远近
+    "setting_entries":        build_setting_entries,        # 设定条目：术语 / 铁律 / 势力
+    "cast_relations":         build_cast_relations,         # 人物关系与组织归属
     "history_full":           build_history_full,
     "history_normal":         build_history_normal,
     "history_brief":          build_history_brief,

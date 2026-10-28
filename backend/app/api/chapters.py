@@ -939,6 +939,27 @@ async def start_batch_job(*, project_id: str, user_id: str, ai_service: Any, opt
     )
 
 
+async def start_chapter_job(*, chapter: Any, user_id: str, ai_service: Any, options: ChapterGenerateOptions,
+                            manager: Any = None):
+    """启动单章生成任务（章节页「AI 生成」与共创室「写一章正文」共用）：结果存为候选稿；同项目已有正文任务 → AIJobConflictError。"""
+    chapter_id = chapter.id
+
+    async def runner(job):
+        return await run_chapter_generation(job, chapter_id=chapter_id, user_id=user_id, ai_service=ai_service,
+                                            options=options)
+
+    return await (manager or ai_jobs).start(
+        kind="chapter_generate",
+        title=f"生成第 {chapter.chapter_number} 章《{chapter.title}》",
+        user_id=user_id,
+        project_id=chapter.project_id,
+        scope=f"chapter_write:{chapter.project_id}",
+        runner=runner,
+        cancel_message="已停止生成；没有产生候选稿，本章正文未变",
+        meta={"chapter_id": chapter_id, "target_word_count": options.target_word_count},
+    )
+
+
 @router.post("/{chapter_id}/generate-stream", summary="AI创作章节内容（流式）")
 async def generate_chapter_content_stream(
     chapter_id: str,
@@ -968,22 +989,8 @@ async def generate_chapter_content_stream(
 
     user_id = getattr(request.state, "user_id", "system")
     options = ChapterGenerateOptions.from_request(generate_request)
-
-    async def runner(job):
-        return await run_chapter_generation(job, chapter_id=chapter_id, user_id=user_id,
-                                            ai_service=user_ai_service, options=options)
-
     try:
-        job = await ai_jobs.start(
-            kind="chapter_generate",
-            title=f"生成第 {chapter.chapter_number} 章《{chapter.title}》",
-            user_id=user_id,
-            project_id=chapter.project_id,
-            scope=f"chapter_write:{chapter.project_id}",
-            runner=runner,
-            cancel_message="已停止生成；没有产生候选稿，本章正文未变",
-            meta={"chapter_id": chapter_id, "target_word_count": options.target_word_count},
-        )
+        job = await start_chapter_job(chapter=chapter, user_id=user_id, ai_service=user_ai_service, options=options)
     except AIJobConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     return job_sse_response(job)

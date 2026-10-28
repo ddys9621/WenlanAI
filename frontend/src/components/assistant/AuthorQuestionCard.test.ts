@@ -30,4 +30,15 @@ describe('AuthorQuestionCard', () => {
     expect(options).toHaveLength(4);
     for (const option of options) expect(option.cls).toContain('relative');
   });
+
+  it('系统提问卡：顶上写明选定直接写入，输入框提示可以自己写', () => {
+    const card: AssistantQuestionCard = {
+      note: '选定后直接写进作品设定（改动里可以撤销）',
+      questions: [{ id: 'description', prompt: '选一个简介：', mode: 'single', write: { field_id: 'project.description' },
+        options: [{ id: 'o1', label: '杂役靠歪理成道' }, { id: 'o2', label: '少年拆穿正统骗局' }] }],
+    };
+    const html = renderToStaticMarkup(h(AuthorQuestionCard, { question: card, busy: false, onSubmit: () => {} }));
+    expect(html).toContain('选定后直接写进作品设定');
+    expect(html).toContain('都不满意就写你想要的');
+  });
 });

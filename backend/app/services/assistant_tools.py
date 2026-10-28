@@ -1,11 +1,12 @@
 """全局智能助笔 · 全书工具（参考岚笺：工具随打开的作品开放，当前页面不是权限边界；只开放受控工具）。
 
-没有任意文件 / 数据库 / 删除 / 保存工具：修改只能 propose_edit 生成候选（作者应用才写入），新建只能 propose_* 生成新建候选
-（作者建档才写入），正文只能交给 manuscript（产出章节候选稿）或 write_chapters（后台批量写已确认的章纲），提问用 ask_author
-暂停等待作者回答。工具目录、查找结果、可修改内容都按创作顺序排（世界设定 → 世界规则 → 设定条目 → 角色与组织 → 关系 →
-总纲 → 卷纲 → 章纲 → 正文），每一层都查得到（search_project）、看得到（read_field / read_chapter）、改得了（propose_edit /
-manuscript）。共创室：每位成员只能用自己职责内的工具（cocreation_team.Member.tools）；规划工具（分卷 / 细化 / 单元章纲）
-只产出草稿，并推送「草案卡片」让作者确认。
+没有任意文件 / 数据库 / 删除 / 保存工具：要 AI 构思、撰写的内容走生成工具（fill_basics / generate_* / 规划 / write_chapter，
+见 assistant_generators：复用页面上原来的 AI 生成逻辑，先查前置，只出卡片或草稿）；作者口述的内容与小改用 propose_edit /
+propose_* 生成候选（作者应用 / 建档才写入）；正文交给 manuscript（产出章节候选稿）或 write_chapters（后台批量写已确认的章纲），
+提问用 ask_author 暂停等待作者回答。工具目录、查找结果、可修改内容都按创作顺序排（作品信息 → 世界设定 → 世界规则 → 设定条目 →
+角色与组织 → 关系 → 总纲 → 卷纲 → 章纲 → 正文），每一层都查得到（search_project）、看得到（read_field / read_chapter）、
+改得了（propose_edit / manuscript）。共创室：每位成员只能用自己职责内的工具（cocreation_team.Member.tools）；规划工具
+（分卷 / 细化 / 单元章纲）只产出草稿，并推送「草案卡片」让作者确认。
 """
 from __future__ import annotations
 
@@ -56,9 +57,12 @@ PAGES = {
 BATCH_LIMIT = 8
 _BATCH_HINT = f"；一次可以提多条：{{\"items\": [{{...}}, {{...}}]}}（每条的参数同单条，最多 {BATCH_LIMIT} 条）"
 
-# 顺序 = 给模型看的目录顺序：先查看类，再按创作顺序（世界规则 → 设定条目 → 角色 → 组织 → 关系 → 成员 → 卷纲 → 章纲 → 正文）
+FORCE_HINT = "；会先查前置，缺必需的上游会先补上游卡片再挂起这件事；作者明确说不补、直接做时才加 \"force\": true"
+
+# 顺序 = 给模型看的目录顺序：先查看类，再是按创作顺序排的生成工具（作品信息 → 世界 → 人物 → 关系 → 总纲 → 卷纲 → 章纲 →
+# 正文），最后是记录作者口述内容 / 小改用的 propose_*（同样按创作顺序）
 TOOLS: dict[str, tuple[str, str, str]] = {
-    "story_progress": ("查看创作进度", "世界设定 → 世界规则 → 设定条目 → 角色与组织 → 关系 → 总纲 → 卷纲 → 章纲 → 正文 各到哪一步，"
+    "story_progress": ("查看创作进度", "作品信息 → 世界设定 → 世界规则 → 设定条目 → 角色与组织 → 关系 → 总纲 → 卷纲 → 章纲 → 正文 各到哪一步，"
                                        "以及按这个顺序建议的下一步（每轮开头的【创作进度】就是它；作者处理过卡片后可以再看一次）", "{}"),
     "search_project": ("查找资料", "在本书的世界设定、世界规则、设定条目、地点、人物与组织、人物关系、组织成员、总纲、卷纲（含剧情单元）、"
                                    "章纲、章节正文里按关键词找资料（返回出处与摘录，按创作顺序列）",
@@ -78,6 +82,46 @@ TOOLS: dict[str, tuple[str, str, str]] = {
     "kb_read": ("读知识库条目", "读一条知识库条目（先 kb_search 拿到 entry_id）：默认去名版（人名换成功能位，适合学结构）；"
                              "view=named 看原名版。只学结构、节奏和写法，不照搬人物、设定与情节",
                 '{"entry_id": "...", "view": "denamed|named"}'),
+    "fill_basics": ("补作品信息", "按灵感模式补书名 / 简介 / 主题 / 类型（每项出 6 个候选，作者在提问卡里选，选定直接写入），"
+                                 "或问作者全书章数 / 叙事视角 / 目标字数；不传 fields 就补第一项缺的",
+                    '{"fields": ["description"]（可选：title / description / theme / genre / chapter_count / '
+                    'narrative_perspective / target_words）, "hint": "可选，作者对这一项的要求"}'),
+    "generate_world": ("生成世界设定", "按世界设定页「重新生成」的原逻辑生成时代背景 / 地点设定 / 氛围基调 / 世界规则四栏的修改卡"
+                                       "（参考书名、主题、类型、对标书、最终提示词，自动带齐）；不传 fields 就只生成空着的栏" + FORCE_HINT,
+                       '{"fields": ["world_time_period", "world_location", "world_atmosphere", "world_rules"]（可选）, '
+                       '"requirements": "可选，作者的原话"}'),
+    "generate_world_rules": ("生成世界规则", "按建项目时自动生成世界规则的原逻辑（按题材出修炼境界 / 装备 / 地图，或地位层级 / "
+                                             "资源 / 地点）生成新建卡；已有规则时只补没有的" + FORCE_HINT,
+                             '{"requirements": "可选，作者的原话"}'),
+    "generate_setting_entries": ("生成设定条目", "生成术语 / 铁律 / 势力 / 规则等设定条目的新建卡（参考作品信息、世界设定、"
+                                                 "世界规则、已有条目、对标书）" + FORCE_HINT,
+                                 '{"count": 5, "requirements": "可选，作者的原话"}'),
+    "generate_cast": ("生成角色与组织", "按角色页「AI 批量生成」的原逻辑生成人物 / 组织新建卡，连带关系卡和组织成员卡（参考作品信息、"
+                                         "世界设定、已有角色组织、世界规则与设定条目、对标书人物功能谱）；只要组织时 character_count=0"
+                      + FORCE_HINT,
+                      '{"character_count": 3, "organization_count": 0, "requirements": "作者的原话，如 主角的师父，亦正亦邪"}'),
+    "generate_relationships": ("生成人物关系", "给书里已有的人物理关系、记组织成员，产出关系卡和成员卡（参考人物、组织、已有关系、"
+                                               "世界设定、对标书）" + FORCE_HINT,
+                               '{"requirements": "可选，作者的原话"}'),
+    "generate_outline": ("生成总纲", "按谋篇页「AI 生成总纲」的原逻辑生成总纲各栏的修改卡（参考作品信息、章数 / 视角 / 字数、"
+                                     "世界观、主角与其他角色、对标书、项目提示词、最终提示词）" + FORCE_HINT,
+                         '{"requirements": "可选，作者的原话"}'),
+    "plan_volumes": ("按总纲分卷", "按总纲把全书（已写章纲之后的部分）分卷，产出卷纲草稿（已有章纲的卷保留）" + FORCE_HINT,
+                     '{"chapter_count": 可选全书章数, "volume_count": 可选卷数, "instruction": "可选，作者对分卷的要求"}'),
+    "detail_volume": ("细化卷纲", "把某一卷拆成剧情单元并编排线索，产出草稿（分卷草案要先确认；本卷已有章纲时不能重拆；"
+                                  "已有单元的文字用 propose_edit 改）" + FORCE_HINT,
+                      '{"volume_number": 1, "instruction": "可选要求"}'),
+    "plan_chapters": ("生成单元章纲", "把某卷的某个剧情单元展开为章纲（剧情单元草案要先确认；只补缺的章），产出待确认的章纲" + FORCE_HINT,
+                      '{"volume_number": 1, "unit_index": 1, "instruction": "可选要求"}'),
+    "write_chapter": ("写一章正文", "按章节页「AI 生成」的原逻辑在后台生成这一章的候选稿（全量上下文；章纲要已确认、前面的章要写完；"
+                                    "作者在章节写作页审阅采用）" + FORCE_HINT,
+                      '{"chapter_number": 1}'),
+    "write_chapters": ("写正文", "在后台批量写一段章节的正文（只写作者已确认的章纲，遇到未确认的会停下）",
+                       '{"from_chapter": 1, "to_chapter": 3}'),
+    "manuscript": ("处理正文", "处理某一章的正文：continue 续写 / rewrite 改写 / polish 润色 / review 核对本章 / query 查前文；"
+                              "改写、润色要指明哪一段：作者在该章正文里选中的那段，或用 quote 逐字引用要改的原文（先 read_chapter 读原文，"
+                              "引用要在本章里只出现一次）；修改类结果是候选稿",
+                   '{"chapter_number": 1, "skill": "continue", "instruction": "具体要求", "quote": "改写 / 润色时要改的原文（可选）"}'),
     "propose_edit": ("准备修改候选", "为已有的某一项生成修改候选：value 是完整的新内容（列表类字段给字符串数组，数字字段给整数），"
                                      "作者在卡片上点「应用」才写入；这一项已有内容而你还没读过时，会先把现有内容给你，按它给出完整新值再提一次；"
                                      f"一次可以改多项：{{\"items\": [{{\"field_id\": ..., \"target_id\": ..., \"value\": ..., "
@@ -116,18 +160,6 @@ TOOLS: dict[str, tuple[str, str, str]] = {
                            '{"character_name": "人物", "organization_name": "组织", "position": "职位，如 掌门 / 外门弟子", '
                            '"rank": "职位等级 0-100（可选）", "loyalty": "忠诚度 0-100（可选）", '
                            '"status": "active 在职|retired 已退出|expelled 被逐出|deceased 已故（可选）", "reason": "为什么加（可选）"}'),
-    "plan_volumes": ("按总纲分卷", "按总纲把全书（已写章纲之后的部分）分卷，产出卷纲草稿（已有章纲的卷保留）",
-                     '{"chapter_count": 可选全书章数, "volume_count": 可选卷数, "instruction": "可选，作者对分卷的要求"}'),
-    "detail_volume": ("细化卷纲", "把某一卷拆成剧情单元并编排线索，产出草稿（本卷已有章纲时不能重拆；已有单元的文字用 propose_edit 改）",
-                      '{"volume_number": 1, "instruction": "可选要求"}'),
-    "plan_chapters": ("生成单元章纲", "把某卷的某个剧情单元展开为章纲（只补缺的章），产出待确认的章纲",
-                      '{"volume_number": 1, "unit_index": 1, "instruction": "可选要求"}'),
-    "manuscript": ("处理正文", "处理某一章的正文：continue 续写 / rewrite 改写 / polish 润色 / review 核对本章 / query 查前文；"
-                              "改写、润色要指明哪一段：作者在该章正文里选中的那段，或用 quote 逐字引用要改的原文（先 read_chapter 读原文，"
-                              "引用要在本章里只出现一次）；修改类结果是候选稿",
-                   '{"chapter_number": 1, "skill": "continue", "instruction": "具体要求", "quote": "改写 / 润色时要改的原文（可选）"}'),
-    "write_chapters": ("写正文", "在后台批量写一段章节的正文（只写作者已确认的章纲，遇到未确认的会停下）",
-                       '{"from_chapter": 1, "to_chapter": 3}'),
     "project_status": ("查看待办", "查看本书需要注意的事项：待确认章纲、未分析 / 分析过期的章节、待审候选稿、一致性问题", "{}"),
     "open_page": ("打开页面", "打开某个页面给作者看", '{"page": "' + "|".join(PAGES) + '"}'),
     "ask_author": ("向作者提问", "需要作者做决定、选方案或补充信息时提问并等待回答（最多 3 个问题；单选 / 多选至少 2 个选项）",
@@ -160,6 +192,9 @@ class ToolContext:
     model: Optional[str] = None
     plans: list = field(default_factory=list)
     entity_candidates: list = field(default_factory=list)
+    deferred: Optional[dict] = None  # 生成总入口挂起的要求：等作者处理完上游卡片自动接着做
+    declined: set = field(default_factory=set)  # 作者没采用的层 / 这一轮跳过的作品信息字段：不再自动补
+    origin_goal: str = ""  # 作者最初那句要求（续跑时也是它）
 
 
 @dataclass
@@ -417,7 +452,11 @@ async def _propose_one_edit(ctx: ToolContext, args: dict) -> dict:
             raise _NeedsRead(got)
     if "value" not in args:
         raise ToolError("缺少参数 value（完整的新内容）")
-    reason = _text(args, "reason", 1000, required=False)
+    return await create_field_card(ctx, field_id, target_id, args["value"], _text(args, "reason", 1000, required=False))
+
+
+async def create_field_card(ctx: ToolContext, field_id: str, target_id: str, value: Any, reason: str) -> dict:
+    """落一张修改候选并推卡片（写入后读回核对），返回卡片内容；修改前要不要先读，由调用方决定。"""
     made: list = []
 
     async def write() -> None:
@@ -426,7 +465,7 @@ async def _propose_one_edit(ctx: ToolContext, args: dict) -> dict:
                 ctx.db.expunge(stale)
         made.append(await cands.create_field_candidate(
             ctx.db, project_id=ctx.project_id, session_id=ctx.session_id, run_id=ctx.run_id,
-            field_id=field_id, target_id=target_id, value=args["value"], reason=reason,
+            field_id=field_id, target_id=target_id, value=value, reason=reason,
         ))
 
     async def verify() -> bool:
@@ -440,6 +479,13 @@ async def _propose_one_edit(ctx: ToolContext, args: dict) -> dict:
     ctx.candidates.append(view)
     _emit_card(ctx, "candidate", {"candidate": view})
     return view
+
+
+async def default_style_id(db: AsyncSession, project_id: str) -> Optional[int]:
+    """项目在「写作风格」页设的默认风格：共创室写正文时带上（没设就不用风格）。"""
+    from app.models.project_default_style import ProjectDefaultStyle
+
+    return await db.scalar(select(ProjectDefaultStyle.style_id).where(ProjectDefaultStyle.project_id == project_id))
 
 
 _ENTITY_NOTE = "新建候选已生成：作者要在卡片上点「建档」才真正建档（回答提问不会建档）；现在还没有建，不要说已经建好了。"
@@ -801,7 +847,8 @@ async def _write_chapters(ctx: ToolContext, args: dict) -> ToolOutcome:
         raise ToolError("没有登录信息，不能启动后台写作")
     try:
         job = await start_batch_job(project_id=ctx.project_id, user_id=ctx.user_id, ai_service=_member_ai(ctx),
-                                    options=BatchOptions(from_chapter=start, to_chapter=end, require_confirmed_outline=True))
+                                    options=BatchOptions(from_chapter=start, to_chapter=end, require_confirmed_outline=True,
+                                                         style_id=await default_style_id(ctx.db, ctx.project_id)))
     except AIJobConflictError as exc:
         raise ToolError(f"本书已有正文任务在运行：{exc}")
     ctx.emit({"type": "job", "job": {"id": job.id, "title": job.title, "kind": job.kind}})
@@ -810,7 +857,29 @@ async def _write_chapters(ctx: ToolContext, args: dict) -> ToolOutcome:
                        "现在正文还没写完，不要说已经写好了。")
 
 
+async def _fill_basics(ctx: ToolContext, args: dict) -> ToolOutcome:
+    from app.services import assistant_generators as gens  # 延迟导入：生成器要用本模块的卡片工具
+
+    return await gens.fill_basics(ctx, args)
+
+
+def _target(target: str) -> Callable[[ToolContext, dict], Any]:
+    """生成类工具：都经生成总入口（先查前置、缺上游先补并挂起，齐了才按原逻辑生成）。"""
+    async def handler(ctx: ToolContext, args: dict) -> ToolOutcome:
+        from app.services import assistant_generators as gens  # 延迟导入：生成器要用本模块的卡片工具
+
+        return await gens.run_target(ctx, target, args)
+
+    return handler
+
+
 HANDLERS = {
+    "fill_basics": _fill_basics,
+    "generate_world": _target("world"), "generate_world_rules": _target("world_rules"),
+    "generate_setting_entries": _target("setting_entries"), "generate_cast": _target("cast"),
+    "generate_relationships": _target("relationships"), "generate_outline": _target("outline"),
+    "plan_volumes": _target("volumes"), "detail_volume": _target("detail"), "plan_chapters": _target("outlines"),
+    "write_chapter": _target("chapter"),
     "search_project": _search_project, "list_fields": _list_fields, "read_field": _read_field,
     "read_chapter": _read_chapter, "propose_edit": _propose_edit, "propose_world_rule": _propose_world_rule,
     "propose_setting_entry": _propose_setting_entry, "propose_character": _propose_character,
@@ -819,7 +888,6 @@ HANDLERS = {
     "manuscript": _manuscript, "open_page": _open_page,
     "project_status": _project_status, "ask_author": _ask_author, "story_progress": _story_progress,
     "kb_search": _kb_search, "kb_read": _kb_read,
-    "plan_volumes": _plan_volumes, "detail_volume": _detail_volume, "plan_chapters": _plan_chapters,
     "write_chapters": _write_chapters,
 }
 

@@ -6,7 +6,7 @@
 import asyncio
 import hashlib
 import uuid
-from typing import List, Optional, Dict
+from typing import Dict, List, Optional, Sequence
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func
@@ -443,91 +443,11 @@ class WorldRuleService:
 
         logger.info(f"🎨 项目 {project.id} 无世界规则，开始自动生成...")
 
-        # 2. 获取角色和组织信息（用于生成上下文）
-        from app.models.character import Character
-
-        characters_result = await db.execute(
-            select(Character).where(
-                Character.project_id == project.id,
-                Character.is_organization == False
-            ).limit(5)
-        )
-        characters = characters_result.scalars().all()
-
-        organizations_result = await db.execute(
-            select(Character).where(
-                Character.project_id == project.id,
-                Character.is_organization == True
-            ).limit(3)
-        )
-        organizations = organizations_result.scalars().all()
-
-        # 3. 构建生成 prompt
-        prompt = self._build_initial_rules_prompt(project, characters, organizations)
-
-        # 4. 调用大模型生成规则（流式 + 重试 + LLM 二次修复；max_tokens 取用户设置）
+        # 2-5. 按题材调大模型生成（与共创室共用：流式 + 重试 + LLM 二次修复；max_tokens 取用户设置）
         try:
-            # 使用用户配置的 AIService (如果提供) 或全局默认 AIService
-            active_ai_service = user_ai_service if user_ai_service is not None else ai_service
-
-            max_retries = 3
-            last_error = None
-            response_text = ""  # 保留到循环外，供二次修复兜底使用
-            rules_data = None
-
-            from app.utils.json_cleaner import clean_and_parse_json, repair_json_with_llm
-
-            for attempt in range(max_retries):
-                try:
-                    logger.info(
-                        f"🔵 开始第 {attempt + 1}/{max_retries} 次世界规则生成调用（流式）"
-                    )
-
-                    # 低 temperature 提高 JSON 结构合规性
-                    response_text = ""
-                    async for chunk in active_ai_service.generate_text_stream(
-                        prompt=prompt,
-                        provider=None,  # 使用用户配置的默认provider
-                        model=None,     # 使用用户配置的默认model
-                        temperature=0.3,
-                    ):
-                        response_text += chunk
-
-                    # 5. 使用统一的 JSON 清理工具解析返回结果
-                    rules_data = clean_and_parse_json(
-                        response_text,
-                        expected_type='object',
-                        log_prefix=f"[世界规则生成-第{attempt + 1}次]",
-                    )
-                    break
-                except Exception as e:
-                    last_error = e
-                    logger.warning(
-                        f"⚠️ 第 {attempt + 1}/{max_retries} 次世界规则生成失败: {e}"
-                    )
-
-            # 6. 本地重试全部失败 → LLM 二次格式修复兜底（对齐 wizard_stream 主世界观流程）
-            if rules_data is None and response_text:
-                try:
-                    logger.info("[世界规则生成] 进入 LLM 二次格式修复兜底")
-                    rules_data = await repair_json_with_llm(
-                        response_text,
-                        user_ai_service=active_ai_service,
-                        expected_type='object',
-                        provider=None,
-                        model=None,
-                        schema_hint="cultivation_realm, equipment_template, map_location",
-                        log_prefix="[世界规则生成]",
-                    )
-                    logger.info("[世界规则生成] LLM 二次格式修复成功")
-                except Exception as repair_err:
-                    logger.error(
-                        f"[世界规则生成] LLM 二次格式修复仍失败: {repair_err}"
-                    )
-
+            rules_data = await self.generate_rules_data(db, project, user_ai_service)
             if rules_data is None:
-                # 所有重试 + 二次修复均失败，抛出最后一次错误
-                raise last_error or Exception("世界规则生成多次重试仍失败")
+                raise Exception("世界规则生成多次重试仍失败")
 
             # 6. 批量创建规则
             created_rules = []
@@ -601,13 +521,56 @@ class WorldRuleService:
             # 只返回空列表，表示生成失败但不影响外层事务
             return []
 
+    async def generate_rules_data(
+        self, db: AsyncSession, project: Project, user_ai_service=None, *,
+        existing: Sequence[WorldRule] = (), requirements: str = "",
+    ) -> Optional[dict]:
+        """按题材生成一套世界规则（玄幻：境界 / 装备 / 地图；现代：地位层级 / 资源 / 地点）：建项目时自动生成与共创室共用。
+        流式 + 重试 + 模型二次修复；仍解析不了返回 None。existing：已有规则（补充时不重复）；requirements：作者要求（只有共创室传）。"""
+        from app.models.character import Character
+        from app.utils.json_cleaner import clean_and_parse_json, repair_json_with_llm
+
+        characters = (await db.execute(select(Character).where(
+            Character.project_id == project.id, Character.is_organization == False).limit(5))).scalars().all()  # noqa: E712
+        organizations = (await db.execute(select(Character).where(
+            Character.project_id == project.id, Character.is_organization == True).limit(3))).scalars().all()  # noqa: E712
+        prompt = self._build_initial_rules_prompt(project, characters, organizations, existing=existing,
+                                                  requirements=requirements)
+        active_ai_service = user_ai_service if user_ai_service is not None else ai_service
+        response_text = ""  # 保留到循环外，供二次修复兜底使用
+        for attempt in range(3):
+            try:
+                logger.info(f"🔵 开始第 {attempt + 1}/3 次世界规则生成调用（流式）")
+                response_text = ""
+                # 低 temperature 提高 JSON 结构合规性；provider / model 用用户配置的默认
+                async for chunk in active_ai_service.generate_text_stream(prompt=prompt, provider=None, model=None,
+                                                                          temperature=0.3):
+                    response_text += chunk
+                return clean_and_parse_json(response_text, expected_type="object",
+                                            log_prefix=f"[世界规则生成-第{attempt + 1}次]")
+            except Exception as e:  # noqa: BLE001 - 重试
+                logger.warning(f"⚠️ 第 {attempt + 1}/3 次世界规则生成失败: {e}")
+        if response_text:  # 本地重试全部失败 → LLM 二次格式修复兜底（对齐 wizard_stream 主世界观流程）
+            try:
+                logger.info("[世界规则生成] 进入 LLM 二次格式修复兜底")
+                return await repair_json_with_llm(
+                    response_text, user_ai_service=active_ai_service, expected_type="object", provider=None, model=None,
+                    schema_hint="cultivation_realm, equipment_template, map_location", log_prefix="[世界规则生成]",
+                )
+            except Exception as repair_err:  # noqa: BLE001
+                logger.error(f"[世界规则生成] LLM 二次格式修复仍失败: {repair_err}")
+        return None
+
     def _build_initial_rules_prompt(
         self,
         project: Project,
         characters: List,
-        organizations: List
+        organizations: List,
+        *,
+        existing: Sequence = (),
+        requirements: str = "",
     ) -> str:
-        """构建初始规则生成的 prompt - 根据题材自适应"""
+        """构建初始规则生成的 prompt - 根据题材自适应；existing / requirements 只有共创室补规则时才传（页面上的提示词不变）"""
 
         # 角色信息
         char_info = ""
@@ -650,6 +613,17 @@ class WorldRuleService:
             task_description = self._get_generic_task_description()
             examples = self._get_generic_examples()
 
+        extra = ""
+        if existing:
+            labels = {"cultivation_realm": "境界 / 层级", "equipment_template": "装备 / 资源", "map_location": "地图 / 地点"}
+            grouped: dict[str, list[str]] = {}
+            for rule in existing:
+                grouped.setdefault(rule.category, []).append(rule.name)
+            lines = "\n".join(f"- {labels.get(cat, cat)}：{'、'.join(names)}" for cat, names in grouped.items())
+            extra += f"\n**已有规则（这些已经有了，不要重复，只补没有的）**：\n{lines}\n"
+        if requirements.strip():
+            extra += f"\n**作者本次的要求（优先满足）**：\n{requirements.strip()}\n"
+
         # 构建完整 prompt
         prompt = f"""你是一位资深的小说世界观设计师。请为以下小说项目设计一套完整的世界规则体系。
 
@@ -670,7 +644,7 @@ class WorldRuleService:
 
 **重要组织/势力**：
 {org_info or '暂无'}
-
+{extra}
 ---
 
 {task_description}

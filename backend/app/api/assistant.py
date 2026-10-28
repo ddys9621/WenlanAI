@@ -162,6 +162,29 @@ async def answer_stream(
     return job_sse_response(job)
 
 
+@router.post("/deferred/{message_id}/continue/stream", summary="上游卡片处理完了：接着做上一轮挂起的要求（后台任务 + SSE）")
+async def continue_deferred_stream(
+    project_id: str, message_id: str, request: Request, db: AsyncSession = Depends(get_db),
+    user_ai_service: AIService = Depends(get_user_ai_service),
+):
+    await verify_request_project(request, project_id, db)
+    if ai_jobs.current(_scope(project_id)) is not None:
+        raise HTTPException(status_code=409, detail=BUSY_MESSAGE)
+    user_id = getattr(request.state, "user_id", None)
+    try:
+        run = await agent.start_continuation(db, project_id=project_id, user_id=user_id, message_id=message_id)
+    except agent.AssistantStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    try:
+        job = await _start_job(project_id=project_id, user_id=user_id, run=run, ai=user_ai_service,
+                               title=f"智能助笔：{run.goal.strip()[:24]}（接着做）")
+    except AIJobConflictError as exc:
+        await db.execute(update(AssistantRun).where(AssistantRun.id == run.id).values(status="failed", message=str(exc)[:500]))
+        await db.commit()
+        raise HTTPException(status_code=409, detail=str(exc))
+    return job_sse_response(job)
+
+
 async def _project_defaults(db: AsyncSession, project_id: str, request: Request) -> tuple[Optional[str], Optional[int]]:
     """项目实际用的模型与 max_tokens（全局设置 + 本项目 AI 偏好，与 get_user_ai_service 同一来源，但不建 AI 客户端）。"""
     user_id = getattr(request.state, "user_id", None)

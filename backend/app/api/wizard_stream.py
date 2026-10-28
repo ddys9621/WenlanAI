@@ -2,7 +2,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import delete, or_, select
-from typing import Dict, Any, AsyncGenerator
+from types import SimpleNamespace
+from typing import Dict, Any, AsyncGenerator, Optional
 import asyncio
 import json
 import re
@@ -26,6 +27,7 @@ from app.services.generation_trace import begin_stage
 from app.services.platform_presets import normalize_longform_settings
 from app.services.project_prompts import load_overrides as load_prompt_overrides
 from app.services.prompt_service import prompt_service
+from app.services.reference_pack.slot_builders import build_cast_relations
 from app.logger import get_logger
 from app.utils.json_cleaner import clean_and_parse_json
 from app.utils.prompt_safety import quote_untrusted
@@ -65,6 +67,87 @@ async def _start_wizard_job(request: Request, data: Dict[str, Any], *, kind: str
     except AIJobConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     return job_sse_response(job)
+
+
+async def world_building_prompt(
+    db: AsyncSession, *, project_id: Optional[str], title: str, theme: str, genre: str,
+    generation_prompt: Optional[str], description: str = "", reference_materials: str = "",
+    kb_source_id: Optional[str] = None, kb_mode: Optional[str] = None, user_id: Optional[str] = None,
+    requirements: str = "",
+) -> tuple[str, Any]:
+    """世界观生成的提示词：向导第 1 步、世界设定页「重新生成」与共创室共用（基础模板（含简介）+ MCP 资料 + 对标书全书骨架 +
+    作者要求 + 最终提示词）。返回 (提示词, 仿写参考)。requirements 只有共创室传。"""
+    prompt = prompt_service.get_world_building_prompt(title=title, theme=theme, genre=genre, description=description)
+    if reference_materials:
+        prompt = f"""{prompt}
+
+【参考资料】
+以下是通过MCP工具收集的真实背景资料，请参考这些信息构建更真实的世界观：
+
+{quote_untrusted(reference_materials, "MCP 检索结果")}
+
+请结合上述资料，生成符合历史/现实的世界观设定。"""
+    kb = await traced_kb_context(db, project_id or "", "worldview", source_id=None if project_id else kb_source_id,
+                                 mode=kb_mode, user_id=user_id)
+    if kb.text:
+        prompt = f"{prompt}\n\n{kb.text}"
+    if requirements.strip():
+        prompt = f"{prompt}\n\n【作者本次的要求（优先满足）】\n{requirements.strip()}"
+    return prompt_service.apply_project_generation_prompt(prompt, generation_prompt or ""), kb
+
+
+async def outline_cast_info(db: AsyncSession, project_id: str) -> tuple[str, str, int, int]:
+    """总纲提示词里的人物：主角详情（必须使用）与其他角色（一行一个）。返回 (主角详情, 其他角色, 角色数, 主角数)。"""
+    characters = (await db.execute(select(Character).where(Character.project_id == project_id))).scalars().all()
+    protagonists = [char for char in characters if is_protagonist_role(char.role_type)]
+    blocks = []
+    for idx, char in enumerate(protagonists, 1):
+        parts = [f"【主角{idx}】{char.name}"]
+        if char.personality:
+            parts.append(f"  - 性格：{char.personality[:200]}")
+        if char.background:
+            parts.append(f"  - 背景：{char.background[:300]}")
+        motivation = getattr(char, "motivation", None)
+        initial_status = getattr(char, "initial_status", None)
+        if motivation:
+            parts.append(f"  - 动机：{str(motivation)[:200]}")
+        if initial_status:
+            parts.append(f"  - 开局处境：{str(initial_status)[:200]}")
+        blocks.append("\n".join(parts))
+    others = [char for char in characters if not is_protagonist_role(char.role_type)]
+    characters_info = "\n".join(
+        f"- {char.name} ({'组织' if char.is_organization else '角色'}, {char.role_type}): "
+        f"{char.personality[:100] if char.personality else '暂无描述'}"
+        for char in others
+    )
+    relations = await build_cast_relations(db, SimpleNamespace(project_id=project_id))  # 人物关系与组织归属
+    if relations:
+        characters_info = f"{characters_info}\n\n{relations}" if characters_info else relations
+    return "\n\n".join(blocks), characters_info, len(characters), len(protagonists)
+
+
+async def outline_prompt(
+    db: AsyncSession, project: Project, *, narrative_perspective: Optional[str], target_words: Any, chapter_count: Any,
+    requirements: str, protagonists_info: str, characters_info: str, mcp_references: str = "",
+) -> tuple[str, Any, Any]:
+    """总纲提示词：向导第 3 步、谋篇页「AI 生成」与共创室共用（世界观总述 + 规则 + 条目、对标书全书骨架 / 写法手册 /
+    结构统计、项目提示词、最终提示词）。返回 (提示词, 世界观, 仿写参考)。"""
+    world = await build_world_context(db, project, world_query(project), scene="总纲")
+    kb = await traced_kb_context(db, project.id, "story_outline")
+    combined = mcp_references or ""
+    if kb.text:
+        combined = f"{combined}\n\n{kb.text}".strip() if combined else kb.text
+    overrides = await load_prompt_overrides(db, project.id)
+    prompt = prompt_service.get_complete_outline_prompt(
+        title=project.title, theme=project.theme or "未设定", genre=project.genre or "通用", chapter_count=chapter_count,
+        narrative_perspective=narrative_perspective, target_words=target_words, description=project.description or "",
+        time_period=project.world_time_period or "未设定", location=project.world_location or "未设定",
+        atmosphere=project.world_atmosphere or "未设定", rules=world.merged, characters_info=characters_info or "暂无其他角色",
+        protagonists_info=protagonists_info, requirements=requirements or "",
+        mcp_references=quote_untrusted(combined, "参考资料"),
+        genre_guide=overrides.get("genre_guide"), elements=overrides.get("outline_elements"),
+    )
+    return prompt_service.apply_project_generation_prompt(prompt, project.generation_prompt or ""), world, kb
 
 
 async def world_building_generator(
@@ -193,12 +276,7 @@ async def world_building_generator(
         
         # 获取基础提示词
         yield await SSEResponse.send_progress("准备AI提示词...", 15)
-        base_prompt = prompt_service.get_world_building_prompt(
-            title=title,
-            theme=theme,
-            genre=genre
-        )
-        
+
         # MCP工具增强：收集参考资料
         reference_materials = ""
         if enable_mcp and user_id:
@@ -277,36 +355,16 @@ async def world_building_generator(
                 logger.warning(f"MCP工具调用失败（降级处理）: {e}")
                 yield await SSEResponse.send_progress("⚠️ MCP工具暂时不可用，使用基础模式", 25)
         
-        # 构建增强提示词
-        if reference_materials:
-            enhanced_prompt = f"""{base_prompt}
-
-【参考资料】
-以下是通过MCP工具收集的真实背景资料，请参考这些信息构建更真实的世界观：
-
-{quote_untrusted(reference_materials, "MCP 检索结果")}
-
-请结合上述资料，生成符合历史/现实的世界观设定。"""
-            final_prompt = enhanced_prompt
-            yield await SSEResponse.send_progress("💡 已整合参考资料，开始生成世界观...", 30)
-        else:
-            final_prompt = base_prompt
-            yield await SSEResponse.send_progress("正在调用AI生成...", 30)
-
-        # 仿写参考：对标书的全书骨架（去名版）；建项目时还没有关联，用向导里选的对标书
-        _kb = await traced_kb_context(
-            db, project_id or "", "worldview",
-            source_id=None if project_id else data.get("kb_source_id"), mode=data.get("kb_mode"),
-            user_id=data.get("user_id"),
+        # 构建提示词（与共创室共用）：MCP 资料 + 对标书全书骨架（建项目时还没有关联，用向导里选的对标书）+ 最终提示词
+        yield await SSEResponse.send_progress(
+            "💡 已整合参考资料，开始生成世界观..." if reference_materials else "正在调用AI生成...", 30)
+        final_prompt, _kb = await world_building_prompt(
+            db, project_id=project_id, title=title, theme=theme, genre=genre, generation_prompt=generation_prompt,
+            description=description or "", reference_materials=reference_materials,
+            kb_source_id=data.get("kb_source_id"), kb_mode=data.get("kb_mode"), user_id=data.get("user_id"),
         )
         if _kb.text:
-            final_prompt = f"{final_prompt}\n\n{_kb.text}"
             yield await SSEResponse.send_progress(f"📚 已注入仿写参考《{_kb.source_title}》", 32)
-
-        final_prompt = prompt_service.apply_project_generation_prompt(
-            final_prompt,
-            generation_prompt or ""
-        )
 
         # 流式生成世界观
         accumulated_text = ""
@@ -1348,41 +1406,10 @@ async def outline_generator(
             yield await SSEResponse.send_error("项目不存在", 404)
             return
         
-        # 获取角色信息
+        # 获取角色信息：主角详情（完整信息，用于强制约束）+ 其他角色（与共创室共用）
         yield await SSEResponse.send_progress("加载角色信息...", 15)
-        result = await db.execute(
-            select(Character).where(Character.project_id == project_id)
-        )
-        characters = result.scalars().all()
-
-        # 筛选主角（role_type 包含"主角"）
-        protagonists = [char for char in characters if is_protagonist_role(char.role_type)]
-
-        # 构建主角详细信息（完整信息，用于强制约束）
-        protagonists_info_parts = []
-        for idx, char in enumerate(protagonists, 1):
-            parts = [f"【主角{idx}】{char.name}"]
-            if char.personality:
-                parts.append(f"  - 性格：{char.personality[:200]}")
-            if char.background:
-                parts.append(f"  - 背景：{char.background[:300]}")
-            motivation = getattr(char, "motivation", None)
-            initial_status = getattr(char, "initial_status", None)
-            if motivation:
-                parts.append(f"  - 动机：{str(motivation)[:200]}")
-            if initial_status:
-                parts.append(f"  - 开局处境：{str(initial_status)[:200]}")
-            protagonists_info_parts.append("\n".join(parts))
-
-        protagonists_info = "\n\n".join(protagonists_info_parts) if protagonists_info_parts else ""
-
-        # 其他角色信息（非主角）
-        other_characters = [char for char in characters if not is_protagonist_role(char.role_type)]
-        characters_info = "\n".join([
-            f"- {char.name} ({'组织' if char.is_organization else '角色'}, {char.role_type}): {char.personality[:100] if char.personality else '暂无描述'}"
-            for char in other_characters
-        ])
-        stage.done(characters=len(characters), protagonists=len(protagonists))
+        protagonists_info, characters_info, cast_count, hero_count = await outline_cast_info(db, project_id)
+        stage.done(characters=cast_count, protagonists=hero_count)
         
         # MCP工具增强：收集大纲设计参考资料
         mcp_reference_materials = ""
@@ -1468,58 +1495,21 @@ async def outline_generator(
         # 准备生成高层大纲
         yield await SSEResponse.send_progress("准备生成高层故事大纲...", 30)
 
-        # 只查询现有世界规则 / 设定条目,不再生成(规则已在世界观阶段生成)
+        # 只查询现有世界规则 / 设定条目，不再生成（规则已在世界观阶段生成）；仿写参考：对标书的全书骨架 / 写法手册 / 结构统计
+        # （去名版）。MCP 在前、拆书参考紧随其后，整体当引用数据；提示词组装与共创室共用
         stage = begin_stage("references", "检索世界规则与仿写参考")
         yield await SSEResponse.send_progress("📋 加载世界规则...", 32)
-        world = await build_world_context(db, project, world_query(project), scene="总纲")
-        enhanced_world_rules = world.detail
-        final_world_rules = world.merged
-
-        # 仿写参考：对标书的全书骨架 / 写法手册 / 结构统计（去名版）
-        _kb = await traced_kb_context(db, project_id, "story_outline")
-        ref_pack_block = _kb.text
+        prompt, world, _kb = await outline_prompt(
+            db, project, narrative_perspective=narrative_perspective, target_words=target_words,
+            chapter_count=chapter_count, requirements=requirements, protagonists_info=protagonists_info,
+            characters_info=characters_info, mcp_references=mcp_reference_materials,
+        )
         if _kb.text:
             yield await SSEResponse.send_progress(f"📚 已注入仿写参考《{_kb.source_title}》", 33)
-        if enhanced_world_rules or ref_pack_block:
-            stage.done(world_rules_chars=len(enhanced_world_rules or ""), kb=_kb.source_title or "无")
+        if world.detail or _kb.text:
+            stage.done(world_rules_chars=len(world.detail or ""), kb=_kb.source_title or "无")
         else:
             stage.skip("没有详细世界规则，也没有对标书")
-
-        # 合并 MCP 与拆书参考（保持 MCP 在前，拆书参考紧随其后）；整体当引用数据，其中的指令不执行
-        combined_references = mcp_reference_materials or ""
-        if ref_pack_block:
-            combined_references = (
-                f"{combined_references}\n\n{ref_pack_block}".strip()
-                if combined_references
-                else ref_pack_block
-            )
-        combined_references = quote_untrusted(combined_references, "参考资料")
-
-        # 构建高层大纲提示词（包含 MCP 参考资料、拆书参考包注入和主角信息）
-        prompt_overrides = await load_prompt_overrides(db, project.id)
-        prompt = prompt_service.get_complete_outline_prompt(
-            title=project.title,
-            theme=project.theme or "未设定",
-            genre=project.genre or "通用",
-            chapter_count=chapter_count,
-            narrative_perspective=narrative_perspective,
-            target_words=target_words,
-            description=project.description or "",
-            time_period=project.world_time_period or "未设定",
-            location=project.world_location or "未设定",
-            atmosphere=project.world_atmosphere or "未设定",
-            rules=final_world_rules,
-            characters_info=characters_info or "暂无其他角色",
-            protagonists_info=protagonists_info,
-            requirements=requirements or "",
-            mcp_references=combined_references,
-            genre_guide=prompt_overrides.get("genre_guide"),
-            elements=prompt_overrides.get("outline_elements"),
-        )
-        prompt = prompt_service.apply_project_generation_prompt(
-            prompt,
-            project.generation_prompt or ""
-        )
         
         stage = begin_stage("llm", "模型撰写总纲")
         yield await SSEResponse.send_progress("正在调用AI生成高层大纲...", 35)

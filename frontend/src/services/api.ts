@@ -683,6 +683,9 @@ export const assistantApi = {
     ssePost<AssistantRunResult>(`/api/projects/${projectId}/assistant/messages/stream`, data, options),
   answerStream: (projectId: string, runId: string, answers: AssistantAnswer[], options?: SSEClientOptions<AssistantRunResult>) =>
     ssePost<AssistantRunResult>(`/api/projects/${projectId}/assistant/runs/${runId}/answer/stream`, { answers }, options),
+  /** 上游卡片处理完：接着做上一轮挂起的要求 */
+  continueStream: (projectId: string, messageId: string, options?: SSEClientOptions<AssistantRunResult>) =>
+    ssePost<AssistantRunResult>(`/api/projects/${projectId}/assistant/deferred/${messageId}/continue/stream`, {}, options),
   preview: (projectId: string, data: { message: string; page: AssistantPageContext }) =>
     api.post<unknown, AssistantPreview>(`/projects/${projectId}/assistant/preview`, data),
   runs: (projectId: string) =>
