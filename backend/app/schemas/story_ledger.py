@@ -21,6 +21,7 @@ class PromiseUpdate(BaseModel):
     deadline_chapter: Optional[int] = Field(None, ge=0, description="0 = 清除计划回收章")
     status: Optional[Literal["open", "resolved", "abandoned"]] = None
     resolved_chapter_number: Optional[int] = Field(None, ge=1)
+    activated_chapter_number: Optional[int] = Field(None, ge=1, description="本章强化：最近提及章挪到这一章，未回收的转推进中")
     note: Optional[str] = Field(None, max_length=1000)
 
 

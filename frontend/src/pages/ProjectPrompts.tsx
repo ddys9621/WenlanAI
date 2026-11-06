@@ -2,6 +2,7 @@
  * 项目提示词：按本项目改写 AI 的写作指导（正文写作 + 总纲 / 卷纲 / 章纲的写法），单条或全部恢复默认。
  * 只开放最影响成稿的几段；输出格式、作品资料由后端自动附加，作者怎么改都不会让生成结果解析出错。
  */
+import { DocIcon } from '@/components/project-shell/DocIcon';
 import { useEffect, useRef, useState } from 'react';
 import { Loader2, RotateCcw, ScrollText } from 'lucide-react';
 import { toast } from 'sonner';
@@ -129,7 +130,7 @@ export default function ProjectPrompts() {
     <div className="animate-fade-in space-y-6">
       <section className="lj-page-header">
         <div className="min-w-0">
-          <h1 className="lj-page-title">提示词</h1>
+          <h1 className="lj-page-title"><DocIcon />提示词</h1>
           <p className="lj-page-desc">
             按本书改写 AI 的写作指导，只影响这个项目。这里只开放最影响成稿的几段；输出格式、作品资料由系统自动附加，怎么改都不会让生成结果解析出错。
           </p>

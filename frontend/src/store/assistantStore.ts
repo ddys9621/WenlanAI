@@ -27,6 +27,8 @@ interface AssistantState {
   newSessionNonce: number;
   /** 每要求一次「打开待确认栏」加一（核对页点了待确认的候选） */
   reviewNonce: number;
+  /** 头部「作品备忘」按钮每点一次加一，对话界面看到变化就开 / 关备忘面板 */
+  memoNonce: number;
   setOpen: (open: boolean) => void;
   toggle: () => void;
   setMode: (mode: AssistantMode) => void;
@@ -38,6 +40,8 @@ interface AssistantState {
   requestNewSession: () => void;
   /** 切回对话并展开输入框上方的待确认栏 */
   openReview: () => void;
+  /** 切回对话并开 / 关作品备忘 */
+  toggleMemo: () => void;
 }
 
 const OPEN_KEY = 'assistant-open';
@@ -58,6 +62,7 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
   composeRequest: null,
   newSessionNonce: 0,
   reviewNonce: 0,
+  memoNonce: 0,
   setOpen: (open) => {
     writeFlag(OPEN_KEY, open);
     set({ open });
@@ -80,6 +85,7 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
     writeFlag(OPEN_KEY, true);
     set((s) => ({ open: true, mode: 'agent', reviewNonce: s.reviewNonce + 1 }));
   },
+  toggleMemo: () => set((s) => ({ mode: 'agent', memoNonce: s.memoNonce + 1 })),
 }));
 
 export function pageContextOf(state: Pick<AssistantState, 'route' | 'detail'>): AssistantPageContext {

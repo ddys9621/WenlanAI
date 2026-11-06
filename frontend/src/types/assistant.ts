@@ -23,6 +23,22 @@ export interface AssistantStep {
   ok: boolean
   summary: string
   args?: Record<string, unknown>
+  /** 调工具前给作者看的一句话（时间线上显示在这一步的回执前面；旧消息没有） */
+  note?: string
+}
+
+/** 写作技能：一类写作活的写法要点 + 检查清单；输入框里「/技能名」点名，成员也会按需读 */
+export interface AssistantSkill {
+  id: string
+  name: string
+  summary: string
+}
+
+/** 运行中追加的要求（排队，主编下一步开始前读到） */
+export interface AssistantQueuedMessage {
+  id: string
+  run_id: string
+  message: string
 }
 
 export interface AssistantQuestionOption {
@@ -62,6 +78,46 @@ export interface AssistantChapterCandidateRef {
   mode: string
   word_count: number
   preview: string
+}
+
+/** write_chapter 写的一章：对话里的写作卡按它挂（后台写的进度、写好的候选稿、对比、采用）；自动执行采用了带 adopted */
+export interface AssistantChapterWrite {
+  chapter_id: string
+  chapter_number: number
+  chapter_title: string
+  job_id: string
+  started_at: string
+  adopted?: { candidate_id: string; after_hash: string; before_empty: boolean; before_hash: string } | null
+}
+
+/** 作品备忘的一条：作者的长期偏好 / 已定约定（每轮都带给团队，跨对话不丢）；team = 团队用 remember 记的 */
+export interface AssistantMemo {
+  id: string
+  content: string
+  source: 'author' | 'team'
+  member_id: string | null
+  run_id: string | null
+  created_at: string | null
+}
+
+/** 撤销本轮的一项：chapter 正文 / draft 候选稿 / outline 章纲 / volume 卷纲 / entity 新建 / field 修改 / memo 备忘 / note 撤不了的 */
+export interface AssistantUndoItem {
+  kind: 'chapter' | 'draft' | 'outline' | 'volume' | 'entity' | 'field' | 'memo' | 'note'
+  label: string
+  action: string
+  ok: boolean
+  reason: string
+  /** 正文 / 候选稿那几项：撤完按它刷新章节页 */
+  chapter_id?: string | null
+}
+
+export interface AssistantUndoReport {
+  run_id: string
+  items: AssistantUndoItem[]
+  doable: number
+  blocked: number
+  /** 撤完才有：「已撤销本轮：撤回 N 项，M 项没动」 */
+  message?: string
 }
 
 /** 共创室成员（主编 / 世界观设定师 / 人物设计师 / 总纲策划师 / 章节策划师 / 正文作者 / 审校编辑） */
@@ -125,6 +181,7 @@ export interface AssistantTeam {
   members: AssistantMember[]
   starters: AssistantStarter[]
   context: AssistantContextSettings
+  skills?: AssistantSkill[]
 }
 
 /** 规划工具产出的草案卡片：作者在卡片上确认才算定稿 */
@@ -182,6 +239,14 @@ export interface AssistantMessageView {
   delegated?: boolean
   /** 系统代发的作者消息（上游卡片处理完，接着做挂起的要求） */
   auto?: boolean
+  /** 作者在团队处理中追加的要求（排队送达） */
+  queued?: boolean
+  /** 这条要求打开了「自动执行」 */
+  autopilot?: boolean
+  /** 这一段 write_chapter 写的章（写作卡） */
+  chapter_writes?: AssistantChapterWrite[]
+  /** 这条要求所在的那一轮已经撤销 */
+  undone?: boolean
 }
 
 /** 挂起的要求：等作者处理完上游卡片，团队自动接着做 */
@@ -214,8 +279,9 @@ export interface AssistantFieldCandidate {
   decided_at: string | null
 }
 
-/** 新建对象候选：工具只记下要新建的世界规则 / 设定条目 / 角色 / 组织 / 关系 / 组织成员，作者「应用」才真正建档 */
-export type AssistantEntityCandidateStatus = 'candidate' | 'applied' | 'rejected'
+/** 新建对象候选：工具只记下要新建的世界规则 / 设定条目 / 角色 / 组织 / 关系 / 组织成员，作者「应用」才真正建档；
+ * undone = 撤销本轮时删掉了建出来的那一行 */
+export type AssistantEntityCandidateStatus = 'candidate' | 'applied' | 'rejected' | 'undone'
 
 export interface AssistantEntityCandidate {
   id: string
@@ -241,8 +307,8 @@ export interface AssistantEntityCandidate {
   decided_at: string | null
 }
 
-/** interrupted：库里残留 running 但没有在跑的任务（服务重启 / 任务异常），只在读取时这样显示 */
-export type AssistantRunStatus = 'running' | 'waiting_input' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
+/** interrupted：库里残留 running 但没有在跑的任务（服务重启 / 任务异常），只在读取时这样显示；undone：作者撤销了这一轮 */
+export type AssistantRunStatus = 'running' | 'waiting_input' | 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'undone'
 
 export interface AssistantRunView {
   id: string

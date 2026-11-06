@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
+import { DocIcon } from '@/components/project-shell/DocIcon';
 import { useStore } from '@/store';
 import { useProjectSync } from '@/store/hooks';
 import { wizardStreamApi } from '@/services/api';
@@ -237,7 +238,7 @@ export default function WorldSetting() {
     <div className="animate-fade-in space-y-6">
       <section className="lj-page-header">
         <div className="min-w-0">
-          <h1 className="lj-page-title">世界设定</h1>
+          <h1 className="lj-page-title"><DocIcon />世界设定</h1>
           <p className="mt-2 max-w-[560px] text-sm leading-6 text-content-secondary">
             把时代、地点、氛围与规则分开整理，先立好框架，再往里填充细节。
           </p>

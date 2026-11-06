@@ -1,12 +1,14 @@
 /**
  * 章节写作（原「章节管理」与「剧情分析」两页合并；版式参考岚笺写作台）。
  *
- * 满高工作台：左侧章节目录（搜索 / 新建 / 从章纲同步 / 批量生成；选中行可 生成候选稿 / 去 AI 味重写 / 分析 / 删除，
- * 并标出待审候选稿、章纲已改、章纲待确认）；右侧稿纸：正文 | 候选稿 | 历史版本 三个界面——正文直接码字（自动保存、AI 行内补全、
+ * 满高工作台：章节目录（搜索 / 新建 / 从章纲同步 / 批量生成；选中行可 生成候选稿 / 去 AI 味重写 / 分析 / 删除，
+ * 并标出待审候选稿、章纲已改、章纲待确认）挂在工作台左栏的「目录」页签里（portal 到 directorySlot，
+ * 状态和按钮仍在本页）；中栏整块是稿纸：正文 | 候选稿 | 历史版本 三个界面——正文直接码字（自动保存、AI 行内补全、
  * 专注模式），旁边可开记忆标注 / 叙事状态面板；正文任务运行时就地显示流式面板。
  * AI 输出一律先成候选稿，作者采用才写入正文（参考岚笺）。任务编排在 useChapterWriteJobs，页面只管选中章节与阅读态。
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { useSearchParams } from 'react-router-dom';
 import {
   BookOpen, Download, FileCheck2, History, Layers, Loader2, PanelRightClose, PanelRightOpen, Plus, RefreshCw, Search,
@@ -39,6 +41,7 @@ import { ChapterWritingPane, type ChapterWritingPaneHandle } from '@/components/
 import { DeaiRewriteModal, type RewriteMode } from '@/components/chapters/DeaiRewriteModal';
 import { NarrativeStatePanel } from '@/components/chapters/NarrativeStatePanel';
 import { VersionHistoryPanel } from '@/components/chapters/VersionHistoryPanel';
+import { useProjectShell } from '@/components/project-shell/ProjectShellContext';
 
 type SidebarTab = 'archive' | 'memory' | 'narrative';
 type ReaderTab = 'content' | 'candidates' | 'versions';
@@ -69,6 +72,7 @@ export default function ChapterAnalysis() {
   const manuscriptRef = useRef<HTMLDivElement>(null);
   const paneRef = useRef<ChapterWritingPaneHandle>(null);
   const [searchParams, setSearchParams] = useSearchParams();
+  const { directorySlot } = useProjectShell();
 
   const loadAnalysis = useCallback((id: string) => {
     setNarrativeLoading(true);
@@ -138,12 +142,18 @@ export default function ChapterAnalysis() {
     selection: selection && selection.text ? { start: selection.start, end: selection.end, text: selection.text } : null,
   } : null);
 
-  // 助笔给本章产生了候选稿：刷新候选稿列表与章节列表里的待审数
+  // 助笔给本章产生了候选稿：刷新候选稿列表与章节列表里的待审数；
+  // 自动执行写完一章直接采用进正文（entity = chapter）：刷新章节列表，正看着这一章就重读正文
   const onAssistantData = useCallback((change: AssistantDataChange) => {
+    if (change.entity === 'chapter') {
+      void refreshChapters();
+      if (change.chapterId && change.chapterId === selectedId) void loadSelected(change.chapterId);
+      return;
+    }
     if (change.entity !== 'chapter_candidate') return;
     void refreshChapters();
     if (change.chapterId && change.chapterId === selectedId) setCandidatesVersion((v) => v + 1);
-  }, [refreshChapters, selectedId]);
+  }, [loadSelected, refreshChapters, selectedId]);
   useAssistantDataChange(onAssistantData);
 
   // ---------- 正文任务 ----------
@@ -314,7 +324,7 @@ export default function ChapterAnalysis() {
 
   const readerTabs = (
     <div className="flex items-center gap-1.5">
-      <div className="flex items-center gap-0.5 rounded-sm border border-surface-border bg-surface p-0.5">
+      <div className="ws-seg">
         {([
           ['content', '正文', BookOpen],
           ['candidates', `候选稿${(selectedSummary?.pending_candidates ?? 0) > 0 ? ` ${selectedSummary?.pending_candidates}` : ''}`, FileCheck2],
@@ -323,13 +333,12 @@ export default function ChapterAnalysis() {
           <button
             key={key}
             onClick={() => setReaderTab(key)}
-            className={cn(
-              'flex items-center gap-1 rounded-sm px-2 py-1 text-xs font-medium',
-              readerTab === key ? 'bg-brand text-white' : 'text-content-secondary hover:text-content',
-            )}
+            className={cn('ws-seg-item', readerTab === key && 'ws-seg-item--on')}
+            title={label}
           >
             <Icon className="h-3.5 w-3.5" />
-            {label}
+            {/* 稿纸窄时标签收起只留图标（globals.css 的 .lj-chapter-head 容器查询） */}
+            <span className="lj-seg-label">{label}</span>
           </button>
         ))}
       </div>
@@ -369,11 +378,120 @@ export default function ChapterAnalysis() {
     </div>
   ) : undefined;
 
+  // 章节目录：挂在工作台左栏「目录」页签里（portal），搜索、选中和每行的按钮都还是本页的状态
+  const directory = (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 items-center gap-2 px-3 pb-1.5 pt-1.5">
+        <label className="relative min-w-0 flex-1">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-content-tertiary" />
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="搜索章节…"
+            aria-label="搜索章节"
+            className="ws-search"
+          />
+        </label>
+        <button onClick={() => setCreating(true)} className="ws-add" title="新建章节" aria-label="新建章节">
+          <Plus className="h-4 w-4" />
+        </button>
+      </div>
+      <div className="flex min-h-[28px] shrink-0 items-center gap-0.5 px-3 pb-1">
+        <span className="min-w-0 flex-1 truncate text-[11px] text-content-tertiary tabular-nums">
+          {chapters.length} 章 · {totalWords.toLocaleString()} 字{pendingCandidates > 0 ? ` · 待审候选稿 ${pendingCandidates}` : ''}
+        </span>
+        <ExplorerButton title="从章纲同步：把章纲一键转成章节骨架" onClick={() => void handleSyncFromOutlines()} disabled={syncing}>
+          {syncing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+          同步
+        </ExplorerButton>
+        <ExplorerButton title="批量生成候选稿（服务端串行，关掉浏览器也不停）" onClick={() => setShowBatch(true)} disabled={batchRunning || streamBusy}>
+          <Layers className="h-3.5 w-3.5" />
+          批量
+        </ExplorerButton>
+      </div>
+      <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-2 pb-2">
+        {visibleChapters.map((c) => {
+          const isSelected = c.id === selectedId;
+          const generating = jobs.isGenerating(c.id);
+          const currentBatchChapter = batchRunning && batchStatus?.currentChapterId === c.id;
+          const analyzing = jobs.analyzingChapterIds.has(c.id);
+          const canWrite = !generating && !batchRunning && !streamBusy;
+          const flagged = (c.pending_candidates ?? 0) > 0 || c.outline_changed || c.outline_review_status === 'draft' || c.outline_upstream_stale;
+          return (
+            <div
+              key={c.id}
+              onClick={() => selectChapter(c.id)}
+              className={cn(
+                'ws-chapter-row group cursor-pointer',
+                isSelected && 'ws-chapter-row--on',
+                currentBatchChapter && !isSelected && 'bg-brand-50',
+              )}
+            >
+              <span className="w-6 shrink-0 pt-px text-right text-[11px] text-content-tertiary tabular-nums">{c.chapter_number}</span>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span className={cn('min-w-0 flex-1 truncate text-[13px] text-content', isSelected && 'font-medium')}>{c.title}</span>
+                  {c.word_count > 0 && <AnalysisStatusDot status={analyzing ? 'running' : c.analysis_status} message={c.analysis_message} />}
+                </div>
+                <span className="block text-[11px] text-content-tertiary tabular-nums">
+                  {generating ? <Loader2 className="inline h-3 w-3 animate-spin text-brand" /> : c.word_count > 0 ? `${c.word_count.toLocaleString()} 字` : '空'}
+                </span>
+                {(flagged || currentBatchChapter || c.analysis_status === 'stale' || c.analysis_status === 'failed') && (
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {currentBatchChapter && <span className="lj-badge lj-badge--candidate">串行生成中</span>}
+                    {c.analysis_status === 'failed' && !analyzing && (
+                      <span className="lj-badge lj-badge--stale" title={c.analysis_message || '最近一次分析失败'}>分析失败</span>
+                    )}
+                    {c.analysis_status === 'stale' && !analyzing && (
+                      <span className="lj-badge lj-badge--stale" title="正文在分析之后改过，档案与人物状态可能过期">分析过期</span>
+                    )}
+                    {(c.pending_candidates ?? 0) > 0 && <span className="lj-badge lj-badge--candidate">候选稿 {c.pending_candidates}</span>}
+                    {c.outline_changed && <span className="lj-badge lj-badge--stale" title="正文写完后章纲又改过">章纲已改</span>}
+                    {c.outline_upstream_stale && <span className="lj-badge lj-badge--stale" title="卷纲 / 总纲改过">上游已改</span>}
+                    {c.outline_review_status === 'draft' && <span className="lj-badge lj-badge--draft" title="AI 草拟的章纲，尚未确认">章纲待确认</span>}
+                  </div>
+                )}
+                <div className={cn('-ml-1 mt-1 items-center gap-0.5', isSelected ? 'flex' : 'hidden group-hover:flex')} onClick={(e) => e.stopPropagation()}>
+                  <button
+                    onClick={() => void openGenerate(c)}
+                    disabled={!canWrite}
+                    className="hh-icon-btn-plain h-7 w-7 hover:text-brand"
+                    title={c.word_count > 0 ? 'AI 重新写一稿（存为候选稿，不会覆盖现有正文）' : 'AI 生成候选稿'}
+                    aria-label="AI 生成候选稿"
+                  >
+                    {generating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
+                  </button>
+                  {c.word_count > 0 && (
+                    <button onClick={() => setRewriteTarget(c)} disabled={!canWrite} className="hh-icon-btn-plain h-7 w-7 hover:text-brand" title="去 AI 味重写（结果存为候选稿）" aria-label="去 AI 味重写">
+                      <RefreshCw className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                  {c.word_count > 0 && (
+                    <button onClick={() => void jobs.handleAnalyze(c)} disabled={analyzing} className="hh-icon-btn-plain h-7 w-7 hover:text-brand" title="分析（章节档案 / 人物状态 / 伏笔 / 一致性）" aria-label="分析">
+                      {analyzing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
+                    </button>
+                  )}
+                  <button onClick={() => void handleDelete(c)} className="hh-icon-btn-plain ml-auto h-7 w-7 hover:text-cinnabar" title="删除" aria-label="删除">
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        {sorted.length === 0 ? (
+          <p className="px-3 py-6 text-center text-xs leading-5 text-content-tertiary">还没有章节。点「同步」把章纲转成章节骨架，或点 + 新建一章。</p>
+        ) : visibleChapters.length === 0 && <p className="px-3 py-6 text-center text-xs text-content-tertiary">没有匹配的章节</p>}
+      </div>
+    </div>
+  );
+
   return (
-    <div className="flex animate-fade-in flex-col gap-3 lg:h-[calc(100dvh-6.75rem)]">
+    <div className="flex h-full min-h-0 animate-fade-in flex-col">
+      {directorySlot && createPortal(directory, directorySlot)}
       {/* 批量生成进度 */}
       {batchStatus && (
-        <section className="hh-panel shrink-0 space-y-2.5 px-4 py-3">
+        <section className="shrink-0 space-y-2 border-b border-surface-border bg-surface-paper px-4 py-2.5">
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0 space-y-1">
               <div className="flex items-center gap-2 text-sm">
@@ -414,127 +532,31 @@ export default function ChapterAnalysis() {
       )}
 
       {sorted.length === 0 ? (
-        <section className="hh-panel flex flex-col items-center px-6 py-14 text-center">
-          <span className="flex h-14 w-14 items-center justify-center bg-brand/10 text-brand">
-            <BookOpen className="h-7 w-7" />
-          </span>
-          <h2 className="mt-5 text-xl font-semibold tracking-tight text-content">还没有章节</h2>
-          <p className="mt-2 max-w-md text-sm leading-6 text-content-secondary">
-            「从章纲同步」把章纲一键转成章节骨架，或「新建章节」直接开写。
-          </p>
-          <div className="mt-6 flex gap-2">
-            <button onClick={() => void handleSyncFromOutlines()} disabled={syncing} className="hh-btn-secondary">
-              {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-              从章纲同步
-            </button>
-            <button onClick={() => setCreating(true)} className="hh-btn-primary">
-              <Plus className="h-4 w-4" />
-              新建章节
-            </button>
-          </div>
-        </section>
-      ) : (
-        <div className="grid min-h-0 flex-1 overflow-hidden rounded border border-surface-border bg-white lg:grid-cols-[272px_minmax(0,1fr)]">
-          {/* 左栏：章节目录 */}
-          <aside className="flex min-h-0 flex-col bg-surface-paper max-lg:max-h-[45vh] max-lg:border-b lg:border-r lg:border-surface-border">
-            <div className="flex shrink-0 items-center gap-1.5 border-b border-surface-border px-2.5 py-2.5">
-              <div className="relative min-w-0 flex-1">
-                <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-content-tertiary" />
-                <input
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="搜索章节"
-                  aria-label="搜索章节"
-                  className="h-8 w-full pl-7 pr-2 text-xs"
-                />
-              </div>
-              <ExplorerButton title="新建章节" onClick={() => setCreating(true)}>
-                <Plus className="h-4 w-4" />
-              </ExplorerButton>
-              <ExplorerButton title="从章纲同步：把章纲一键转成章节骨架" onClick={() => void handleSyncFromOutlines()} disabled={syncing}>
-                {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-              </ExplorerButton>
-              <ExplorerButton title="批量生成候选稿（服务端串行，关掉浏览器也不停）" onClick={() => setShowBatch(true)} disabled={batchRunning || streamBusy}>
-                <Layers className="h-4 w-4" />
-              </ExplorerButton>
-            </div>
-            <p className="shrink-0 px-3 pb-1.5 pt-2 text-[11px] text-content-tertiary tabular-nums">
-              共 {chapters.length} 章 · {totalWords.toLocaleString()} 字{pendingCandidates > 0 ? ` · 待审候选稿 ${pendingCandidates}` : ''}
+        <div className="flex flex-1 items-center justify-center overflow-y-auto px-6 py-10">
+          <section className="flex max-w-md flex-col items-center text-center">
+            <span className="flex h-14 w-14 items-center justify-center rounded-xl bg-brand/10 text-brand">
+              <BookOpen className="h-7 w-7" />
+            </span>
+            <h2 className="mt-5 font-serif text-xl font-semibold tracking-wide text-content">还没有章节</h2>
+            <p className="mt-2 text-sm leading-6 text-content-secondary">
+              「从章纲同步」把章纲一键转成章节骨架，或「新建章节」直接开写。
             </p>
-            <div className="min-h-0 flex-1 overflow-y-auto pb-2">
-              {visibleChapters.map((c) => {
-                const isSelected = c.id === selectedId;
-                const generating = jobs.isGenerating(c.id);
-                const currentBatchChapter = batchRunning && batchStatus?.currentChapterId === c.id;
-                const analyzing = jobs.analyzingChapterIds.has(c.id);
-                const canWrite = !generating && !batchRunning && !streamBusy;
-                const flagged = (c.pending_candidates ?? 0) > 0 || c.outline_changed || c.outline_review_status === 'draft' || c.outline_upstream_stale;
-                return (
-                  <div
-                    key={c.id}
-                    onClick={() => selectChapter(c.id)}
-                    className={cn(
-                      'group cursor-pointer px-3 py-2 transition-colors',
-                      isSelected ? 'bg-gold-50 shadow-[inset_3px_0_#e99a35]' : 'hover:bg-surface-hover',
-                      currentBatchChapter && !isSelected && 'bg-brand-50',
-                    )}
-                  >
-                    <div className="flex items-baseline gap-2">
-                      <span className="shrink-0 text-[11px] text-content-tertiary tabular-nums">第{c.chapter_number}章</span>
-                      <span className={cn('min-w-0 flex-1 truncate text-[13px] text-content', isSelected && 'font-medium')}>{c.title}</span>
-                      <span className="shrink-0 text-[11px] text-content-tertiary tabular-nums">
-                        {generating ? <Loader2 className="inline h-3 w-3 animate-spin text-brand" /> : c.word_count > 0 ? `${c.word_count.toLocaleString()}字` : '空'}
-                      </span>
-                      {c.word_count > 0 && <AnalysisStatusDot status={analyzing ? 'running' : c.analysis_status} message={c.analysis_message} />}
-                    </div>
-                    {(flagged || currentBatchChapter || c.analysis_status === 'stale' || c.analysis_status === 'failed') && (
-                      <div className="mt-1 flex flex-wrap gap-1">
-                        {currentBatchChapter && <span className="lj-badge lj-badge--candidate">串行生成中</span>}
-                        {c.analysis_status === 'failed' && !analyzing && (
-                          <span className="lj-badge lj-badge--stale" title={c.analysis_message || '最近一次分析失败'}>分析失败</span>
-                        )}
-                        {c.analysis_status === 'stale' && !analyzing && (
-                          <span className="lj-badge lj-badge--stale" title="正文在分析之后改过，档案与人物状态可能过期">分析过期</span>
-                        )}
-                        {(c.pending_candidates ?? 0) > 0 && <span className="lj-badge lj-badge--candidate">候选稿 {c.pending_candidates}</span>}
-                        {c.outline_changed && <span className="lj-badge lj-badge--stale" title="正文写完后章纲又改过">章纲已改</span>}
-                        {c.outline_upstream_stale && <span className="lj-badge lj-badge--stale" title="卷纲 / 总纲改过">上游已改</span>}
-                        {c.outline_review_status === 'draft' && <span className="lj-badge lj-badge--draft" title="AI 草拟的章纲，尚未确认">章纲待确认</span>}
-                      </div>
-                    )}
-                    <div className={cn('mt-1 items-center gap-0.5', isSelected ? 'flex' : 'hidden group-hover:flex')} onClick={(e) => e.stopPropagation()}>
-                      <button
-                        onClick={() => void openGenerate(c)}
-                        disabled={!canWrite}
-                        className="hh-icon-btn-plain h-7 w-7 hover:text-brand"
-                        title={c.word_count > 0 ? 'AI 重新写一稿（存为候选稿，不会覆盖现有正文）' : 'AI 生成候选稿'}
-                        aria-label="AI 生成候选稿"
-                      >
-                        {generating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
-                      </button>
-                      {c.word_count > 0 && (
-                        <button onClick={() => setRewriteTarget(c)} disabled={!canWrite} className="hh-icon-btn-plain h-7 w-7 hover:text-brand" title="去 AI 味重写（结果存为候选稿）" aria-label="去 AI 味重写">
-                          <RefreshCw className="h-3.5 w-3.5" />
-                        </button>
-                      )}
-                      {c.word_count > 0 && (
-                        <button onClick={() => void jobs.handleAnalyze(c)} disabled={analyzing} className="hh-icon-btn-plain h-7 w-7 hover:text-brand" title="分析（章节档案 / 人物状态 / 伏笔 / 一致性）" aria-label="分析">
-                          {analyzing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
-                        </button>
-                      )}
-                      <button onClick={() => void handleDelete(c)} className="hh-icon-btn-plain ml-auto h-7 w-7 hover:text-cinnabar" title="删除" aria-label="删除">
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-              {visibleChapters.length === 0 && <p className="px-3 py-6 text-center text-xs text-content-tertiary">没有匹配的章节</p>}
+            <div className="mt-6 flex gap-2">
+              <button onClick={() => void handleSyncFromOutlines()} disabled={syncing} className="hh-btn-secondary">
+                {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                从章纲同步
+              </button>
+              <button onClick={() => setCreating(true)} className="hh-btn-primary">
+                <Plus className="h-4 w-4" />
+                新建章节
+              </button>
             </div>
-          </aside>
-
-          {/* 右栏：流式面板 / 稿纸 */}
-          <section className="flex min-h-0 min-w-0 flex-col max-lg:h-[80vh]">
+          </section>
+        </div>
+      ) : (
+        <div className="flex min-h-0 min-w-0 flex-1">
+          {/* 流式面板 / 稿纸（章节目录在工作台左栏） */}
+          <section className="flex min-h-0 min-w-0 flex-1 flex-col">
             {streamPanelVisible && jobs.streamState ? (
               <div className="min-h-0 flex-1 overflow-y-auto p-3">
                 <ChapterStreamPanel
@@ -578,13 +600,15 @@ export default function ChapterAnalysis() {
                 />
                 {/* 侧栏：记忆标注 / 叙事状态（智能助笔在项目右侧的全局抽屉里） */}
                 {sidebarOpen && (
-                  <aside className="flex w-[320px] shrink-0 flex-col border-l border-surface-border bg-white max-xl:hidden">
-                    <div className="flex shrink-0 gap-1 border-b border-surface-border px-3 py-2.5">
-                      {([['archive', '本章档案'], ['memory', '正文标注'], ['narrative', '叙事状态']] as const).map(([key, label]) => (
-                        <button key={key} onClick={() => setSidebarTab(key)} className={cn('hh-chip px-3 py-1 text-xs', sidebarTab === key && 'hh-chip--active')}>
-                          {label}
-                        </button>
-                      ))}
+                  <aside className="flex w-[320px] shrink-0 flex-col border-l border-surface-border bg-surface-paper max-xl:hidden">
+                    <div className="flex h-12 shrink-0 items-center border-b border-surface-border px-3">
+                      <div className="ws-seg">
+                        {([['archive', '本章档案'], ['memory', '正文标注'], ['narrative', '叙事状态']] as const).map(([key, label]) => (
+                          <button key={key} onClick={() => setSidebarTab(key)} className={cn('ws-seg-item', sidebarTab === key && 'ws-seg-item--on')}>
+                            {label}
+                          </button>
+                        ))}
+                      </div>
                     </div>
                     <div className="min-h-0 flex-1 overflow-y-auto p-3">
                       {sidebarTab === 'archive' ? (
@@ -622,8 +646,8 @@ export default function ChapterAnalysis() {
               </div>
             ) : (
               <>
-                <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-surface-border bg-white px-3 py-1.5">
-                  <span className="truncate font-serif text-[15px] font-semibold text-content">
+                <div className="flex min-h-12 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-surface-border bg-surface-paper px-4 py-1.5">
+                  <span className="truncate font-serif text-[16px] font-semibold tracking-wide text-content">
                     第 {detail.chapter_number} 章<span className="ml-2">{detail.title}</span>
                   </span>
                   {readerTabs}
@@ -699,8 +723,7 @@ function ExplorerButton({ title, onClick, disabled, children }: { title: string;
       onClick={onClick}
       disabled={disabled}
       title={title}
-      aria-label={title}
-      className="flex h-8 w-8 shrink-0 items-center justify-center rounded border border-surface-border bg-white text-content-secondary hover:border-brand/50 hover:text-brand disabled:cursor-not-allowed disabled:opacity-50"
+      className="inline-flex h-7 shrink-0 items-center gap-1 rounded-lg px-1.5 text-[11px] text-content-secondary hover:bg-surface-hover hover:text-brand disabled:cursor-not-allowed disabled:opacity-50"
     >
       {children}
     </button>

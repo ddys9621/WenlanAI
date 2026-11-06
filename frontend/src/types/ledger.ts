@@ -43,7 +43,20 @@ export interface PromiseUpdate {
   deadline_chapter?: number;
   status?: 'open' | 'resolved' | 'abandoned';
   resolved_chapter_number?: number;
+  /** 本章强化：最近提及章挪到这一章，未回收的转推进中 */
+  activated_chapter_number?: number;
   note?: string;
+}
+
+/** 写第 N 章时该照应的一条伏笔（章纲要回收 / 推进、超期 / 临近、掉线）；flag 按第 N 章算 */
+export interface PromiseReminder extends LedgerPromise {
+  /** 列出来的原因：本章章纲要回收 / 本章章纲要推进 / 已在本章回收 / 超期、临近、掉线的提醒 */
+  reason: string;
+  planned: 'resolve' | 'advance' | null;
+  /** 章纲里写的怎么回收 / 推进 */
+  how: string;
+  resolved_here: boolean;
+  reinforced_here: boolean;
 }
 
 export interface PromiseCreate {

@@ -12,6 +12,8 @@ export interface SSEMessage {
     | 'speaker' | 'member_start' | 'member_message' | 'plan' | 'job'
     // 共创室上下文：这一步的用量 / 把较早的对话压成前情摘要（phase: running / done / failed）
     | 'context' | 'compact'
+    // 共创室过程：工具开跑（带 note）/ 追加的要求送达 / 自动执行写入了卡片、确认了草案、采用了正文 / 写作卡 / 记了作品备忘
+    | 'tool_start' | 'queued_delivered' | 'card_update' | 'plans_confirmed' | 'chapter_adopted' | 'chapter_write' | 'memo'
     // 编辑器行内补全：截至目前的完整建议
     | 'suggestion';
   message?: string;
@@ -273,6 +275,13 @@ class SSEPostClient<TResult = unknown, TRequest = unknown> {
       case 'member_message':
       case 'plan':
       case 'job':
+      case 'tool_start':
+      case 'queued_delivered':
+      case 'card_update':
+      case 'plans_confirmed':
+      case 'chapter_adopted':
+      case 'chapter_write':
+      case 'memo':
         this.options.onEvent?.(message);
         break;
 

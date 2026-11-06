@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import { Plus, Pencil, Trash2, FileText, Loader2, Sparkles, Layers, BookOpen, Check, Eye } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
+import { DocIcon } from '@/components/project-shell/DocIcon'
 import { useStore } from '@/store/index'
 import { useOutlineSync } from '@/store/hooks'
 import { useVolumeSync, useChapterOutlineSync } from '@/store/plotHooks'
@@ -41,8 +42,15 @@ export default function OutlinePage() {
   const { currentProject, outlines } = useStore()
   const projectId = currentProject?.id
   const subPath = useParams()['*']
+  const navigate = useNavigate()
   const [activeTab, setActiveTab] = useState<TabKey>(() => tabFromPath(subPath))
   useEffect(() => { setActiveTab(tabFromPath(subPath)) }, [subPath])
+  // 切页签写进地址（outline / outline/volumes / outline/chapters）：工作台左栏「大纲」页签按地址亮对应的卡片
+  const openTab = useCallback((key: TabKey) => {
+    const path = TABS.find((t) => t.key === key)?.path
+    if (projectId) navigate(`/project/${projectId}/outline${path ? `/${path}` : ''}`, { replace: true })
+    else setActiveTab(key)
+  }, [navigate, projectId])
   const [loading, setLoading] = useState(false)
 
   // hooks
@@ -76,24 +84,21 @@ export default function OutlinePage() {
     <div className="animate-fade-in space-y-6">
       <section className="lj-page-header">
         <div className="min-w-0">
-          <h1 className="lj-page-title">谋篇</h1>
+          <h1 className="lj-page-title"><DocIcon />谋篇</h1>
           <p className="mt-2 max-w-[600px] text-sm leading-6 text-content-secondary">
             总纲定全书主线，卷纲把每卷拆成几件完整的事，章纲把每件事落到章；AI 草拟的都要你确认后才写正文。
             当前 {outlines.length} 个总纲版本、{volumes.length} 卷卷纲、{chapterOutlines.length} 份章纲。
           </p>
         </div>
 
-        <div className="flex shrink-0 flex-wrap self-start border border-surface-border bg-white/60 p-1 md:self-auto">
+        <div className="ws-seg self-start md:self-auto">
           {TABS.map(tab => {
             const selected = activeTab === tab.key
             return (
               <button
                 key={tab.key}
-                onClick={() => setActiveTab(tab.key)}
-                className={cn(
-                  'inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium transition-colors',
-                  selected ? 'bg-brand text-white' : 'text-content-secondary hover:text-content'
-                )}
+                onClick={() => openTab(tab.key)}
+                className={cn('ws-seg-item px-3 py-1.5', selected && 'ws-seg-item--on')}
               >
                 <tab.icon className="h-3.5 w-3.5" />
                 {tab.label}
@@ -137,10 +142,10 @@ export default function OutlinePage() {
               saveVolume={saveVolume}
               confirmVolume={confirmVolume}
               deleteVolume={deleteVolume}
-              onOpenChapterOutlines={() => setActiveTab('chapterOutlines')}
+              onOpenChapterOutlines={() => openTab('chapterOutlines')}
             />
           )}
-          {activeTab === 'chapterOutlines' && <ChapterOutlinesView chapterOutlines={chapterOutlines} volumes={volumes} projectId={projectId} createChapterOutline={createChapterOutline} updateChapterOutline={updateChapterOutlineData} deleteChapterOutline={deleteChapterOutline} batchCreateChapterOutlines={batchCreateChapterOutlines} onOpenVolumes={() => setActiveTab('volumes')} onRefresh={() => (projectId ? refreshChapterOutlines(projectId) : Promise.resolve())} />}
+          {activeTab === 'chapterOutlines' && <ChapterOutlinesView chapterOutlines={chapterOutlines} volumes={volumes} projectId={projectId} createChapterOutline={createChapterOutline} updateChapterOutline={updateChapterOutlineData} deleteChapterOutline={deleteChapterOutline} batchCreateChapterOutlines={batchCreateChapterOutlines} onOpenVolumes={() => openTab('volumes')} onRefresh={() => (projectId ? refreshChapterOutlines(projectId) : Promise.resolve())} />}
         </>
       )}
     </div>

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import weakref
 from typing import Awaitable, Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +17,18 @@ from app.logger import get_logger
 logger = get_logger(__name__)
 
 WRITE_ATTEMPTS = 4
+
+_decision_locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = weakref.WeakValueDictionary()
+
+
+def decision_lock(project_id: str) -> asyncio.Lock:
+    """同一项目的候选处理排队做（没人用时锁自动回收）：同一张卡被同时点了两次（待确认栏的行上和对话里的卡片）、
+    两张同名新建卡同时建档、同一项内容的两份修改同时应用，不排队就都过了「还没处理 / 没有同名 / 内容没被改过」的核对，
+    建出两份或互相覆盖。自动执行在运行里替作者采用时也排这把锁（作者可能同时在点卡片）。"""
+    lock = _decision_locks.get(project_id)
+    if lock is None:
+        lock = _decision_locks[project_id] = asyncio.Lock()
+    return lock
 
 
 class PersistError(RuntimeError):

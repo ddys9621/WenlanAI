@@ -19,12 +19,14 @@ from sqlalchemy import select
 
 from app.models.assistant import AssistantEntityCandidate, AssistantMessage
 from app.models.chapter import Chapter
+from app.models.chapter_candidate import utcnow
 from app.models.character import Character
 from app.models.project import Project
 from app.models.relationship import CharacterRelationship, Organization, OrganizationMember
 from app.models.setting_entry import SETTING_CATEGORIES, SettingEntry
 from app.models.world_rule import WorldRule
 from app.schemas.character import CharacterBatchGenerateRequest
+from app.services import assistant_autopilot as autopilot
 from app.services import assistant_entity_candidate_service as entities
 from app.services import assistant_fields as fields
 from app.services import creation_readiness as readiness
@@ -515,11 +517,19 @@ async def write_chapter(ctx: ToolContext, args: dict) -> ToolOutcome:
     if not ok:
         raise ToolError(message)
     options = ChapterGenerateOptions(style_id=await default_style_id(ctx.db, ctx.project_id), enable_mcp=False)
+    ai = _member_ai(ctx)
     try:
-        job = await start_chapter_job(chapter=chapter, user_id=ctx.user_id, ai_service=_member_ai(ctx), options=options)
+        job = await start_chapter_job(chapter=chapter, user_id=ctx.user_id, ai_service=ai, options=options)
     except AIJobConflictError as exc:
         raise ToolError(f"本书已有正文任务在运行：{exc}") from exc
+    write = {"chapter_id": chapter.id, "chapter_number": number, "chapter_title": chapter.title or "", "job_id": job.id,
+             "started_at": utcnow().isoformat()}
+    ctx.chapter_writes.append(write)
+    ctx.emit({"type": "chapter_write", "write": write, "member_id": ctx.member_id})  # 对话里的写作卡
     ctx.emit({"type": "job", "job": {"id": job.id, "title": job.title, "kind": job.kind}})
+    if ctx.autopilot:  # 自动执行：等这一章写完、直接采用，下一章才接得上（前面的章要写完）
+        ok, summary, data = await autopilot.finish_chapter(ctx, chapter.id, number, job, ai_service=ai, write=write)
+        return ToolOutcome(ok, summary, data)
     return ToolOutcome(True, f"开始在后台生成第 {number} 章", (
         "已按章节页「AI 生成」的原逻辑在后台生成这一章（全量上下文：前情、出场人物状态、视角边界、世界观、仿写参考、写作风格…），"
         "结果是候选稿：作者在章节写作页审阅后采用才写进正文。进度在右下角任务托盘。现在正文还没变，不要说已经写好了。"))
@@ -669,35 +679,55 @@ def _defer(ctx: ToolContext, target: str, args: dict, label: str, waiting: dict)
 
 async def run_target(ctx: ToolContext, target: str, args: dict) -> ToolOutcome:
     """生成工具的总入口：先查前置；缺必需的上游就先按原逻辑补上游（出卡 / 提问）并挂起这件事，齐了才按原逻辑生成。
-    作者明确说不补、直接做时带 force=true 跳过前置。"""
+    作者明确说不补、直接做时带 force=true 跳过前置。
+    自动执行时不挂起：等确认的卡当场写入、补出来的上游卡也当场写入，再查一遍前置，齐了接着生成（做过的写在结果前面）。"""
     params, label = _params(target, args), target_label(target, args)
-    need = None
-    if args.get("force") is not True:
-        provided = {"project.chapter_count"} if target == "volumes" and args.get("chapter_count") else set()
-        checker = await readiness.load_checker(ctx.db, ctx.project_id, ctx.session_id, ctx.declined | provided)
-        need = _deepest(checker, readiness.need_for(checker, target, **params))
-    if need is None:
-        return await GENERATORS[target](ctx, args)
-    if need.kind == "basics":
-        return await ask_basics(ctx, need.fields[0])
-    if need.kind == "settings":
-        labels = "、".join(readiness.SETTING_LABELS[k] for k in need.fields)
-        return ToolOutcome(True, f"{label}之前要作者先定：{labels}", "等作者在提问卡里选；选定直接写入作品设定，之后接着做。",
-                           question=settings_question(ctx.project_id, need.fields))
-    if need.kind == "blocked":
-        return ToolOutcome(False, f"{label}：{need.label}", f"这一步现在做不了：{need.label}。如实告诉作者。")
-    if need.kind == "confirm":
-        _defer(ctx, target, args, label, need.waiting)
-        return ToolOutcome(True, f"{label}：先等作者确认（{need.label}）", WAIT_NOTE.format(what=need.label, label=label))
-    layer = readiness.TARGET_LABELS[need.layer]
-    if need.layer in ctx.declined:
-        return ToolOutcome(False, f"{label}：{need.label}（上一轮的{layer}卡片作者没采用）",
-                           DECLINED_NOTE.format(what=need.label, layer=layer, label=label))
-    marks = (len(ctx.candidates), len(ctx.entity_candidates), len(ctx.plans))
-    upstream = await GENERATORS[need.layer](ctx, dict(need.args))
-    waiting = _new_cards(ctx, marks)
-    if not upstream.ok or not waiting:
-        return ToolOutcome(False, f"{label}：{need.label}，先补{layer}也没成功", upstream.data or upstream.summary)
-    _defer(ctx, target, args, label, waiting)
-    return ToolOutcome(True, f"{need.label}：先按原逻辑生成了{layer}，作者确认后接着{label}",
-                       f"{DEFER_NOTE.format(label=label)}\n{upstream.data}")  # 说明放前面：工具结果超长会从尾部截断
+    done: list[str] = []
+    for _round in range(MAX_UPSTREAM if ctx.autopilot else 1):
+        need = None
+        if args.get("force") is not True:
+            provided = {"project.chapter_count"} if target == "volumes" and args.get("chapter_count") else set()
+            checker = await readiness.load_checker(ctx.db, ctx.project_id, ctx.session_id, ctx.declined | provided)
+            need = _deepest(checker, readiness.need_for(checker, target, **params))
+        if need is None:
+            outcome = await GENERATORS[target](ctx, args)
+            if done:
+                outcome.data = "自动执行先做了：" + "；".join(done) + "\n" + outcome.data
+            return outcome
+        if need.kind == "basics":
+            return await ask_basics(ctx, need.fields[0])
+        if need.kind == "settings":
+            labels = "、".join(readiness.SETTING_LABELS[k] for k in need.fields)
+            return ToolOutcome(True, f"{label}之前要作者先定：{labels}", "等作者在提问卡里选；选定直接写入作品设定，之后接着做。",
+                               question=settings_question(ctx.project_id, need.fields))
+        if need.kind == "blocked":
+            return ToolOutcome(False, f"{label}：{need.label}", f"这一步现在做不了：{need.label}。如实告诉作者。")
+        if need.kind == "confirm":
+            if not ctx.autopilot:
+                _defer(ctx, target, args, label, need.waiting)
+                return ToolOutcome(True, f"{label}：先等作者确认（{need.label}）", WAIT_NOTE.format(what=need.label, label=label))
+            applied = await autopilot.apply_cards(ctx, need.waiting)
+            if applied.failed and not applied.done:
+                return ToolOutcome(False, f"{label}：{need.label}，自动写入没成功", applied.text())
+            if not applied.empty:
+                done.append(f"写入等确认的卡（{applied.text()}）")
+            continue
+        layer = readiness.TARGET_LABELS[need.layer]
+        if need.layer in ctx.declined:
+            return ToolOutcome(False, f"{label}：{need.label}（上一轮的{layer}卡片作者没采用）",
+                               DECLINED_NOTE.format(what=need.label, layer=layer, label=label))
+        marks = (len(ctx.candidates), len(ctx.entity_candidates), len(ctx.plans))
+        upstream = await GENERATORS[need.layer](ctx, dict(need.args))
+        waiting = _new_cards(ctx, marks)
+        if not upstream.ok or not waiting:
+            return ToolOutcome(False, f"{label}：{need.label}，先补{layer}也没成功", upstream.data or upstream.summary)
+        if not ctx.autopilot:
+            _defer(ctx, target, args, label, waiting)
+            return ToolOutcome(True, f"{need.label}：先按原逻辑生成了{layer}，作者确认后接着{label}",
+                               f"{DEFER_NOTE.format(label=label)}\n{upstream.data}")  # 说明放前面：工具结果超长会从尾部截断
+        applied = await autopilot.apply_cards(ctx, waiting)
+        if applied.failed and not applied.done:
+            return ToolOutcome(False, f"{label}：先补了{layer}，但没能写入", f"{applied.text()}\n{upstream.data}")
+        done.append(f"先补{layer}（{upstream.summary}；{applied.text()}）")
+    return ToolOutcome(False, f"{label}：前置补了 {MAX_UPSTREAM} 层还没齐", "自动执行先做了：" + "；".join(done)
+                       + f"\n前置还是没齐，{label}没做；如实告诉作者现在卡在哪。")

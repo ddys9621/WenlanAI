@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { Plus, Sparkles, Pencil, Trash2, X, Loader2, Building, Users, UserPlus, UserMinus, WandSparkles } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { DocIcon } from '@/components/project-shell/DocIcon';
 import { toast } from 'sonner';
 import { useStore } from '@/store';
 import { useCharacterSync } from '@/store/hooks';
@@ -307,7 +308,7 @@ export default function Characters() {
     <div className="animate-fade-in space-y-6">
       <section className="lj-page-header">
         <div className="min-w-0">
-          <h1 className="lj-page-title">角色与组织</h1>
+          <h1 className="lj-page-title"><DocIcon />角色与组织</h1>
           <p className="mt-2 max-w-[560px] text-sm leading-6 text-content-secondary">
             管理故事中的人物与势力，这些设定会作为 AI 续写时的上下文。共 {charCount} 个人物 · {orgCount} 个组织。
           </p>
@@ -336,7 +337,7 @@ export default function Characters() {
         </div>
       </section>
 
-      <div className="inline-flex border border-surface-border bg-white/60 p-1">
+      <div className="ws-seg">
         {([
           { key: 'all', label: '全部', count: characters.length, icon: null },
           { key: 'character', label: '人物', count: charCount, icon: Users },
@@ -347,14 +348,11 @@ export default function Characters() {
             <button
               key={tab.key}
               onClick={() => setFilter(tab.key)}
-              className={cn(
-                'inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium transition-colors',
-                selected ? 'bg-brand text-white' : 'text-content-secondary hover:text-content'
-              )}
+              className={cn('ws-seg-item px-3 py-1.5', selected && 'ws-seg-item--on')}
             >
               {tab.icon && <tab.icon className="h-3.5 w-3.5" />}
               {tab.label}
-              <span className={cn('tabular-nums', selected ? 'text-white/75' : 'text-content-tertiary')}>{tab.count}</span>
+              <span className={cn('tabular-nums', selected ? 'text-brand-600/70' : 'text-content-tertiary')}>{tab.count}</span>
             </button>
           );
         })}

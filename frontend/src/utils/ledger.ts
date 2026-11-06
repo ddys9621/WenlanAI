@@ -16,6 +16,55 @@ export const FIELD_LABELS: Record<string, string> = {
   status: '状态', owner: '发起人', target: '对象',
 }
 
+/* ---------- 正文底栏的伏笔提醒：暂停提醒只记在本机 ---------- */
+
+export const SNOOZE_CHAPTERS = 20
+const snoozeKey = (projectId: string) => `promise-snooze:${projectId}`
+
+/** 暂停提醒的伏笔：id → 到第几章再提醒 */
+export function loadSnoozes(projectId: string): Record<string, number> {
+  if (typeof localStorage === 'undefined') return {}
+  try {
+    const data = JSON.parse(localStorage.getItem(snoozeKey(projectId)) || '{}')
+    return data && typeof data === 'object' ? data as Record<string, number> : {}
+  } catch {
+    return {}
+  }
+}
+
+/** 暂停提醒 SNOOZE_CHAPTERS 章；顺手清掉已经过期的 */
+export function snoozePromise(projectId: string, promiseId: string, chapter: number): Record<string, number> {
+  const kept = Object.fromEntries(Object.entries(loadSnoozes(projectId)).filter(([, until]) => until > chapter))
+  const next = { ...kept, [promiseId]: chapter + SNOOZE_CHAPTERS }
+  if (typeof localStorage !== 'undefined') localStorage.setItem(snoozeKey(projectId), JSON.stringify(next))
+  return next
+}
+
+/** 写第 chapter 章时还要提醒的（暂停到第几章之前的不提醒；本章刚标了回收 / 强化的照样列着，看得到结果） */
+export function activeReminders<T extends { id: string; resolved_here?: boolean; reinforced_here?: boolean }>(
+  items: T[], snoozes: Record<string, number>, chapter: number,
+): T[] {
+  return items.filter((p) => p.resolved_here || p.reinforced_here || !((snoozes[p.id] ?? 0) > chapter))
+}
+
+/** 全书悬念时间线上的一条：从埋设章到回收章（没回收的画到计划回收章或当前进度） */
+export interface PromiseSpan {
+  start: number
+  end: number
+  state: 'resolved' | 'open' | 'overdue' | 'abandoned'
+  deadline: number | null
+}
+
+/** now = 正在写 / 下一章要写的章号（伏笔清单的 as_of）：过了计划回收章还没回收算超期，和清单上的「超期」一致 */
+export function promiseSpan(p: Pick<LedgerPromise, 'source_chapter_number' | 'resolved_chapter_number' | 'deadline_chapter' | 'status'>, now: number): PromiseSpan {
+  const start = p.source_chapter_number
+  if (p.status === 'resolved' && p.resolved_chapter_number) return { start, end: p.resolved_chapter_number, state: 'resolved', deadline: p.deadline_chapter }
+  const end = Math.max(start, now)
+  if (p.status === 'abandoned') return { start, end, state: 'abandoned', deadline: p.deadline_chapter }
+  const overdue = Boolean(p.deadline_chapter && now > p.deadline_chapter)
+  return { start, end, state: overdue ? 'overdue' : 'open', deadline: p.deadline_chapter }
+}
+
 /** 作者改过哪些字段（给「作者改过」提示用）；["*"] = 作者新建 */
 export function lockedSummary(promise: Pick<LedgerPromise, 'locked_fields'>): string {
   const fields = promise.locked_fields ?? []

@@ -456,6 +456,51 @@
     box-shadow: inset 0 -2px #285b4d;
   }
 
+  /* 稿纸顶上的章节标题栏（标题和工具同一行，不再单独占一行工具栏）。
+     工具平时淡一些、颜色跟着纸色走（夜墨纸上也看得清），鼠标移到标题栏或键盘焦点进来才清楚；
+     稿纸窄（两侧面板都开着）时正文 / 候选稿 / 历史版本只留图标 */
+  .lj-chapter-head {
+    container-type: inline-size;
+  }
+
+  /* 只淡按钮本身（弹层、菜单不跟着透明）；禁用的照旧 40%，打开着的模式（AI 补全、专注…）一直看得清 */
+  .lj-chapter-tools > .lj-tool:not(:disabled),
+  .lj-chapter-tools > div > .lj-tool:not(:disabled) {
+    opacity: 0.6;
+    transition: opacity 0.15s ease;
+  }
+
+  .lj-chapter-head:hover .lj-chapter-tools .lj-tool:not(:disabled),
+  .lj-chapter-tools:focus-within .lj-tool:not(:disabled),
+  .lj-chapter-tools .lj-tool.lj-tool--active {
+    opacity: 1;
+  }
+
+  /* 标题栏上的图标（工具和右边的分析面板开关）颜色跟着纸色走；菜单里的条目在白底上，照旧 */
+  .lj-chapter-head .lj-tool:not([role^='menuitem']) {
+    color: var(--manuscript-ghost);
+  }
+
+  .lj-chapter-head .lj-tool:not([role^='menuitem']):hover:not(:disabled) {
+    color: var(--manuscript-ink);
+    background: rgba(127, 127, 127, 0.12);
+  }
+
+  .lj-chapter-head .lj-tool.lj-tool--active {
+    @apply bg-brand-100 text-brand-600;
+  }
+
+  .lj-tool-sep {
+    @apply mx-1 h-4 w-px;
+    background: var(--manuscript-rule);
+  }
+
+  @container (max-width: 640px) {
+    .lj-chapter-head .lj-seg-label {
+      display: none;
+    }
+  }
+
   /* ─── 智能助笔（AI 助手面板，as-*）─────────────────────────────────────────
      参照 Claude / ChatGPT 的对话面板：团队的回复是正文排版、不套气泡；作者的话是浅灰圆角块；
      输入框和工具条合成一个大圆角框。配色沿用全站 token（墨绿只给主操作、焦点、选中），和主界面是一套。
@@ -516,6 +561,21 @@
     @apply border-brand/40 bg-brand-50 text-brand-600 hover:border-brand/60 hover:text-brand-600;
   }
 
+  /* 胶囊一行：面板窄（两侧都开着）时成员 / 技能 / 自动 / 核对只留图标，「当前页面」那颗留得下字 */
+  .as-chips {
+    container-type: inline-size;
+  }
+
+  @container (max-width: 400px) {
+    .as-chips .as-chip-label {
+      display: none;
+    }
+
+    .as-chips .as-chip:has(.as-chip-label) {
+      @apply px-2;
+    }
+  }
+
   .as-card {
     @apply overflow-hidden rounded-[12px] border border-surface-border-light bg-white;
   }
@@ -572,6 +632,19 @@
     @apply w-full !rounded-[8px] !border-surface-border !bg-white px-3 text-[13px] !text-content placeholder:!text-content-tertiary;
   }
 
+  /* 处理过程的时间线：模型调工具前说的那句话，下面一行回执；运行中那一步转圈 */
+  .as-step-note {
+    @apply whitespace-pre-wrap break-words text-[13px] leading-[1.7] text-content-secondary;
+  }
+
+  .as-receipt {
+    @apply flex min-w-0 items-center gap-1.5 rounded-[8px] border border-surface-border-light bg-white px-2.5 py-1.5 text-[12px] leading-5;
+  }
+
+  .as-receipt--warn {
+    @apply border-gold-200 bg-gold-50;
+  }
+
   /* 「正在处理」的三个点 */
   .as-typing {
     @apply inline-flex items-center gap-1;
@@ -626,5 +699,339 @@
 
   .as-disclosure[open] > summary .as-chevron {
     transform: rotate(90deg);
+  }
+
+  /* ─── 项目工作台（ws-*）：三栏编辑器版式，配色仍是全站 token ───────────────────────
+     外框：左栏 .ws-sidebar ｜ 中栏 .ws-appbar + .ws-main + .ws-statusbar ｜ 右侧智能助笔（.ws-session-tabs / .ws-composer）。
+     项目内页面的页头、卡片、按钮、胶囊、表单在文件末尾 :where(.wl-ws) 那组里调（ProjectDetail 进项目时给 <html> 挂 wl-ws）。 */
+  .ws-root {
+    @apply bg-surface-paper;
+  }
+
+  .ws-sidebar {
+    @apply flex h-full min-h-0 w-full flex-col border-r border-surface-border bg-surface-paper;
+  }
+
+  .ws-icon-btn {
+    @apply inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-content-secondary hover:bg-surface-hover hover:text-content disabled:pointer-events-none disabled:opacity-40;
+  }
+
+  .ws-icon-btn--on {
+    @apply bg-brand-100 text-brand-600 hover:bg-brand-100 hover:text-brand-600;
+    box-shadow: inset 0 1px 2px rgba(29, 36, 32, 0.1);
+  }
+
+  /* 左栏四个页签：等宽，选中浅墨绿底 */
+  .ws-tabs {
+    @apply grid shrink-0 grid-cols-4 gap-1 px-2 py-1.5;
+  }
+
+  .ws-tab {
+    @apply inline-flex h-7 min-w-0 items-center justify-center gap-1 whitespace-nowrap rounded-lg text-[13px] font-medium text-content-secondary hover:bg-surface-hover hover:text-content;
+  }
+
+  .ws-tab--on {
+    @apply bg-brand-100 text-brand-600 hover:bg-brand-100 hover:text-brand-600;
+  }
+
+  /* 左栏搜索框：要压过全站 input 底样式（特异性 0,4,1），所以带 ! */
+  .ws-search {
+    @apply h-[34px] w-full !rounded-lg !border-surface-border !bg-surface pl-8 pr-2.5 text-[12px] placeholder:!text-content-tertiary;
+  }
+
+  .ws-add {
+    @apply inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand text-white hover:bg-brand-600;
+  }
+
+  .ws-count {
+    @apply inline-flex h-[22px] items-center gap-1 rounded bg-brand-100/80 px-1.5 text-[11px] text-brand-600;
+  }
+
+  .ws-count::before {
+    content: '';
+    @apply h-1 w-1 rounded-full bg-brand-400;
+  }
+
+  /* 入口卡片：线条图标 + 衬线小标题 + 两行说明 + 计数 */
+  .ws-card {
+    @apply flex w-full items-start gap-2.5 rounded-xl px-2.5 py-2.5 text-left hover:bg-surface-hover/70;
+  }
+
+  .ws-card--dense {
+    @apply items-center py-2;
+  }
+
+  .ws-card--on {
+    @apply bg-brand-100/70 hover:bg-brand-100/70;
+  }
+
+  .ws-card-icon {
+    @apply flex h-9 w-8 shrink-0 items-center justify-center text-content-secondary;
+  }
+
+  .ws-card--dense .ws-card-icon {
+    @apply h-6 w-6;
+  }
+
+  .ws-card-title {
+    @apply block truncate font-serif text-[13px] font-semibold tracking-wide text-content;
+  }
+
+  .ws-card-desc {
+    @apply mt-0.5 line-clamp-2 text-[11px] leading-[1.45] text-content-secondary;
+  }
+
+  .ws-tag {
+    @apply inline-flex h-[18px] items-center rounded px-1 text-[11px] text-content-tertiary;
+  }
+
+  .ws-tag--main {
+    @apply bg-brand-100 px-1.5 font-medium text-brand-600;
+  }
+
+  /* 目录行：章号 + 标题 / 字数，选中浅墨绿底 */
+  .ws-chapter-row {
+    @apply flex w-full items-start gap-2 rounded-lg px-2 py-2 text-left hover:bg-surface-hover/70;
+  }
+
+  .ws-chapter-row--on {
+    @apply bg-brand-100/70 hover:bg-brand-100/70;
+  }
+
+  /* 中栏工具栏：图标按钮，中栏够宽时带文字（容器查询看工具栏自己的宽度，左右两栏开合都算进去） */
+  .ws-appbar {
+    @apply relative z-20 flex h-14 shrink-0 items-center justify-between gap-3 border-b border-surface-border bg-surface-paper px-3;
+    container-type: inline-size;
+  }
+
+  .ws-tool {
+    @apply inline-flex h-10 shrink-0 items-center gap-1.5 rounded-lg px-3 text-[13px] font-medium text-content-secondary hover:bg-surface-hover hover:text-content;
+  }
+
+  .ws-tool--on {
+    @apply bg-brand-100 text-brand-600 hover:bg-brand-100 hover:text-brand-600;
+    box-shadow: inset 0 1px 2px rgba(29, 36, 32, 0.1);
+  }
+
+  .ws-tool-label {
+    display: none;
+  }
+
+  @container (min-width: 820px) {
+    .ws-tool-label {
+      display: inline;
+    }
+  }
+
+  .ws-counter {
+    @apply ml-1 inline-flex h-8 shrink-0 items-center gap-1 rounded-lg border border-surface-border bg-surface px-2 text-[12px] text-content-tertiary;
+  }
+
+  /* 中栏滚动区：纵向内边距不放这里（sticky 页头要贴顶）；横向裁掉页头铺满用的伸出部分 */
+  .ws-main {
+    @apply relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 md:px-8;
+  }
+
+  .ws-page {
+    @apply mx-auto w-full max-w-[1400px] pb-12;
+  }
+
+  .ws-page > :not(:has(> .lj-page-header)) {
+    padding-top: 1.5rem;
+  }
+
+  .ws-statusbar {
+    @apply flex h-[30px] shrink-0 items-center justify-between gap-4 border-t border-surface-border bg-surface-paper px-4 text-[12px] text-content-tertiary;
+  }
+
+  /* 栏间拖动条：0 宽，命中区左右各伸 4px；中间一个「‖」 */
+  .ws-resize {
+    @apply relative z-30 w-0 shrink-0 outline-none;
+  }
+
+  .ws-resize::before {
+    content: '';
+    @apply absolute inset-y-0 -left-1 w-2 cursor-col-resize;
+  }
+
+  .ws-resize::after {
+    content: '';
+    @apply pointer-events-none absolute inset-y-0 left-[-1px] w-0.5 transition-colors;
+  }
+
+  .ws-resize:hover::after,
+  .ws-resize:focus-visible::after {
+    @apply bg-brand/30;
+  }
+
+  .ws-resize-grip {
+    @apply pointer-events-none absolute left-[-3px] top-1/2 h-4 w-1.5 -translate-y-1/2 border-x border-content-tertiary/60 bg-surface-paper;
+  }
+
+  /* 智能助笔的页签条（选中的那格底色同面板，下沿一条墨绿） */
+  .ws-session-tabs {
+    @apply flex h-[38px] shrink-0 items-stretch border-b border-surface-border bg-surface/70;
+  }
+
+  .ws-session-tab {
+    @apply relative inline-flex min-w-[64px] items-center justify-center gap-1.5 px-4 text-[13px] text-content-secondary hover:text-content;
+  }
+
+  .ws-session-tab--on {
+    @apply bg-surface-paper font-medium text-content;
+    box-shadow: inset 0 -2px #285b4d, 1px 0 #d4dad6, -1px 0 #d4dad6;
+  }
+
+  /* 智能助笔输入框：圆角框里只有输入框、用量和发送（胶囊在框上面一行） */
+  .ws-composer {
+    @apply rounded-[10px] border border-surface-border bg-white transition-[border-color,box-shadow] focus-within:border-brand/50;
+    box-shadow: 0 1px 2px rgba(29, 36, 32, 0.04);
+  }
+
+  .ws-composer:focus-within {
+    box-shadow: 0 0 0 3px rgba(40, 91, 77, 0.12);
+  }
+
+  /* 分段页签：内凹的小框，选中浅墨绿底 */
+  .ws-seg {
+    @apply inline-flex shrink-0 items-center gap-0.5 rounded-lg border border-surface-border bg-surface-paper p-0.5;
+    box-shadow: inset 0 1px 2px rgba(29, 36, 32, 0.07);
+  }
+
+  .ws-seg-item {
+    @apply inline-flex items-center gap-1 whitespace-nowrap rounded-md px-2.5 py-1 text-[12px] font-medium text-content-secondary hover:text-content;
+  }
+
+  .ws-seg-item--on {
+    @apply bg-brand-100 text-brand-600 hover:text-brand-600;
+    box-shadow: inset 0 1px 2px rgba(29, 36, 32, 0.1);
+  }
+
+  /* ─── 项目内页面（:where(.wl-ws) 不加特异性：页面上直接写的 Tailwind 工具类照样压得过）─── */
+
+  /* 页头 = 文档标题栏：吸顶、底色和下沿细线铺满中栏、衬线标题、说明一行小字 */
+  :where(.wl-ws) .lj-page-header {
+    @apply sticky top-0 z-[15] mb-0 min-h-[56px] items-center gap-x-4 gap-y-2 border-b-0 bg-surface-paper py-2.5;
+    box-shadow: 0 0 0 100vmax theme('colors.surface.paper');
+    clip-path: inset(0 -100vmax);
+  }
+
+  /* 标题块先缩、操作按钮留在右边同一行（放不下再折行，折下去也靠右） */
+  :where(.wl-ws) .lj-page-header > :first-child {
+    flex: 1 1 18rem;
+    min-width: 0;
+  }
+
+  :where(.wl-ws) .lj-page-header > :last-child:not(:first-child) {
+    margin-left: auto;
+  }
+
+  :where(.wl-ws) .lj-page-header::after {
+    left: -100vmax;
+    right: -100vmax;
+    bottom: 0;
+    width: auto;
+    height: 1px;
+    opacity: 1;
+    background: theme('colors.surface.border');
+  }
+
+  :where(.wl-ws) .lj-page-title {
+    @apply inline-flex items-center gap-2 text-[19px] font-semibold leading-7 tracking-wide;
+  }
+
+  :where(.wl-ws) .lj-page-header p {
+    @apply mt-0.5 max-w-3xl text-[12px] leading-5 text-content-tertiary;
+  }
+
+  /* 页头上方的小眉题（「设定」之类）在工作台里和左栏页签重复，不显示 */
+  :where(.wl-ws) .lj-page-header .hh-eyebrow {
+    display: none;
+  }
+
+  :where(.wl-ws) .lj-pane-title {
+    @apply font-serif tracking-wide;
+  }
+
+  /* 卡片：8px 圆角、浅线、不要阴影；卡片里的小标题用衬线 */
+  :where(.wl-ws) .hh-panel,
+  :where(.wl-ws) .hh-glass {
+    @apply rounded-xl border-surface-border-light shadow-none;
+  }
+
+  :where(.wl-ws) .hh-subpanel {
+    @apply rounded-lg;
+  }
+
+  :where(.wl-ws .hh-panel) :where(h2, h3) {
+    font-family: theme('fontFamily.serif');
+    letter-spacing: 0.02em;
+  }
+
+  :where(.wl-ws) .hh-modal,
+  :where(.wl-ws) .hh-menu {
+    @apply rounded-xl;
+  }
+
+  /* 按钮：紧凑一档（36px / 小号 32px），6px 圆角 */
+  :where(.wl-ws) :is(.hh-btn-primary, .hh-btn-secondary, .hh-btn-ghost, .hh-btn-danger) {
+    @apply h-9 rounded-lg px-3.5 text-[13px];
+  }
+
+  :where(.wl-ws) .hh-btn-sm {
+    @apply h-8 px-2.5 text-[12px];
+  }
+
+  :where(.wl-ws) .hh-icon-btn {
+    @apply rounded-lg border-transparent bg-transparent hover:border-transparent hover:bg-surface-hover;
+  }
+
+  :where(.wl-ws) .hh-icon-btn-plain,
+  :where(.wl-ws) .lj-tool {
+    @apply rounded-lg;
+  }
+
+  :where(.wl-ws) .lj-tool--active {
+    box-shadow: inset 0 1px 2px rgba(29, 36, 32, 0.1);
+  }
+
+  /* 胶囊：选中改浅墨绿底，不再整块墨绿 */
+  :where(.wl-ws) .hh-chip {
+    @apply rounded-lg px-2.5 py-1 text-[12px];
+  }
+
+  :where(.wl-ws) .hh-chip--active {
+    @apply border-brand/30 bg-brand-100 text-brand-600 hover:text-brand-600;
+  }
+
+  /* 表单：输入框 36px、6px 圆角，标签小一号的灰字 */
+  :where(.wl-ws) .hh-field {
+    @apply h-9 text-[13px];
+  }
+
+  :where(.wl-ws) .hh-textarea {
+    @apply text-[13px];
+  }
+
+  :where(.wl-ws) .hh-label {
+    @apply text-[12px] font-normal text-content-secondary;
+  }
+
+  :where(.wl-ws) input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='file']),
+  :where(.wl-ws) textarea,
+  :where(.wl-ws) select {
+    border-radius: 6px;
+  }
+}
+
+/* 工作台：右侧智能助笔开着时中栏窄一截，页面里按视口断点排的三 / 四列卡片在 1800px 以下少排一列
+   （否则卡片名被挤成「自然…」）。写在 @layer 外：选择器里带转义的断点类名，别让 Tailwind 当成自定义类处理 */
+@media (min-width: 1024px) and (max-width: 1799px) {
+  .ws-root:has(> .ws-assistant:not(.hidden)) .ws-main .lg\:grid-cols-3 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ws-root:has(> .ws-assistant:not(.hidden)) .ws-main .lg\:grid-cols-4 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }

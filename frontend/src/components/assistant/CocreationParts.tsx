@@ -173,7 +173,7 @@ export function MemberPicker({ members, onMention, onOpenSettings }: {
   return (
     <div ref={ref} className="relative shrink-0">
       <button onClick={() => setOpen((v) => !v)} className={cn('as-chip', open && 'as-chip--on')} title="找团队里的某位成员" aria-expanded={open}>
-        <AtSign className="h-3.5 w-3.5" />成员
+        <AtSign className="h-3.5 w-3.5" /><span className="as-chip-label">成员</span>
       </button>
       {open && (
         <div className="as-menu bottom-full left-0 mb-2 w-72">

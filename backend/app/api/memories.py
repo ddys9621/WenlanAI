@@ -128,6 +128,14 @@ async def get_promises(project_id: str, request: Request, status: str = "active"
     return {"as_of": as_of, "total": len(items), "items": items}
 
 
+@router.get("/projects/{project_id}/promises/reminders", summary="写第 N 章时该照应的伏笔（章纲要回收 / 推进、超期 / 临近、掉线）")
+async def get_promise_reminders(project_id: str, request: Request, chapter: int, db: AsyncSession = Depends(get_db)):
+    await _owner(request, project_id, db)
+    if chapter < 1:
+        raise HTTPException(status_code=400, detail="章号应从 1 开始")
+    return {"chapter": chapter, "items": await ledger.chapter_reminders(db, project_id, chapter)}
+
+
 @router.post("/projects/{project_id}/promises", summary="作者登记一条伏笔")
 async def create_promise(project_id: str, body: PromiseCreate, request: Request, db: AsyncSession = Depends(get_db)):
     user_id = await _owner(request, project_id, db)

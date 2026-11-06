@@ -216,7 +216,15 @@ async def update_promise(db: AsyncSession, project_id: str, promise_id: str, cha
         else:
             raise LedgerError("状态只能是 未回收 / 已回收 / 已放弃")
         touched.add("status")
-    if not touched:
+    activated = changes.get("activated_chapter_number")
+    if activated is not None:  # 作者标「本章强化」：只往后挪最近提及章、未回收的转推进中；不加锁（之后的分析照常往后挪）
+        number = _int(activated, "强化章")
+        if number < (promise.source_chapter_number or 1):
+            raise LedgerError("强化章不能早于埋设章")
+        promise.last_activated_chapter = max(promise.last_activated_chapter or 0, number)
+        if promise.status == "open":
+            promise.status = "progressing"
+    if not touched and activated is None:
         raise LedgerError("没有要修改的内容")
     await _lock(db, promise, touched, note,
                 origin_title=original_title if "title" in touched and original_title != promise.title else None)
@@ -246,6 +254,44 @@ async def create_promise(db: AsyncSession, project_id: str, data: dict) -> Narra
     await db.flush()
     db.add(PromiseAuthorLock(promise_id=promise.id, project_id=project_id, fields=["*"], note="作者新建"))
     return promise
+
+
+REMINDER_LIMIT = 6
+PLAN_REASONS = {"resolve": "本章章纲要回收", "advance": "本章章纲要推进"}
+
+
+async def chapter_reminders(db: AsyncSession, project_id: str, chapter_number: int, limit: int = REMINDER_LIMIT) -> list[dict]:
+    """写第 N 章时该照应的伏笔（正文底栏的伏笔提醒）：本章章纲要回收 / 推进的排前面，再是超期 / 临近计划回收、
+    掉线太久没提的；没什么要提醒的不列。挑选和排序与写正文时带进上下文的那批同一套（narrative_state_service）。
+    在本章刚标了回收 / 强化的也列着（resolved_here / reinforced_here），作者看得到刚才点的结果。"""
+    from app.services.narrative_tasks import parse_narrative_tasks
+
+    outline = (await db.execute(select(ChapterOutline).where(
+        ChapterOutline.project_id == project_id, ChapterOutline.chapter_number == chapter_number,
+    ))).scalars().first()
+    tasks = parse_narrative_tasks(outline.narrative_tasks) if outline is not None and outline.narrative_tasks else {}
+    planned: dict[str, tuple[str, str]] = {}
+    for kind in ("resolve", "advance"):
+        for item in tasks.get(kind) or []:
+            if item.get("promise_id"):
+                planned.setdefault(item["promise_id"], (kind, item.get("how") or ""))
+    promises = await nss._get_active_promises(db, project_id, chapter_number, focus_ids=set(planned), limit=40)
+    locks = await _locks(db, project_id)
+    names = await _character_names(db, project_id)
+    out: list[dict] = []
+    for p in promises:
+        plan = planned.get(p.id)
+        flag = nss._promise_flag(p, chapter_number).strip()
+        resolved_here = p.status == "resolved" and p.resolved_chapter_number == chapter_number
+        reason = PLAN_REASONS[plan[0]] if plan else ("已在本章回收" if resolved_here else flag)
+        if not reason:
+            continue
+        out.append({**promise_view(p, chapter_number, locks.get(p.id), names), "reason": reason,
+                    "planned": plan[0] if plan else None, "how": plan[1] if plan else "",
+                    "resolved_here": resolved_here, "reinforced_here": (p.last_activated_chapter or 0) == chapter_number})
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _repoint_tasks(raw: Optional[str], merged: set[str], keep_id: str) -> Optional[str]:

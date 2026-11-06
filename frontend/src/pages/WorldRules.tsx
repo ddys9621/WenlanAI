@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { Plus, Pencil, Trash2, Shield, Map, Sword, Loader2, ScrollText } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
+import { DocIcon } from '@/components/project-shell/DocIcon'
 import { useStore } from '@/store/index'
 import { worldRulesApi } from '@/services/api'
 import { Modal } from '@/components/ui/Modal'
@@ -112,7 +113,7 @@ export default function WorldRules() {
     <div className="animate-fade-in space-y-6">
       <section className="lj-page-header">
         <div className="min-w-0">
-          <h1 className="lj-page-title">世界规则</h1>
+          <h1 className="lj-page-title"><DocIcon />世界规则</h1>
           <p className="mt-2 max-w-[560px] text-sm leading-6 text-content-secondary">
             把修炼境界、装备模板与地图位置整理成规则条目，AI 写作时会据此保持设定一致。地图位置会自动出现在世界地图上。
           </p>

@@ -4,11 +4,12 @@
  * 改过的字段重新分析不覆盖；写正文时注入的就是这张清单（章纲点名的排最前）。
  */
 import { useCallback, useEffect, useState } from 'react'
-import { Check, GitMerge, Loader2, Pencil, Plus, RotateCcw, Search, X } from 'lucide-react'
+import { ChartGantt, Check, GitMerge, Loader2, Pencil, Plus, RotateCcw, Search, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 import { ledgerApi } from '@/services/api'
 import { Pill } from '@/components/ui/Pill'
+import { PromiseTimeline } from './PromiseTimeline'
 import type { LedgerPromise, PromiseCreate, PromisePriority, PromiseType, PromiseUpdate } from '@/types/ledger'
 import { PRIORITY_LABELS, PRIORITY_TONE, PROMISE_TYPE_LABELS, STATUS_TONE, lockedSummary } from '@/utils/ledger'
 
@@ -36,6 +37,7 @@ export function PromisesTab({ projectId, latestChapter, onChanged }: { projectId
   const [mergeKeep, setMergeKeep] = useState<string | null>(null)
   const [mergePick, setMergePick] = useState<Set<string>>(new Set())
   const [creating, setCreating] = useState(false)
+  const [timeline, setTimeline] = useState(false)
   const [draft, setDraft] = useState<PromiseCreate>({
     title: '', content: '', promise_type: 'foreshadow', priority: 'medium', source_chapter_number: Math.max(1, latestChapter),
   })
@@ -130,9 +132,9 @@ export function PromisesTab({ projectId, latestChapter, onChanged }: { projectId
   return (
     <section className="hh-panel p-4">
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <div className="inline-flex border border-surface-border bg-white/60 p-0.5">
+        <div className="ws-seg">
           {FILTERS.map(([key, label]) => (
-            <button key={key} onClick={() => setFilter(key)} className={cn('px-3 py-1 text-xs font-medium', filter === key ? 'bg-brand text-white' : 'text-content-secondary hover:text-content')}>
+            <button key={key} onClick={() => setFilter(key)} className={cn('ws-seg-item', filter === key && 'ws-seg-item--on')}>
               {label}
             </button>
           ))}
@@ -141,8 +143,12 @@ export function PromisesTab({ projectId, latestChapter, onChanged }: { projectId
           <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-content-tertiary" />
           <input value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void load()} placeholder="按标题 / 内容找（回车）" className="h-8 w-full pl-7 text-xs" />
         </div>
+        <button onClick={() => setTimeline(true)} className="hh-btn-ghost hh-btn-sm" title="全书悬念时间线：埋设、回收和核对建议">
+          <ChartGantt className="h-3.5 w-3.5" />时间线
+        </button>
         <button onClick={() => setCreating((v) => !v)} className="hh-btn-secondary hh-btn-sm"><Plus className="h-3.5 w-3.5" />登记伏笔</button>
       </div>
+      {timeline && <PromiseTimeline projectId={projectId} onClose={() => setTimeline(false)} />}
 
       {creating && (
         <div className="hh-subpanel mb-3 grid gap-2 p-3 sm:grid-cols-2">

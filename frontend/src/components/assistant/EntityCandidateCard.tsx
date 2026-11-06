@@ -15,6 +15,7 @@ const STATUS: Record<AssistantEntityCandidate['status'], { label: string; tone: 
   candidate: { label: '待确认', tone: 'orange' },
   applied: { label: '已建档', tone: 'green' },
   rejected: { label: '没有采用', tone: 'gray' },
+  undone: { label: '已撤销', tone: 'gray' },
 };
 const MISSING: { label: string; tone: StatusTone } = { label: '已不在书里', tone: 'red' };
 

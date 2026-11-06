@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { Plus, Pencil, Trash2, Languages, Gavel, Flag, ScrollText, Shapes, Loader2, type LucideIcon } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
+import { DocIcon } from '@/components/project-shell/DocIcon'
 import { useStore } from '@/store/index'
 import { settingEntriesApi } from '@/services/api'
 import { emitAssistantData, ASSISTANT_DATA_EVENT, type AssistantDataChange } from '@/store/assistantStore'
@@ -108,7 +109,7 @@ export default function SettingEntries() {
     <div className="animate-fade-in space-y-6">
       <section className="lj-page-header">
         <div className="min-w-0">
-          <h1 className="lj-page-title">世界设定条目</h1>
+          <h1 className="lj-page-title"><DocIcon />世界设定条目</h1>
           <p className="mt-2 max-w-[560px] text-sm leading-6 text-content-secondary">
             把术语、铁律、势力、通用规则等世界观分条整理，每条独立容量；AI 写作与生成角色时会语义检索相关条目带上，不必再塞进「世界设定」的世界规则一栏。
           </p>

@@ -39,6 +39,7 @@ const RUN_STATUS: Record<AssistantRunStatus, { label: string; tone: StatusTone }
   failed: { label: '失败', tone: 'red' },
   cancelled: { label: '已停止', tone: 'gray' },
   interrupted: { label: '已中断', tone: 'orange' },
+  undone: { label: '已撤销', tone: 'gray' },
 };
 
 function Empty({ text }: { text: string }) {

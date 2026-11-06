@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { Plus, Pencil, Trash2, Star, Palette, Loader2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
+import { DocIcon } from '@/components/project-shell/DocIcon'
 import { useStore } from '@/store/index'
 import { writingStyleApi } from '@/services/api'
 import { Modal } from '@/components/ui/Modal'
@@ -91,7 +92,7 @@ export default function WritingStyles() {
     <div className="animate-fade-in space-y-6">
       <section className="lj-page-header">
         <div className="min-w-0">
-          <h1 className="lj-page-title">写作风格</h1>
+          <h1 className="lj-page-title"><DocIcon />写作风格</h1>
           <p className="mt-2 max-w-[560px] text-sm leading-6 text-content-secondary">
             定义叙述语气与遣词习惯，AI 生成正文时会按默认风格执行。
           </p>

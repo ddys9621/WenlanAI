@@ -13,6 +13,7 @@ import { useStore } from '@/store';
 import { worldMapApi } from '@/services/api';
 import { AIJobError, runAIJob } from '@/store/aiJobsStore';
 import { PageHeader } from '@/components/ui/PageHeader';
+import { DocIcon } from '@/components/project-shell/DocIcon';
 import { useAssistantDataChange, useAssistantDetail } from '@/hooks/useAssistantPage';
 import type { AssistantDataChange } from '@/store/assistantStore';
 import { MapCanvas, type CanvasMarker } from '@/components/world-map/MapCanvas';
@@ -241,7 +242,7 @@ export default function WorldMap() {
     <div className="animate-fade-in space-y-4">
       <PageHeader
         eyebrow="设定"
-        title="世界地图"
+        title={<><DocIcon />世界地图</>}
         description="世界规则里的地点和故事里出现过的地点标在一张纸质地图上：拖动平移、滚轮缩放，点地点看档案和按章节的出处。AI 写正文、规划卷纲与章纲时会参考这里的方位远近；改坐标不会改动任何故事内容。"
         badges={<span className="lj-badge lj-badge--muted">{placedCount}/{total} 已定位</span>}
         actions={
@@ -293,16 +294,16 @@ export default function WorldMap() {
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
         <section className="hh-panel overflow-hidden">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-surface-border px-4 py-2">
-            <div className="flex items-center gap-1 rounded border border-surface-border bg-surface p-0.5">
+            <div className="ws-seg">
               <button
                 onClick={() => setEditable(false)}
-                className={cn('flex items-center gap-1 rounded-sm px-2.5 py-1 text-xs font-medium', !editable ? 'bg-brand text-white' : 'text-content-secondary')}
+                className={cn('ws-seg-item', !editable && 'ws-seg-item--on')}
               >
                 <MousePointer2 className="h-3.5 w-3.5" />浏览
               </button>
               <button
                 onClick={() => setEditable(true)}
-                className={cn('flex items-center gap-1 rounded-sm px-2.5 py-1 text-xs font-medium', editable ? 'bg-brand text-white' : 'text-content-secondary')}
+                className={cn('ws-seg-item', editable && 'ws-seg-item--on')}
               >
                 <Move className="h-3.5 w-3.5" />标注
               </button>

@@ -20,6 +20,17 @@ class AssistantPage(BaseModel):
 class AssistantSendRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000)
     page: AssistantPage = Field(default_factory=AssistantPage)
+    autopilot: bool = Field(False, description="自动执行：这一轮的候选直接采用 / 建档、草案直接确认、正文写完直接采用")
+
+
+class AssistantQueueRequest(BaseModel):
+    """运行中追加的要求：排队，主编下一步开始前读到。"""
+    message: str = Field(..., min_length=1, max_length=4000)
+
+
+class AssistantMemoRequest(BaseModel):
+    """作品备忘的一条（一句话）。"""
+    content: str = Field(..., min_length=1, max_length=200)
 
 
 class AuthorAnswer(BaseModel):

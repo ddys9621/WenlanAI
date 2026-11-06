@@ -1,7 +1,9 @@
 /**
  * 章节写作 ·「正文」稿纸（参考岚笺正文编辑器）：
- * 工具栏（撤销 / 重做 / 查找替换 ｜ 一键排版 ｜ 版式 ｜ AI 补全 ｜ 标注 ｜ 跟随输入 ｜ 专注模式）、稿纸（可直接改的标题 + 横线正文）、
- * 状态栏（保存状态 · 本章 / 选区 / 全书字数 · 段数 · 历史版本 · 立即保存）。
+ * 稿纸顶上一行章节标题栏（不再单独占一行工具栏）：第 N 章 + 可直接改的标题，
+ * 右边一排图标工具（撤销 / 重做 / 查找替换 ｜ 版式 ｜ AI 补全 ｜ 专注模式 ｜ 更多：一键排版 · 跟随输入 · 标注 · 补全长度），
+ * 再右边是正文 / 候选稿 / 历史版本（headerRight）；工具平时淡一些，鼠标移上去才清楚。下面横线正文、底部状态栏
+ * （保存状态 · 本章 / 选区 / 全书字数 · 段数 · 历史版本 · 立即保存）。
  * 停笔 1.5 秒自动保存（带正文指纹；别处改过就暂停并让作者选）；AI 补全打开后停笔约 1 秒在光标后给出灰色建议，Tab 采用。
  */
 import {
@@ -24,6 +26,7 @@ import type { Chapter } from '@/types'
 import { ManuscriptEditor, type ManuscriptEditorHandle } from './ManuscriptEditor'
 import { ManuscriptFindBar } from './ManuscriptFindBar'
 import { ManuscriptLayoutPanel } from './ManuscriptLayoutPanel'
+import { PromiseReminderBar } from './PromiseReminderBar'
 
 export interface ChapterWritingPaneHandle {
   flush(): Promise<void>
@@ -52,6 +55,30 @@ function clock(date: Date) {
   return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
 }
 
+/** 标题栏里的图标工具：只有图标，说明在 title 里；keepFocus = 点了不抢走正文的光标（撤销 / 重做）；
+ * holdOutside = 弹层开着时按下这个按钮不算「点在弹层外」（否则弹层先关、再被这次点击打开，关不掉） */
+function ToolButton({ label, onClick, active, disabled, keepFocus, holdOutside, children }: {
+  label: string; onClick: () => void; active?: boolean; disabled?: boolean; keepFocus?: boolean; holdOutside?: boolean
+  children: ReactNode
+}) {
+  return (
+    <button
+      onMouseDown={(e) => {
+        if (keepFocus) e.preventDefault()
+        if (holdOutside) e.nativeEvent.stopImmediatePropagation()
+      }}
+      onClick={onClick}
+      disabled={disabled}
+      aria-pressed={active}
+      aria-label={label}
+      title={label}
+      className={cn('lj-tool h-7 w-7 justify-center px-0', active && 'lj-tool--active')}
+    >
+      {children}
+    </button>
+  )
+}
+
 export const ChapterWritingPane = forwardRef<ChapterWritingPaneHandle, ChapterWritingPaneProps>(function ChapterWritingPane(props, ref) {
   const { chapter } = props
   const editorRef = useRef<ManuscriptEditorHandle>(null)
@@ -68,6 +95,7 @@ export const ChapterWritingPane = forwardRef<ChapterWritingPaneHandle, ChapterWr
   const [focusMode, setFocusMode] = useState(false)
   const [findOpen, setFindOpen] = useState(false)
   const [layoutOpen, setLayoutOpen] = useState(false)
+  const [toolsOpen, setToolsOpen] = useState(false)
   const [moreOpen, setMoreOpen] = useState(false)
   const [readMode, setReadMode] = useState(false)
   const [titleDraft, setTitleDraft] = useState(chapter.title)
@@ -235,71 +263,6 @@ export const ChapterWritingPane = forwardRef<ChapterWritingPaneHandle, ChapterWr
       onKeyDown={onKeyDown}
       className={cn('flex min-h-0 min-w-0 flex-col bg-surface', focusMode ? 'fixed inset-0 z-40' : 'h-full flex-1')}
     >
-      {/* 工具栏 */}
-      <div className="relative flex flex-wrap items-center gap-x-1 gap-y-1 border-b border-surface-border bg-white px-2 py-1.5">
-        <div className="flex items-center gap-0.5 border-r border-surface-border pr-1.5">
-          <button onMouseDown={(e) => e.preventDefault()} onClick={() => editorRef.current?.undo()} disabled={!history.canUndo} className="lj-tool w-8 justify-center px-0" title="撤销（Ctrl+Z）" aria-label="撤销">
-            <Undo2 className="h-4 w-4" />
-          </button>
-          <button onMouseDown={(e) => e.preventDefault()} onClick={() => editorRef.current?.redo()} disabled={!history.canRedo} className="lj-tool w-8 justify-center px-0" title="重做（Ctrl+Y 或 Ctrl+Shift+Z）" aria-label="重做">
-            <Redo2 className="h-4 w-4" />
-          </button>
-          <button onClick={() => setFindOpen((v) => !v)} aria-pressed={findOpen} className={cn('lj-tool w-8 justify-center px-0', findOpen && 'lj-tool--active')} title="查找与替换（Ctrl+F）" aria-label="查找与替换">
-            <Search className="h-4 w-4" />
-          </button>
-        </div>
-        <button onClick={formatAll} disabled={!content.trim()} className="lj-tool" title="一键排版：按当前版式统一段落缩进和段间空行">
-          <AlignLeft className="h-4 w-4" />一键排版
-        </button>
-        <div className="relative">
-          <button onClick={() => setLayoutOpen((v) => !v)} aria-expanded={layoutOpen} className={cn('lj-tool', layoutOpen && 'lj-tool--active')} title="调整字体、字号、行距、行宽、横线和纸色">
-            <LayoutTemplate className="h-4 w-4" />版式
-          </button>
-          {layoutOpen && (
-            <ManuscriptLayoutPanel
-              prefs={prefs}
-              onChange={updatePrefs}
-              onReset={() => updatePrefs({ ...DEFAULT_EDITOR_PREFS, completion: prefs.completion, completionLength: prefs.completionLength })}
-              onClose={() => setLayoutOpen(false)}
-            />
-          )}
-        </div>
-        <span className="mx-1 h-4 w-px bg-surface-border" />
-        <button onClick={toggleCompletion} aria-pressed={prefs.completion} className={cn('lj-tool', prefs.completion && 'lj-tool--active')} title={`AI 补全：${COMPLETION_TIP}`}>
-          <Sparkles className="h-4 w-4" />AI 补全
-          {prefs.completion && completion.state === 'loading' && <Loader2 className="h-3 w-3 animate-spin" aria-label="正在想" />}
-          {prefs.completion && completion.state === 'error' && <AlertTriangle className="h-3 w-3 text-cinnabar" aria-label="补全失败" />}
-        </button>
-        {prefs.completion && (
-          <div className="flex rounded-sm border border-surface-border p-0.5" role="group" aria-label="补全长度">
-            {(['sentence', 'paragraph'] as const).map((value) => (
-              <button
-                key={value}
-                onClick={() => { updatePrefs({ completionLength: value }); editorRef.current?.focus() }}
-                aria-pressed={prefs.completionLength === value}
-                className={cn('rounded-sm px-1.5 py-0.5 text-[11px]', prefs.completionLength === value ? 'bg-brand text-white' : 'text-content-secondary hover:text-content')}
-              >
-                {value === 'sentence' ? '一句' : '一段'}
-              </button>
-            ))}
-          </div>
-        )}
-        <span className="mx-1 h-4 w-px bg-surface-border" />
-        {props.readView && (
-          <button onClick={() => void toggleReadMode()} aria-pressed={readMode} className={cn('lj-tool', readMode && 'lj-tool--active')} title="只读查看记忆标注（钩子 / 伏笔 / 情节点）">
-            <Highlighter className="h-4 w-4" />标注
-          </button>
-        )}
-        <button onClick={() => { updatePrefs({ typewriter: !prefs.typewriter }); editorRef.current?.focus() }} aria-pressed={prefs.typewriter} className={cn('lj-tool', prefs.typewriter && 'lj-tool--active')} title="让当前输入行保持在视野中央">
-          <Crosshair className="h-4 w-4" />跟随输入
-        </button>
-        <button onClick={() => setFocusMode((v) => !v)} aria-pressed={focusMode} className={cn('lj-tool', focusMode && 'lj-tool--active')} title="专注模式（Esc 退出）">
-          {focusMode ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
-          {focusMode ? '退出专注' : '专注模式'}
-        </button>
-        {!focusMode && props.headerRight && <div className="ml-auto flex items-center gap-2">{props.headerRight}</div>}
-      </div>
-
       {findOpen && (
         <ManuscriptFindBar
           content={content}
@@ -309,26 +272,101 @@ export const ChapterWritingPane = forwardRef<ChapterWritingPaneHandle, ChapterWr
         />
       )}
 
-      {/* 稿纸 */}
+      {/* 稿纸：顶上一行章节标题栏（标题 + 工具 + 正文 / 候选稿 / 历史版本），下面横线正文 */}
       <div className={cn('min-h-0 flex-1 overflow-hidden', focusMode ? 'px-4 py-5' : 'p-3')}>
-        <div className="lj-paper mx-auto flex h-full w-full flex-col overflow-hidden" data-paper={prefs.paper} data-guide={prefs.guideStyle} style={paperStyle}>
-          <label className="flex shrink-0 items-baseline gap-3 border-b border-[rgba(185,174,155,0.5)] px-[var(--manuscript-pad-x)] pb-2 pt-4 font-serif">
-            <span className="shrink-0 text-[13px] text-[color:var(--manuscript-ghost)]">第 {chapter.chapter_number} 章</span>
-            <input
-              value={titleDraft}
-              onChange={(e) => setTitleDraft(e.target.value)}
-              onBlur={() => void saveTitle()}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') { e.preventDefault(); editorRef.current?.focus() }
-                if (e.key === 'Escape') { setTitleDraft(chapter.title); editorRef.current?.focus() }
-              }}
-              placeholder="填写章节标题"
-              maxLength={200}
-              aria-label="章节标题"
-              className="min-w-0 flex-1 !h-9 !rounded-none !border-0 !border-b !border-transparent !bg-transparent !px-0.5 text-[19px] font-semibold tracking-[0.02em] !text-[color:var(--manuscript-ink)] hover:!border-[rgba(40,91,77,0.4)] focus:!border-brand focus:!shadow-none"
-            />
-          </label>
-          <div className="relative min-h-0 flex-1">
+        <div className="lj-paper mx-auto flex h-full w-full flex-col" data-paper={prefs.paper} data-guide={prefs.guideStyle} style={paperStyle}>
+          <div className="lj-chapter-head relative flex shrink-0 items-center gap-2 border-b border-[rgba(185,174,155,0.5)] px-[var(--manuscript-pad-x)] py-1.5">
+            <label className="flex min-w-0 flex-1 items-baseline gap-2.5 font-serif">
+              <span className="shrink-0 text-[13px] text-[color:var(--manuscript-ghost)]">第 {chapter.chapter_number} 章</span>
+              <input
+                value={titleDraft}
+                onChange={(e) => setTitleDraft(e.target.value)}
+                onBlur={() => void saveTitle()}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') { e.preventDefault(); editorRef.current?.focus() }
+                  if (e.key === 'Escape') { setTitleDraft(chapter.title); editorRef.current?.focus() }
+                }}
+                placeholder="填写章节标题"
+                maxLength={200}
+                aria-label="章节标题"
+                className="min-w-0 flex-1 !h-9 !rounded-none !border-0 !border-b !border-transparent !bg-transparent !px-0.5 text-[18px] font-semibold tracking-[0.02em] !text-[color:var(--manuscript-ink)] hover:!border-[rgba(40,91,77,0.4)] focus:!border-brand focus:!shadow-none"
+              />
+            </label>
+            <div className="lj-chapter-tools flex flex-none items-center gap-0.5" role="toolbar" aria-label="写作工具">
+              <ToolButton label="撤销（Ctrl+Z）" onClick={() => editorRef.current?.undo()} disabled={!history.canUndo} keepFocus>
+                <Undo2 className="h-4 w-4" />
+              </ToolButton>
+              <ToolButton label="重做（Ctrl+Y 或 Ctrl+Shift+Z）" onClick={() => editorRef.current?.redo()} disabled={!history.canRedo} keepFocus>
+                <Redo2 className="h-4 w-4" />
+              </ToolButton>
+              <ToolButton label="查找与替换（Ctrl+F）" onClick={() => setFindOpen((v) => !v)} active={findOpen}>
+                <Search className="h-4 w-4" />
+              </ToolButton>
+              <span className="lj-tool-sep" />
+              <ToolButton label="版式：字体、字号、行距、行宽、横线和纸色" onClick={() => setLayoutOpen((v) => !v)} active={layoutOpen} holdOutside={layoutOpen}>
+                <LayoutTemplate className="h-4 w-4" />
+              </ToolButton>
+              <ToolButton label={`AI 补全${prefs.completion ? '（已打开）' : ''}：${COMPLETION_TIP}`} onClick={toggleCompletion} active={prefs.completion}>
+                <span className="relative">
+                  <Sparkles className="h-4 w-4" />
+                  {prefs.completion && completion.state === 'loading' && <Loader2 className="absolute -right-1.5 -top-1.5 h-2.5 w-2.5 animate-spin" aria-label="正在想" />}
+                  {prefs.completion && completion.state === 'error' && <AlertTriangle className="absolute -right-1.5 -top-1.5 h-2.5 w-2.5 text-cinnabar" aria-label="补全失败" />}
+                </span>
+              </ToolButton>
+              <ToolButton label={focusMode ? '退出专注（Esc）' : '专注模式（Esc 退出）'} onClick={() => setFocusMode((v) => !v)} active={focusMode}>
+                {focusMode ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+              </ToolButton>
+              <div className="relative">
+                <ToolButton label="更多：一键排版、跟随输入、标注、补全长度" onClick={() => setToolsOpen((v) => !v)} active={toolsOpen}>
+                  <MoreHorizontal className="h-4 w-4" />
+                </ToolButton>
+                {toolsOpen && (
+                  <div className="absolute right-0 top-full z-30 mt-1.5 grid w-48 gap-0.5 rounded border border-surface-border bg-white p-1 text-content shadow-lg" onMouseLeave={() => setToolsOpen(false)} role="menu">
+                    <button onClick={() => { formatAll(); setToolsOpen(false) }} disabled={!content.trim()} className="lj-tool w-full justify-start" role="menuitem" title="按当前版式统一段落缩进和段间空行">
+                      <AlignLeft className="h-4 w-4" />一键排版
+                    </button>
+                    <button onClick={() => { updatePrefs({ typewriter: !prefs.typewriter }); editorRef.current?.focus() }} className="lj-tool w-full justify-start" role="menuitemcheckbox" aria-checked={prefs.typewriter} title="让当前输入行保持在视野中央">
+                      <Crosshair className="h-4 w-4" />跟随输入{prefs.typewriter && <Check className="ml-auto h-3.5 w-3.5 text-brand" />}
+                    </button>
+                    {props.readView && (
+                      <button onClick={() => { void toggleReadMode(); setToolsOpen(false) }} className="lj-tool w-full justify-start" role="menuitemcheckbox" aria-checked={readMode} title="只读查看记忆标注（钩子 / 伏笔 / 情节点）">
+                        <Highlighter className="h-4 w-4" />标注{readMode && <Check className="ml-auto h-3.5 w-3.5 text-brand" />}
+                      </button>
+                    )}
+                    {prefs.completion && (
+                      <div className="flex items-center gap-1.5 border-t border-surface-border-light px-2 pb-1 pt-1.5 text-xs text-content-secondary">
+                        补全长度
+                        <div className="ws-seg ml-auto" role="group" aria-label="补全长度">
+                          {(['sentence', 'paragraph'] as const).map((value) => (
+                            <button
+                              key={value}
+                              onClick={() => { updatePrefs({ completionLength: value }); editorRef.current?.focus() }}
+                              aria-pressed={prefs.completionLength === value}
+                              className={cn('ws-seg-item px-1.5 py-0.5 text-[11px]', prefs.completionLength === value && 'ws-seg-item--on')}
+                            >
+                              {value === 'sentence' ? '一句' : '一段'}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+            {!focusMode && props.headerRight && <div className="flex flex-none items-center">{props.headerRight}</div>}
+            {/* 版式弹层挂在整条标题栏上、贴右边展开：按钮在右边，挂在按钮上往左展开会被稿纸左边的栏挡住 */}
+            {layoutOpen && (
+              <ManuscriptLayoutPanel
+                align="right"
+                prefs={prefs}
+                onChange={updatePrefs}
+                onReset={() => updatePrefs({ ...DEFAULT_EDITOR_PREFS, completion: prefs.completion, completionLength: prefs.completionLength })}
+                onClose={() => setLayoutOpen(false)}
+              />
+            )}
+          </div>
+          <div className="relative min-h-0 flex-1 overflow-hidden">
             <div className={cn('h-full', readMode && 'hidden')}>
               <ManuscriptEditor
                 ref={editorRef}
@@ -351,6 +389,9 @@ export const ChapterWritingPane = forwardRef<ChapterWritingPaneHandle, ChapterWr
         </div>
       </div>
 
+      {/* 伏笔提醒：专注模式不显示 */}
+      {!focusMode && <PromiseReminderBar projectId={props.projectId} chapterNumber={chapter.chapter_number} />}
+
       {status === 'conflict' && (
         <div role="alert" className="flex flex-wrap items-center gap-3 border-t border-cinnabar/30 bg-cinnabar-wash px-4 py-2.5 text-xs">
           <AlertTriangle className="h-4 w-4 shrink-0 text-cinnabar" />
@@ -363,7 +404,7 @@ export const ChapterWritingPane = forwardRef<ChapterWritingPaneHandle, ChapterWr
       )}
 
       {/* 状态栏 */}
-      <footer className="flex flex-wrap items-center gap-x-4 gap-y-1.5 border-t border-surface-border bg-white px-3 py-1.5 text-[11px] text-content-tertiary">
+      <footer className="flex min-h-[34px] flex-wrap items-center gap-x-4 gap-y-1 border-t border-surface-border bg-surface-paper px-4 py-1 text-[12px] text-content-tertiary">
         <span
           className={cn(
             'flex items-center gap-1.5',
@@ -407,7 +448,7 @@ export const ChapterWritingPane = forwardRef<ChapterWritingPaneHandle, ChapterWr
           {focusMode && <em className="ml-1 not-italic text-brand">按 Esc 退出专注</em>}
         </div>
         <div className="relative flex items-center gap-1.5">
-          <button onClick={() => setMoreOpen((v) => !v)} aria-expanded={moreOpen} className="lj-tool w-8 justify-center border border-surface-border px-0" title="更多">
+          <button onClick={() => setMoreOpen((v) => !v)} aria-expanded={moreOpen} className="lj-tool h-7 w-7 justify-center px-0" title="更多">
             <MoreHorizontal className="h-4 w-4" />
           </button>
           {moreOpen && (
@@ -420,16 +461,16 @@ export const ChapterWritingPane = forwardRef<ChapterWritingPaneHandle, ChapterWr
               </button>
             </div>
           )}
-          <button onClick={props.onOpenHistory} className="lj-tool border-l border-surface-border" title="历史版本：手改 / 采用候选稿 / 恢复前的旧稿">
+          <button onClick={props.onOpenHistory} className="lj-tool h-7" title="历史版本：手改 / 采用候选稿 / 恢复前的旧稿">
             <History className="h-4 w-4" />历史版本
           </button>
           <button
             onClick={() => void flush()}
             disabled={status === 'saving' || status === 'conflict'}
-            className="inline-flex h-8 items-center gap-1.5 rounded-sm bg-content px-3 text-xs font-semibold text-white hover:bg-content/90 disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-surface-border bg-white px-2.5 text-xs font-medium text-content hover:border-brand/50 hover:text-brand-600 disabled:cursor-not-allowed disabled:opacity-50"
             title="立即保存（Ctrl+S）"
           >
-            <Save className="h-4 w-4" />
+            <Save className="h-3.5 w-3.5" />
             {status === 'saving' ? '正在保存…' : status === 'error' ? '重试保存' : '立即保存'}
           </button>
         </div>

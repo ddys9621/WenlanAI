@@ -3,8 +3,11 @@
  * 改动清单（每条回复里的一行摘要 / 输入框上方的待确认栏）。
  */
 import type {
-  AssistantChapterCandidateRef, AssistantEntityCandidate, AssistantFieldCandidate, AssistantPlan, AssistantRunView,
+  AssistantChapterCandidateRef, AssistantChapterWrite, AssistantEntityCandidate, AssistantFieldCandidate, AssistantPlan,
+  AssistantRunView, AssistantUndoItem,
 } from '@/types/assistant'
+import type { CandidateSummary } from '@/types/writing'
+import { parseServerTime } from './serverTime'
 
 /** 成员头像：浅底 + 同色深字（全站低饱和色板），一眼分得清是谁在说话 */
 const TONES: Record<string, string> = {
@@ -46,6 +49,100 @@ export function questionCardKey(run: Pick<AssistantRunView, 'id' | 'question'>):
   return `${run.id}:${(run.question?.questions ?? []).map((q) => q.id).join(',')}`
 }
 
+/** 运行中时间线上的一步：note 是模型调工具前说的那句话，running = 工具还在跑 */
+export interface LiveStep {
+  label: string
+  detail: string
+  ok: boolean
+  note?: string
+  running?: boolean
+}
+
+/** tool_start：先挂一条「进行中」的回执（带着那句话，作者马上看到在做什么） */
+export function startLiveStep(steps: LiveStep[], label: string, note?: string): LiveStep[] {
+  return [...steps, { label, detail: '', ok: true, running: true, ...(note ? { note } : {}) }]
+}
+
+/** tool：把最近一条同名、还在跑的回执落定；没有（旧后端没推 tool_start、自动作答）就新加一条 */
+export function finishLiveStep(steps: LiveStep[], label: string, detail: string, ok: boolean, note?: string): LiveStep[] {
+  const index = steps.map((s) => Boolean(s.running) && s.label === label).lastIndexOf(true)
+  if (index < 0) return [...steps, { label, detail, ok, ...(note ? { note } : {}) }]
+  return steps.map((s, i) => (i === index ? { ...s, detail, ok, running: false, note: s.note || note || undefined } : s))
+}
+
+/** 自动执行确认了的卷纲 / 章纲 id 覆盖了这份草案的全部对象：卡片当场显示已确认（跑完读回对话时以库里为准） */
+export function planDoneBy(plan: AssistantPlan, confirmedIds: Set<string>): boolean {
+  const { volumeIds, outlineIds } = planConfirmTargets(plan)
+  const ids = [...volumeIds, ...outlineIds]
+  return ids.length > 0 && ids.every((id) => confirmedIds.has(id))
+}
+
+const at = (value: string | null | undefined) => parseServerTime(value)?.getTime() ?? 0
+
+/** 写作卡认哪份候选稿：自动执行采用的那份；否则这一章开写之后（容 2 秒时钟误差）出的最新一份 */
+export function pickWriteCandidate(write: AssistantChapterWrite, items: CandidateSummary[]): CandidateSummary | null {
+  const adopted = write.adopted?.candidate_id
+  if (adopted) {
+    const hit = items.find((c) => c.id === adopted)
+    if (hit) return hit
+  }
+  const started = at(write.started_at) - 2000
+  return items.filter((c) => at(c.created_at) >= started).sort((a, b) => at(b.created_at) - at(a.created_at))[0] ?? null
+}
+
+/** 写作卡的状态：writing 后台在写 / pending 待采用 / adopted 已采用 / discarded 丢弃了 / superseded 被新稿取代 / none 没写出来 */
+export type WriteCardState = 'writing' | 'pending' | 'adopted' | 'discarded' | 'superseded' | 'none'
+
+export function writeCardState(writing: boolean, candidate: Pick<CandidateSummary, 'status'> | null): WriteCardState {
+  if (writing) return 'writing'
+  return candidate ? candidate.status : 'none'
+}
+
+/** 撤销本轮之后要通知哪些页面刷新：修改 / 新建可能涉及各页，章纲 / 卷纲刷谋篇，正文 / 候选稿按章刷章节页 */
+export function undoRefreshes(items: AssistantUndoItem[]): { entity: string; chapterId?: string }[] {
+  const done = items.filter((i) => i.ok)
+  const kinds = new Set(done.map((i) => i.kind))
+  const out: { entity: string; chapterId?: string }[] = []
+  if (kinds.has('field') || kinds.has('entity')) {
+    ['project', 'story_outline', 'character', 'organization', 'membership', 'relationship', 'setting_entry', 'world_rule', 'location']
+      .forEach((entity) => out.push({ entity }))
+  }
+  if (kinds.has('field') || kinds.has('outline') || kinds.has('volume')) out.push({ entity: 'volume' }, { entity: 'chapter_outline' })
+  if (kinds.has('outline')) out.push({ entity: 'chapter' })
+  const seen = new Set<string>()
+  done.forEach((i) => {
+    if (!i.chapter_id || (i.kind !== 'chapter' && i.kind !== 'draft')) return
+    const entity = i.kind === 'chapter' ? 'chapter' : 'chapter_candidate'
+    const key = `${entity}:${i.chapter_id}`
+    if (!seen.has(key)) {
+      seen.add(key)
+      out.push({ entity, chapterId: i.chapter_id })
+    }
+  })
+  return out
+}
+
+/** 输入框开头正在打的「/技能」：返回斜杠后面已经打的字（没在打就是 null）；只认开头或空白后面的斜杠 */
+export function slashQuery(draft: string, caret: number): string | null {
+  const head = draft.slice(0, caret)
+  const match = /(?:^|\s)\/([^\s/]*)$/.exec(head)
+  return match ? match[1] : null
+}
+
+/** 选了技能：把正在打的「/xx」换成「/技能名 」；caret 前没有斜杠就加在开头 */
+export function insertSkill(draft: string, caret: number, name: string): { text: string; caret: number } {
+  const head = draft.slice(0, caret)
+  const match = /(?:^|\s)\/([^\s/]*)$/.exec(head)
+  const token = `/${name} `
+  if (!match) {
+    const text = `${token}${draft.replace(/^\s+/, '')}`
+    return { text, caret: token.length }
+  }
+  const start = head.length - match[1].length - 1
+  const text = `${draft.slice(0, start)}${token}${draft.slice(caret).replace(/^ /, '')}`
+  return { text, caret: start + token.length }
+}
+
 export function planConfirmTargets(plan: AssistantPlan): { volumeIds: string[]; outlineIds: string[] } {
   if (plan.kind === 'volumes') return { volumeIds: plan.volumes.map((v) => v.id), outlineIds: [] }
   if (plan.kind === 'units') return { volumeIds: [plan.volume.id], outlineIds: [] }
@@ -68,12 +165,13 @@ export function planKey(plan: AssistantPlan): string {
   return `plan:${plan.kind}:${[...volumeIds, ...outlineIds].join(',')}`
 }
 
-/** 一条发言带出的卡片（与消息里存的同一组字段） */
+/** 一条发言带出的卡片（与消息里存的同一组字段）；chapter_writes 是写作卡，不进改动清单 */
 export interface ChangeCards {
   candidates: string[]
   entity_candidates: string[]
   chapter_candidates: AssistantChapterCandidateRef[]
   plans: AssistantPlan[]
+  chapter_writes?: AssistantChapterWrite[]
 }
 
 export interface ChangeLookups {
@@ -141,7 +239,7 @@ const FIELD_STATUS: Record<AssistantFieldCandidate['status'], [ChangeState, stri
   candidate: ['pending', '待确认'], applied: ['done', '已应用'], undone: ['dropped', '已撤销'], rejected: ['dropped', '没有采用'],
 }
 const ENTITY_STATUS: Record<AssistantEntityCandidate['status'], [ChangeState, string]> = {
-  candidate: ['pending', '待确认'], applied: ['done', '已建档'], rejected: ['dropped', '没有采用'],
+  candidate: ['pending', '待确认'], applied: ['done', '已建档'], rejected: ['dropped', '没有采用'], undone: ['dropped', '已撤销'],
 }
 
 export function entityKind(c: Pick<AssistantEntityCandidate, 'entity_type' | 'payload'>): string {

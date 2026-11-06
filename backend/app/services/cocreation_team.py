@@ -13,7 +13,9 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-READ_TOOLS = ("story_progress", "search_project", "list_fields", "read_field", "read_chapter", "kb_search", "kb_read")
+# 每位成员都有的：查、读、读写作技能、记作品备忘
+READ_TOOLS = ("story_progress", "search_project", "list_fields", "read_field", "read_chapter", "kb_search", "kb_read",
+              "read_skill", "remember")
 WORLD_GEN = ("generate_world", "generate_world_rules", "generate_setting_entries")
 CAST_GEN = ("generate_cast", "generate_relationships")
 PLANNING_TOOLS = ("plan_volumes", "detail_volume", "plan_chapters")

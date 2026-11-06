@@ -8,8 +8,8 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import {
-  ArrowDown, ArrowUp, Check, ChevronRight, Copy, FilePenLine, ListChecks, Loader2, MapPin, PencilLine, Quote, Sparkles, Square,
-  TriangleAlert, X,
+  ArrowDown, ArrowUp, BookMarked, Check, ChevronRight, Clock3, Copy, FilePenLine, ListChecks, Loader2, MapPin, PencilLine, Quote,
+  Sparkles, Square, Undo2, X, Zap,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
@@ -17,13 +17,14 @@ import { assistantApi } from '@/services/api';
 import { AIJobError, runAIJob, useAIJobsStore, waitForAIJob } from '@/store/aiJobsStore';
 import { emitAssistantData, pageContextOf, useAssistantStore, type AssistantDataChange } from '@/store/assistantStore';
 import type {
-  AssistantAnswer, AssistantChapterCandidateRef, AssistantContextUsage, AssistantDeferred, AssistantEntityCandidate,
-  AssistantFieldCandidate, AssistantMember, AssistantMessageView, AssistantPageContext, AssistantPlan, AssistantPreview,
-  AssistantProgress, AssistantRunResult, AssistantSessionView, AssistantTeam,
+  AssistantAnswer, AssistantChapterCandidateRef, AssistantChapterWrite, AssistantContextUsage, AssistantDeferred,
+  AssistantEntityCandidate, AssistantFieldCandidate, AssistantMember, AssistantMessageView, AssistantPageContext, AssistantPlan,
+  AssistantPreview, AssistantProgress, AssistantRunResult, AssistantSessionView, AssistantSkill, AssistantTeam, AssistantUndoReport,
 } from '@/types/assistant';
 import { appendQuote, appendRequest } from '@/utils/assistantText';
 import {
-  changeItems, liveCardOwner, mentionMember, pendingChanges, planEntity, planKey, questionCardKey, type ChangeCards,
+  changeItems, finishLiveStep, insertSkill, liveCardOwner, mentionMember, pendingChanges, planDoneBy, planEntity, planKey,
+  questionCardKey, slashQuery, startLiveStep, undoRefreshes, type ChangeCards, type LiveStep,
 } from '@/utils/cocreation';
 import { formatTokens } from '@/utils/contextUsage';
 import type { SSEClientOptions, SSEMessage } from '@/utils/sseClient';
@@ -35,9 +36,14 @@ import { FieldCandidateCard } from './FieldCandidateCard';
 import {
   ContextMeter, DeferredHint, MemberAvatar, MemberPicker, NextStepHint, PlanCard, RichText, TeamSettings,
 } from './CocreationParts';
+import { ChapterDraftCard } from './ChapterDraftCard';
+import { MemoPanel } from './MemoPanel';
+import { StepTimeline } from './StepTimeline';
+import { UndoRunDialog } from './UndoRunDialog';
 
 const MAX_CHARS = 4000;
 const REVIEW_KEY = 'assistant-review-before-send';
+const AUTOPILOT_KEY = 'assistant-autopilot';
 const INPUT_MAX_HEIGHT = 200;
 /** 离底部这么近就算「停在最新处」：新内容来了跟着滚；往上翻着看就不拽回来 */
 const STICK_PX = 80;
@@ -47,14 +53,18 @@ const LONG_REPLY = 300;
 /** 一条发言带出的卡片（与消息里存的同一组字段） */
 type Attachments = ChangeCards;
 
-const noAttachments = (): Attachments => ({ candidates: [], entity_candidates: [], chapter_candidates: [], plans: [] });
+const noAttachments = (): Attachments => ({ candidates: [], entity_candidates: [], chapter_candidates: [], plans: [], chapter_writes: [] });
 const attachmentsOf = (m: AssistantMessageView): Attachments => ({
   candidates: m.candidates, entity_candidates: m.entity_candidates ?? [], chapter_candidates: m.chapter_candidates ?? [], plans: m.plans ?? [],
+  chapter_writes: m.chapter_writes ?? [],
 });
+/** 这条作者消息是一轮的开头（不是作答 / 追加），可以撤销那一轮 */
+const undoable = (m: AssistantMessageView) => m.role === 'user' && Boolean(m.run_id) && !m.answer && !m.queued && !m.undone;
 
 interface LiveTurn {
   goal: string;
-  steps: { label: string; detail: string; ok: boolean }[];
+  /** 时间线：每一步的那句话 + 回执（tool_start 先挂「进行中」，tool 落定） */
+  steps: LiveStep[];
   text: string;
   /** 本轮发言的成员（speaker 事件） */
   member?: AssistantMember | null;
@@ -74,25 +84,30 @@ function withLiveCard(live: LiveTurn, memberId: unknown, add: (cards: Attachment
     : { ...live, delegations: live.delegations.map((d, i) => (i === owner ? { ...d, cards: add(d.cards) } : d)) };
 }
 
-/** 处理记录：默认收起的一行，展开是一条竖线串起来的步骤；运行中展开 */
-function StepList({ steps, live }: { steps: { label: string; summary?: string; detail?: string; ok: boolean }[]; live?: boolean }) {
-  if (!steps.length) return null;
+/** 输入框上方的「/技能」菜单：上下键挑、回车选，Esc 关 */
+function SkillMenu({ skills, active, onPick, onHover }: {
+  skills: AssistantSkill[]; active: number; onPick: (skill: AssistantSkill) => void; onHover: (index: number) => void;
+}) {
   return (
-    <details className="as-disclosure" open={live}>
-      <summary className="w-fit text-[12px] text-content-tertiary hover:text-content-secondary">
-        <ChevronRight className="as-chevron h-3.5 w-3.5" />处理记录 · {steps.length} 步
-      </summary>
-      <ol className="ml-[6px] mt-1.5 space-y-1.5 border-l border-surface-border-light pl-3.5">
-        {steps.map((s, i) => (
-          <li key={i} className="flex items-start gap-1.5 text-[12px] leading-5 text-content-tertiary">
-            {s.ok
-              ? <Check className="mt-1 h-3 w-3 flex-none text-emerald-500" />
-              : <TriangleAlert className="mt-1 h-3 w-3 flex-none text-gold-500" />}
-            <span><span className="text-content-secondary">{s.label}</span>{(s.summary || s.detail) && <> · {s.summary || s.detail}</>}</span>
-          </li>
-        ))}
-      </ol>
-    </details>
+    <div className="as-menu bottom-full left-0 right-0 mb-1.5" role="listbox" aria-label="写作技能">
+      <p className="as-meta px-2.5 pb-1 pt-1.5">写作技能 · 点名后这一轮团队照着做</p>
+      {skills.map((s, i) => (
+        <button
+          key={s.id}
+          role="option"
+          aria-selected={i === active}
+          onMouseDown={(e) => { e.preventDefault(); onPick(s); }}
+          onMouseEnter={() => onHover(i)}
+          className={cn('as-menu-item', i === active && 'bg-surface')}
+        >
+          <BookMarked className="h-3.5 w-3.5 flex-none text-brand" />
+          <span className="min-w-0">
+            <span className="block text-[13px] text-content">/{s.name}</span>
+            <span className="block truncate text-[12px] text-content-tertiary">{s.summary}</span>
+          </span>
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -139,6 +154,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
   const composeRequest = useAssistantStore((s) => s.composeRequest);
   const newSessionNonce = useAssistantStore((s) => s.newSessionNonce);
   const reviewNonce = useAssistantStore((s) => s.reviewNonce);
+  const memoNonce = useAssistantStore((s) => s.memoNonce);
   const visible = useAssistantStore((s) => s.open && s.mode === 'agent');
   const page = useMemo(() => pageContextOf({ route, detail }), [route, detail]);
 
@@ -154,10 +170,23 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
   const [copied, setCopied] = useState<string | null>(null);
   const [team, setTeam] = useState<AssistantTeam | null>(null);
   const [showTeam, setShowTeam] = useState(false);
+  const [showMemo, setShowMemo] = useState(false);
+  /** 团队在运行里记了备忘（memo 事件）就加一，备忘面板开着时跟着重读 */
+  const [memoVersion, setMemoVersion] = useState(0);
+  /** 正在确认要不要撤销的那一轮 */
+  const [undoRunId, setUndoRunId] = useState<string | null>(null);
   const [progress, setProgress] = useState<AssistantProgress | null>(null);
   const [usage, setUsage] = useState<AssistantContextUsage | null>(null);
   const [compacting, setCompacting] = useState(false);
   const [confirmedPlans, setConfirmedPlans] = useState<Set<string>>(() => new Set());
+  /** 自动执行在运行里确认了的卷纲 / 章纲 id（plans_confirmed 事件）：草案卡当场显示已确认 */
+  const [autoConfirmed, setAutoConfirmed] = useState<Set<string>>(() => new Set());
+  const [autopilot, setAutopilot] = useState(() => localStorage.getItem(AUTOPILOT_KEY) === 'true');
+  /** 运行中追加、还没送达的要求（主编下一步开始前读到；送达后就是对话里的一条作者消息） */
+  const [queued, setQueued] = useState<{ id: string; text: string }[]>([]);
+  const queuedRef = useRef(queued);
+  const [caret, setCaret] = useState(0);
+  const [skillMenu, setSkillMenu] = useState({ forced: false, dismissed: false, index: 0 });
   const [trayOpen, setTrayOpen] = useState(false);
   const [trayDetail, setTrayDetail] = useState<string | null>(null);
   const [expandedReplies, setExpandedReplies] = useState<Set<string>>(() => new Set());
@@ -252,6 +281,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
   }, [draft]);
 
   useEffect(() => { pageRef.current = page; }, [page]);
+  useEffect(() => { queuedRef.current = queued; }, [queued]);
 
   // 对话变了、换了上限或成员模型、一轮跑完：重新估一次下一条要求的用量
   const messageCount = view?.messages.length ?? 0;
@@ -268,10 +298,49 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
       scrollToEnd();
     } else if (m.type === 'content_reset') {
       setLive((prev) => (prev ? { ...prev, text: '' } : prev));
-    } else if (m.type === 'tool') {
-      const step = { label: String(m.label ?? m.name ?? ''), detail: String(m.detail ?? ''), ok: m.ok !== false };
-      setLive((prev) => (prev ? { ...prev, steps: [...prev.steps, step] } : prev));
+    } else if (m.type === 'tool_start') {
+      const label = String(m.label ?? m.name ?? '');
+      const note = typeof m.note === 'string' ? m.note : '';
+      setLive((prev) => (prev ? { ...prev, steps: startLiveStep(prev.steps, label, note) } : prev));
       scrollToEnd();
+    } else if (m.type === 'tool') {
+      const label = String(m.label ?? m.name ?? '');
+      const note = typeof m.note === 'string' ? m.note : '';
+      setLive((prev) => (prev ? { ...prev, steps: finishLiveStep(prev.steps, label, String(m.detail ?? ''), m.ok !== false, note) } : prev));
+      scrollToEnd();
+    } else if (m.type === 'queued_delivered') {
+      // 追加的要求送达了：服务端已把这一段存成一条消息、作者的话存成作者消息——读回对话，运行中的那段从头接着显示
+      const ids = Array.isArray(m.ids) ? m.ids.map(String) : [];
+      setQueued((prev) => prev.filter((q) => !ids.includes(q.id)));
+      setLive((prev) => (prev ? { ...newLive(prev.goal), member: prev.member } : prev));
+      void reload().then(() => scrollToEnd());
+    } else if (m.type === 'card_update') {
+      // 自动执行把卡直接写进了书里：卡片当场显示已采用（跑完读回对话时以库里为准）；页面刷新攒到最后一起发
+      const ids = new Set([...(Array.isArray(m.candidates) ? m.candidates : []), ...(Array.isArray(m.entity_candidates) ? m.entity_candidates : [])].map(String));
+      setView((prev) => (prev ? {
+        ...prev,
+        candidates: prev.candidates.map((c) => (ids.has(c.id) ? { ...c, status: 'applied' as const } : c)),
+        entity_candidates: prev.entity_candidates.map((c) => (ids.has(c.id) ? { ...c, status: 'applied' as const } : c)),
+      } : prev));
+      (Array.isArray(m.entities) ? m.entities : []).forEach((entity) => pendingRef.current.data.push({ entity: String(entity) }));
+    } else if (m.type === 'plans_confirmed') {
+      const volumeIds = Array.isArray(m.volume_ids) ? m.volume_ids.map(String) : [];
+      const outlineIds = Array.isArray(m.outline_ids) ? m.outline_ids.map(String) : [];
+      setAutoConfirmed((prev) => new Set([...prev, ...volumeIds, ...outlineIds]));
+      if (volumeIds.length) pendingRef.current.data.push({ entity: 'volume' });
+      if (outlineIds.length) pendingRef.current.data.push({ entity: 'chapter_outline' });
+    } else if (m.type === 'chapter_adopted' && typeof m.chapter_id === 'string') {
+      // 自动执行写完一章直接采用：章节页马上刷新（不等这一轮跑完）
+      emitAssistantData({ entity: 'chapter', chapterId: m.chapter_id });
+    } else if (m.type === 'chapter_write' && m.write) {
+      // write_chapter 开写了：对话里挂一张写作卡（后台写的进度、写好的稿子、对比、采用都在卡上）
+      const write = m.write as AssistantChapterWrite;
+      setLive((prev) => (prev
+        ? withLiveCard(prev, m.member_id, (c) => ({ ...c, chapter_writes: [...(c.chapter_writes ?? []), write] }))
+        : prev));
+      scrollToEnd();
+    } else if (m.type === 'memo') {
+      setMemoVersion((v) => v + 1);
     } else if (m.type === 'candidate' && m.candidate) {
       const candidate = m.candidate as AssistantFieldCandidate;
       setView((prev) => (prev ? { ...prev, candidates: [...prev.candidates.filter((c) => c.id !== candidate.id), candidate] } : prev));
@@ -323,7 +392,16 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
       if (m.phase === 'done') setNotice(`较早的 ${String(m.count ?? '')} 条对话已压成前情摘要，之后接着带上`);
       if (m.phase === 'failed') setNotice('压缩较早的对话没成功，这一轮先只带装得下的近期对话');
     }
-  }, [projectId, scrollToEnd]);
+  }, [projectId, reload, scrollToEnd]);
+
+  /** 一轮结束（含停止 / 出错）：还没送达的追加要求放回输入框，不丢 */
+  const restoreQueued = useCallback(() => {
+    const left = queuedRef.current;
+    if (!left.length) return;
+    setQueued([]);
+    setDraft((prev) => [prev.trim(), ...left.map((q) => q.text)].filter(Boolean).join('\n'));
+    setNotice('这一轮已经结束，没来得及送达的补充放回输入框了，可以直接发送。');
+  }, []);
 
   const flushPending = useCallback(() => {
     const { nav, data } = pendingRef.current;
@@ -349,10 +427,11 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
       setBusy(false);
       setLive(null);
       setCompacting(false);
+      restoreQueued();
       flushPending();
       scrollToEnd();
     }
-  }, [flushPending, handleEvent, reload, scrollToEnd]);
+  }, [flushPending, handleEvent, reload, restoreQueued, scrollToEnd]);
 
   useEffect(() => {
     let cancelled = false;
@@ -406,6 +485,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
       setBusy(false);
       setLive(null);
       setCompacting(false);
+      restoreQueued();
       flushPending();
       scrollToEnd();
     }
@@ -414,7 +494,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
   const loadPreview = async (message: string, context: AssistantPageContext) => {
     setPreviewLoading(true);
     try {
-      const data = await assistantApi.preview(projectId, { message, page: context });
+      const data = await assistantApi.preview(projectId, { message, page: context, autopilot });
       setPreview({ data, key: `${message}\n${JSON.stringify(context)}` });
       scrollToEnd(true);
     } catch (err) {
@@ -424,9 +504,37 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
     }
   };
 
+  /** 团队正在处理：这条要求排队，主编下一步开始前读到（这一轮恰好在收尾就留在输入框，等结束了直接发） */
+  const enqueue = async (message: string) => {
+    try {
+      const item = await assistantApi.queueMessage(projectId, message);
+      setQueued((prev) => [...prev, { id: item.id, text: item.message }]);
+      setDraft('');
+      setNotice('');
+    } catch (err) {
+      toast.info(errorDetail(err));
+    }
+  };
+
+  const withdraw = async (id: string) => {
+    const item = queued.find((q) => q.id === id);
+    try {
+      const { withdrawn } = await assistantApi.withdrawQueued(projectId, id);
+      setQueued((prev) => prev.filter((q) => q.id !== id));
+      if (withdrawn && item) setDraft((prev) => prev || item.text);
+      else if (!withdrawn) toast.info('这条已经送达主编了');
+    } catch (err) {
+      toast.error(errorDetail(err));
+    }
+  };
+
   const send = async () => {
     const message = draft.trim();
-    if (!message || busy || message.length > MAX_CHARS) return;
+    if (!message || message.length > MAX_CHARS) return;
+    if (busy) {
+      await enqueue(message);
+      return;
+    }
     if (reviewBeforeSend && !previewCurrent) {
       await loadPreview(message, page);
       return;
@@ -438,9 +546,10 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
       ...prev,
       messages: [...prev.messages, {
         id: `pending-${Date.now()}`, role: 'user', content: message, created_at: null, run_id: null, steps: [], candidates: [], entity_candidates: [], chapter_candidates: [],
+        autopilot,
       }],
     } : prev));
-    const ok = await runJob(message, (o) => assistantApi.sendStream(projectId, { message, page }, o));
+    const ok = await runJob(message, (o) => assistantApi.sendStream(projectId, { message, page, autopilot }, o));
     if (!ok) setDraft((prev) => prev || message);
   };
 
@@ -484,8 +593,66 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
     setTrayOpen(true);
   }, [reviewNonce]);
 
+  // 头部的「作品备忘」按钮：开 / 关备忘面板（挂载时的初始值不算）
+  const seenMemo = useRef(memoNonce);
+  useEffect(() => {
+    if (memoNonce === seenMemo.current) return;
+    seenMemo.current = memoNonce;
+    setShowMemo((v) => !v);
+    setShowTeam(false);
+  }, [memoNonce]);
+
+  /** 撤销本轮做完：读回对话（卡片状态、「已撤销」标记），各页面按撤回的类型刷新 */
+  const onUndone = async (report: AssistantUndoReport) => {
+    setUndoRunId(null);
+    toast.success(report.message || '已撤销本轮');
+    undoRefreshes(report.items).forEach((change) => emitAssistantData(change));
+    await reload();
+    void loadProgress();
+  };
+
+  // 「/技能」：输入框里正在打斜杠（或点了「技能」胶囊）就在框上面列技能，选了换成「/技能名 」
+  const skillList = team?.skills ?? [];
+  const typedSkill = slashQuery(draft, caret);
+  const skillQuery = typedSkill ?? (skillMenu.forced ? '' : null);
+  const skillMatches = skillQuery === null || skillMenu.dismissed ? [] : skillList.filter((s) => !skillQuery
+    || s.name.replace(/\s/g, '').includes(skillQuery) || s.id.includes(skillQuery.toLowerCase()) || s.summary.includes(skillQuery));
+  const skillActive = Math.min(skillMenu.index, Math.max(0, skillMatches.length - 1));
+  const syncCaret = (el: HTMLTextAreaElement) => setCaret(el.selectionStart ?? el.value.length);
+  const pickSkill = (skill: AssistantSkill) => {
+    const next = insertSkill(draft, typedSkill === null ? 0 : caret, skill.name);
+    setDraft(next.text);
+    setSkillMenu({ forced: false, dismissed: false, index: 0 });
+    requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(next.caret, next.caret);
+      setCaret(next.caret);
+    });
+  };
+
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.nativeEvent.isComposing) {
+    if (e.nativeEvent.isComposing) return;
+    if (skillMatches.length) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        const step = e.key === 'ArrowDown' ? 1 : -1;
+        setSkillMenu((prev) => ({ ...prev, index: (skillActive + step + skillMatches.length) % skillMatches.length }));
+        return;
+      }
+      if ((e.key === 'Enter' && !e.ctrlKey && !e.metaKey) || e.key === 'Tab') {
+        e.preventDefault();
+        pickSkill(skillMatches[skillActive]);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setSkillMenu({ forced: false, dismissed: true, index: 0 });
+        return;
+      }
+    }
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       void send();
     }
@@ -516,7 +683,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
   const openChapterCandidate = (item: AssistantChapterCandidateRef) =>
     onNavigate('chapter-analysis', `chapter=${item.chapter_id}&tab=candidates&candidate=${item.id}`);
 
-  const messages = view?.messages ?? [];
+  const messages = useMemo(() => view?.messages ?? [], [view?.messages]);
   const waitingRun = view?.active_run?.status === 'waiting_input' ? view.active_run : null;
   const members = team?.members ?? [];
   const mention = (member: AssistantMember) => {
@@ -543,9 +710,20 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
     const d = next?.deferred;
     if (d?.ready && !continuedRef.current.has(d.message_id)) await continueDeferred(d);
   };
+  // 本页确认过的草案 + 自动执行在运行里确认了全部对象的草案（服务端的 confirmed 要读回对话才有）
+  const confirmedKeys = useMemo(() => {
+    if (!autoConfirmed.size) return confirmedPlans;
+    const keys = new Set(confirmedPlans);
+    const plans = [
+      ...messages.flatMap((m) => m.plans ?? []),
+      ...(live ? [...live.cards.plans, ...live.delegations.flatMap((d) => d.cards.plans)] : []),
+    ];
+    plans.forEach((p) => { if (planDoneBy(p, autoConfirmed)) keys.add(planKey(p)); });
+    return keys;
+  }, [autoConfirmed, confirmedPlans, live, messages]);
   const lookups = useMemo(
-    () => ({ fields: candidatesById, entities: entityCandidatesById, confirmedPlans }),
-    [candidatesById, entityCandidatesById, confirmedPlans],
+    () => ({ fields: candidatesById, entities: entityCandidatesById, confirmedPlans: confirmedKeys }),
+    [candidatesById, entityCandidatesById, confirmedKeys],
   );
   const pending = pendingChanges([
     ...messages.map(attachmentsOf),
@@ -581,7 +759,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
     if (ref.kind === 'plan') {
       return (
         <PlanCard
-          plan={ref.plan} confirmed={confirmedPlans.has(item.key)}
+          plan={ref.plan} confirmed={confirmedKeys.has(item.key)}
           onConfirmed={(p) => { markPlanConfirmed(p); void afterDecision(); }} onFailed={() => void reload()}
           onNavigate={(p) => onNavigate(p)} showActions={showActions}
         />
@@ -643,7 +821,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
       <div>
         <div className={cn('as-prose', folded && 'relative max-h-[11.5rem] overflow-hidden')}>
           <RichText text={text} />
-          {folded && <div className="pointer-events-none absolute inset-x-0 bottom-0 h-14 bg-gradient-to-t from-white to-transparent" />}
+          {folded && <div className="pointer-events-none absolute inset-x-0 bottom-0 h-14 bg-gradient-to-t from-surface-paper to-transparent" />}
         </div>
         {long && (
           <button onClick={toggle} className="as-link mt-1">{folded ? `展开全文（${text.length} 字）` : '收起'}</button>
@@ -672,16 +850,45 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
           <PencilLine className="h-3.5 w-3.5" />
         </button>
       )}
+      {undoable(m) && !busy && (
+        <button onClick={() => setUndoRunId(m.run_id)} className="as-icon-btn h-6 w-6" title="撤销本轮：把这一轮写进书里的东西撤回（先列给你看）">
+          <Undo2 className="h-3.5 w-3.5" />
+        </button>
+      )}
     </span>
   );
 
+  /** 写作卡：write_chapter 写的章，一章一张 */
+  const writeCards = (writes: AssistantChapterWrite[] | undefined, key: string): ReactNode => (writes?.length ? (
+    <div className="space-y-2">
+      {writes.map((w) => (
+        <ChapterDraftCard
+          key={`${key}:${w.job_id}`}
+          write={w}
+          onOpen={(chapterId, candidateId) => onNavigate('chapter-analysis', `chapter=${chapterId}&tab=candidates${candidateId ? `&candidate=${candidateId}` : ''}`)}
+        />
+      ))}
+    </div>
+  ) : null);
+
   const renderMessage = (m: AssistantMessageView): ReactNode => {
-    if (m.role === 'user' && m.auto) return <p key={m.id} className="as-meta text-center">{m.content}</p>;
+    if (m.role === 'user' && m.auto) {
+      return (
+        <p key={m.id} className="as-meta text-center">
+          {m.content}
+          {m.undone && ' · 已撤销'}
+          {undoable(m) && !busy && <button onClick={() => setUndoRunId(m.run_id)} className="as-link ml-1.5">撤销这一轮</button>}
+        </p>
+      );
+    }
     if (m.role === 'user') {
       // 操作按钮浮在下方的间隔里（悬停才出现），不占行高
       return (
         <div key={m.id} className="group flex flex-col items-end">
           {m.answer && <span className="as-meta mb-1">回答提问</span>}
+          {m.queued && <span className="as-meta mb-1">处理中追加</span>}
+          {m.autopilot && <span className="as-meta mb-1 inline-flex items-center gap-1"><Zap className="h-3 w-3" />自动执行</span>}
+          {m.undone && <span className="as-meta mb-1 inline-flex items-center gap-1"><Undo2 className="h-3 w-3" />这一轮已撤销</span>}
           <div className="relative max-w-[88%]">
             <div className="as-user-msg"><RichText text={m.content} /></div>
             <div className="absolute right-0 top-full z-10">{messageActions(m)}</div>
@@ -690,15 +897,16 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
       );
     }
     const note = [m.delegated && '受主编委托', m.question && '向你提问'].filter(Boolean).join(' · ');
-    // 照 AI 编程软件的顺序：处理记录、改动（各一行，默认收起）在前，回复正文在最后
+    // 顺序：处理过程（每步那句话 + 回执）在前，改动一行，回复正文在最后
     return (
       <div key={m.id} className="group">
         <SpeakerLine member={m.member} note={note}>
           <span className="ml-auto">{messageActions(m)}</span>
         </SpeakerLine>
         <div className="space-y-2">
-          <StepList steps={m.steps} />
+          <StepTimeline steps={m.steps} />
           <ChangeList items={changeItems(attachmentsOf(m), lookups)} renderDetail={renderDetail} />
+          {writeCards(m.chapter_writes, m.id)}
           {m.id === activeQuestionId
             ? <p className="as-prose text-content-secondary">向你提了 {m.question?.questions.length ?? 0} 个问题，请在下方回答。</p>
             : replyBody(m.id, m.content, Boolean(m.delegated))}
@@ -712,6 +920,12 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
     const next = !reviewBeforeSend;
     setReviewBeforeSend(next);
     localStorage.setItem(REVIEW_KEY, String(next));
+    setPreview(null);
+  };
+  const toggleAutopilot = () => {
+    const next = !autopilot;
+    setAutopilot(next);
+    localStorage.setItem(AUTOPILOT_KEY, String(next));
     setPreview(null);
   };
   const pageHint = `共创室会参考你所在的页面（${page.label || '本项目'}），但不限于这里：可以直接说要处理的设定、人物或章节，团队会自己定位。`
@@ -731,7 +945,9 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
                 <h3 className="mt-4 text-[18px] font-semibold text-content">今天想写点什么？</h3>
                 <p className="mt-2 max-w-[360px] text-[13px] leading-[1.7] text-content-secondary">
                   主编会先弄清你想写什么，再按 总纲 → 卷纲 → 章纲 → 正文 推进，把专业的事交给团队成员。
-                  需要你拍板时会先问你；所有改动都是候选或草案，你确认了才写进书里。
+                  {autopilot
+                    ? '已打开自动执行：团队一口气做完，改动直接写进书里（修改可撤销，正文能在历史版本恢复）。'
+                    : '需要你拍板时会先问你；所有改动都是候选或草案，你确认了才写进书里。'}
                 </p>
                 <div className="mt-6 grid w-full grid-cols-2 gap-2.5 text-left">
                   {(team?.starters ?? []).map((s) => (
@@ -764,6 +980,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
                 </SpeakerLine>
                 <div className="space-y-2">
                   <ChangeList items={changeItems(d.cards, lookups)} renderDetail={renderDetail} />
+                  {writeCards(d.cards.chapter_writes, `delegation-${i}`)}
                   {d.content && replyBody(`delegation-${i}`, d.content, true)}
                 </div>
               </div>
@@ -774,8 +991,9 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
                   {!live.text && <TypingDots />}
                 </SpeakerLine>
                 <div className="space-y-2">
-                  <StepList steps={live.steps} live />
+                  <StepTimeline steps={live.steps} />
                   <ChangeList items={changeItems(live.cards, lookups)} renderDetail={renderDetail} />
+                  {writeCards(live.cards.chapter_writes, 'live')}
                   {live.text && <div className="as-prose"><RichText text={live.text} /></div>}
                 </div>
               </div>
@@ -825,11 +1043,19 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
           </button>
         )}
         {showTeam && team && (
-          <div className="absolute inset-0 z-20 overflow-y-auto bg-white px-4 py-5">
+          <div className="absolute inset-0 z-20 overflow-y-auto bg-surface-paper px-4 py-5">
             <TeamSettings projectId={projectId} team={team} onChange={setTeam} onClose={() => setShowTeam(false)} />
           </div>
         )}
+        {showMemo && (
+          <div className="absolute inset-0 z-20 overflow-y-auto bg-surface-paper px-4 py-5">
+            <MemoPanel projectId={projectId} version={memoVersion} onClose={() => setShowMemo(false)} />
+          </div>
+        )}
       </div>
+      {undoRunId && (
+        <UndoRunDialog projectId={projectId} runId={undoRunId} onClose={() => setUndoRunId(null)} onDone={(r) => void onUndone(r)} />
+      )}
 
       <div className="flex-none px-3 pb-3 pt-2">
         <PendingTray
@@ -845,55 +1071,121 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
         {deferred && !busy && <DeferredHint deferred={deferred} onContinue={() => void continueDeferred(deferred)} disabled={busy} />}
         {progress && !busy && !pending.length && !deferred && <NextStepHint progress={progress} onAsk={askEditor} disabled={busy} />}
         {notice && <p className="as-meta mb-2 px-1">{notice}</p>}
-        {busy && <p className="mb-2 px-1 text-[12px] text-brand">正在处理本轮要求…可以先写下一条，处理完再发。</p>}
+        {busy && (
+          <p className="mb-2 px-1 text-[12px] text-brand">
+            {autopilot ? '自动执行中，团队会一口气做完…' : '正在处理本轮要求…'}现在发的话会排队，主编下一步开始前读到。
+          </p>
+        )}
+        {queued.length > 0 && (
+          <ul className="mb-2 space-y-1" aria-label="排队中的追加要求">
+            {queued.map((q) => (
+              <li key={q.id} className="flex min-w-0 items-center gap-2 rounded-[8px] border border-dashed border-surface-border bg-white px-2.5 py-1.5 text-[12px]">
+                <Clock3 className="h-3.5 w-3.5 flex-none text-content-tertiary" />
+                <span className="flex-none text-content-tertiary">排队中</span>
+                <span className="min-w-0 flex-1 truncate text-content" title={q.text}>{q.text}</span>
+                <button onClick={() => void withdraw(q.id)} className="as-link flex-none" title="撤回到输入框">撤回</button>
+              </li>
+            ))}
+          </ul>
+        )}
         {waitingRun && !busy && <p className="mb-2 px-1 text-[12px] text-gold-500">团队在等你回答上面的问题；直接发新要求会结束那轮提问。</p>}
-        <div className="rounded-[18px] border border-surface-border bg-white shadow-[0_4px_16px_-8px_rgba(29,36,32,0.16)] transition-[border-color,box-shadow] focus-within:border-brand/50 focus-within:shadow-[0_4px_16px_-6px_rgba(40,91,77,0.28)]">
+        {/* 输入区：小胶囊一行在框上面，框里只有输入框、用量和发送；面板窄时成员 / 技能 / 自动 / 核对只留图标 */}
+        <div className="as-chips mb-1.5 flex min-w-0 items-center gap-1.5">
+          <MemberPicker members={members} onMention={mention} onOpenSettings={() => setShowTeam((v) => !v)} />
+          <span className="as-chip min-w-[4.5rem] max-w-[14rem] shrink cursor-default" title={pageHint}>
+            <MapPin className="h-3.5 w-3.5 flex-none" />
+            <span className="truncate">
+              {page.label || '本项目'}
+              {page.selection && <span className="text-brand-600"> · 已选 {page.selection.text.length} 字</span>}
+            </span>
+          </span>
+          {skillList.length > 0 && (
+            <button
+              onClick={() => { setSkillMenu({ forced: !skillMenu.forced, dismissed: false, index: 0 }); inputRef.current?.focus(); }}
+              aria-expanded={skillMatches.length > 0}
+              className={cn('as-chip', skillMatches.length > 0 && 'as-chip--on')}
+              title="点名一份写作技能（黄金三章、章纲写法…），这一轮团队照着做；也可以在输入框里打「/」"
+            >
+              <BookMarked className="h-3.5 w-3.5" /><span className="as-chip-label">技能</span>
+            </button>
+          )}
+          <button
+            onClick={toggleAutopilot}
+            aria-pressed={autopilot}
+            aria-label="自动执行"
+            className={cn('as-chip', autopilot && 'as-chip--on')}
+            title={autopilot
+              ? '自动执行：已打开。候选直接采用 / 建档、草案直接确认、正文写完直接采用，一轮做到底（修改可在卡片上撤销，正文能在历史版本恢复）。点一下关掉'
+              : '打开后，团队一口气做完：候选直接采用 / 建档、草案直接确认、正文写完直接采用，不停下来等你确认'}
+          >
+            <Zap className="h-3.5 w-3.5" /><span className="as-chip-label">自动</span>
+          </button>
+          <button
+            onClick={toggleReview}
+            aria-pressed={reviewBeforeSend}
+            aria-label="发送前核对"
+            className={cn('as-chip', reviewBeforeSend && 'as-chip--on')}
+            title={reviewBeforeSend ? '发送前核对：已打开，点一下关掉' : '打开后，发送前先列出这次会带给团队的内容，确认了再发'}
+          >
+            <ListChecks className="h-3.5 w-3.5" /><span className="as-chip-label">核对</span>
+          </button>
+        </div>
+        <div className="ws-composer relative">
+          {skillMatches.length > 0 && (
+            <SkillMenu
+              skills={skillMatches}
+              active={skillActive}
+              onPick={pickSkill}
+              onHover={(index) => setSkillMenu((prev) => ({ ...prev, index }))}
+            />
+          )}
           <textarea
             ref={inputRef}
             value={draft}
-            onChange={(e) => { setDraft(e.target.value); setNotice(''); }}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              syncCaret(e.target);
+              setNotice('');
+              if (skillMenu.dismissed) setSkillMenu((prev) => ({ ...prev, dismissed: false }));
+            }}
+            onSelect={(e) => syncCaret(e.currentTarget)}
+            onBlur={() => setSkillMenu((prev) => (prev.forced ? { ...prev, forced: false } : prev))}
             onKeyDown={onKeyDown}
-            rows={2}
+            rows={3}
             maxLength={MAX_CHARS}
-            placeholder="和主编说说你的想法，Ctrl+Enter 发送"
-            className="block min-h-[56px] w-full resize-none !rounded-none !border-0 !bg-transparent px-4 pb-1 pt-3 text-[14px] leading-[1.6] !text-content outline-none placeholder:!text-content-tertiary focus:!shadow-none"
+            placeholder={busy ? '想到什么接着说，会排队送给主编；Ctrl+Enter 发送' : '和主编说说你的想法，打「/」点名写作技能，Ctrl+Enter 发送'}
+            className="block min-h-[76px] w-full resize-none !rounded-none !border-0 !bg-transparent px-3.5 pb-1 pt-3 text-[14px] leading-[1.6] !text-content outline-none placeholder:!text-content-tertiary focus:!shadow-none"
           />
-          <div className="flex items-center gap-1.5 px-2.5 pb-2.5 pt-1">
-            <MemberPicker members={members} onMention={mention} onOpenSettings={() => setShowTeam((v) => !v)} />
-            <span className="as-chip max-w-[11rem] shrink cursor-default" title={pageHint}>
-              <MapPin className="h-3.5 w-3.5 flex-none" />
-              <span className="truncate">
-                {page.label || '本项目'}
-                {page.selection && <span className="text-brand-600"> · 已选 {page.selection.text.length} 字</span>}
-              </span>
-            </span>
-            <button
-              onClick={toggleReview}
-              aria-pressed={reviewBeforeSend}
-              aria-label="发送前核对"
-              className={cn('as-chip', reviewBeforeSend && 'as-chip--on px-1.5')}
-              title={reviewBeforeSend ? '发送前核对：已打开，点一下关掉' : '打开后，发送前先列出这次会带给团队的内容，确认了再发'}
-            >
-              <ListChecks className="h-3.5 w-3.5" />{!reviewBeforeSend && '核对'}
-            </button>
-            <div className="ml-auto flex items-center gap-2.5">
-              {draft.length > MAX_CHARS * 0.8 && (
-                <span className="text-[11px] tabular-nums text-gold-500">{draft.length}/{MAX_CHARS}</span>
-              )}
-              <ContextMeter usage={usage} compacting={compacting} />
+          <div className="flex items-center gap-2.5 px-2.5 pb-2 pt-1">
+            <ContextMeter usage={usage} compacting={compacting} />
+            {draft.length > MAX_CHARS * 0.8 && (
+              <span className="text-[11px] tabular-nums text-gold-500">{draft.length}/{MAX_CHARS}</span>
+            )}
+            <div className="ml-auto flex items-center gap-1.5">
               {busy ? (
-                <button onClick={stop} className="flex h-8 w-8 flex-none items-center justify-center rounded-full bg-content text-white hover:bg-black" title="停止">
-                  <Square className="h-3 w-3 fill-current" />
-                </button>
+                <>
+                  {draft.trim() && (
+                    <button
+                      onClick={() => void send()}
+                      className="flex h-8 w-8 flex-none items-center justify-center rounded-lg bg-brand text-white hover:bg-brand-600"
+                      title="追加（排队，主编下一步开始前读到；Ctrl+Enter）"
+                    >
+                      <ArrowUp className="h-4 w-4" strokeWidth={2.5} />
+                    </button>
+                  )}
+                  <button onClick={stop} className="flex h-8 w-8 flex-none items-center justify-center rounded-lg bg-content text-white hover:bg-black" title="停止">
+                    <Square className="h-3 w-3 fill-current" />
+                  </button>
+                </>
               ) : reviewBeforeSend ? (
-                <button onClick={() => void send()} disabled={!draft.trim() || previewLoading} className="as-btn-primary rounded-full px-3.5" title="Ctrl+Enter">
+                <button onClick={() => void send()} disabled={!draft.trim() || previewLoading} className="as-btn-primary px-3.5" title="Ctrl+Enter">
                   {previewLoading && <Loader2 className="h-3.5 w-3.5 animate-spin" />}{sendLabel}
                 </button>
               ) : (
                 <button
                   onClick={() => void send()}
                   disabled={!draft.trim() || previewLoading}
-                  className="flex h-8 w-8 flex-none items-center justify-center rounded-full bg-brand text-white hover:bg-brand-600 disabled:cursor-not-allowed disabled:bg-surface-border"
+                  className="flex h-8 w-8 flex-none items-center justify-center rounded-lg bg-brand text-white hover:bg-brand-600 disabled:cursor-not-allowed disabled:bg-surface-border"
                   title="发送（Ctrl+Enter）"
                 >
                   {previewLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" strokeWidth={2.5} />}

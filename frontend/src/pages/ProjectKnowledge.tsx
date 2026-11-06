@@ -10,6 +10,7 @@ import { BookMarked, Eye, Library, Loader2, Save, Unlink } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { cn } from '@/lib/utils';
+import { DocIcon } from '@/components/project-shell/DocIcon';
 import { chapterOutlineApi, knowledgeApi, volumeApi } from '@/services/api';
 import type { ChapterOutline, Volume } from '@/types';
 import type { KbMode, KbPreview, KbProjectLink, KbScene, KbSource } from '@/types/knowledge';
@@ -103,7 +104,7 @@ export default function ProjectKnowledgePage() {
     <div className="animate-fade-in space-y-6">
       <section className="lj-page-header">
         <div className="min-w-0">
-          <h1 className="lj-page-title">仿写参考</h1>
+          <h1 className="lj-page-title"><DocIcon />仿写参考</h1>
           <p className="mt-2 max-w-[680px] text-sm leading-6 text-content-secondary">
             选一本知识库里的书做对标。分卷、细化卷纲、展开章纲、写正文时，会按本书的位置自动取原书对应的那一段（去掉人名的版本），
             学它的节奏和结构；本书的人物、设定和情节照常由你决定。

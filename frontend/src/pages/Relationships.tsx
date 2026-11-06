@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { GitBranch, Plus, Pencil, Trash2, Loader2, Heart, Swords, Users, Handshake, Minus, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
+import { DocIcon } from '@/components/project-shell/DocIcon'
 import { useStore } from '@/store/index'
 import { relationshipApi, characterApi } from '@/services/api'
 import { Modal } from '@/components/ui/Modal'
@@ -231,7 +232,7 @@ export default function Relationships() {
     <div className="animate-fade-in space-y-6">
       <section className="lj-page-header">
         <div className="min-w-0">
-          <h1 className="lj-page-title">关系管理</h1>
+          <h1 className="lj-page-title"><DocIcon />关系管理</h1>
           <p className="mt-2 max-w-[560px] text-sm leading-6 text-content-secondary">
             记录角色两两之间的关系类型、亲密度与当前状态，理清人物脉络。
             {hasRelationships && `当前共 ${relationships.length} 条关系。`}

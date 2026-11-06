@@ -4,7 +4,6 @@
 一个项目一段可续接的对话；每条要求在后台任务里运行（SSE 推进度、处理记录、流式回复、上下文用量）；修改只产生候选。
 """
 import asyncio
-import weakref
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -20,12 +19,16 @@ from app.models.assistant import (
     AssistantTeamSetting,
 )
 from app.schemas.assistant import (
-    AssistantAnswerRequest, AssistantContextRequest, AssistantPage, AssistantSendRequest, AssistantTeamModelRequest,
+    AssistantAnswerRequest, AssistantContextRequest, AssistantMemoRequest, AssistantPage, AssistantQueueRequest,
+    AssistantSendRequest, AssistantTeamModelRequest,
 )
 from app.services import assistant_agent_service as agent
 from app.services import assistant_candidate_service as cands
 from app.services import assistant_entity_candidate_service as entity_cands
 from app.services import assistant_context as budgeting
+from app.services import assistant_memo as memos
+from app.services import assistant_skills as skills
+from app.services import assistant_undo as undo_service
 from app.services import cocreation_team as team
 from app.services.project_ai_preference import load_project_ai_preference, resolve_override_values
 from app.services.story_progress import progress_snapshot
@@ -34,7 +37,7 @@ from app.services.ai_service import AIService
 from app.services.assistant_checks_service import project_checks as compute_checks
 from app.services.assistant_fields import FieldError
 from app.services.assistant_entity_candidate_service import EntityError
-from app.services.assistant_persistence import WRITE_ATTEMPTS
+from app.services.assistant_persistence import WRITE_ATTEMPTS, decision_lock
 
 router = APIRouter(prefix="/projects/{project_id}/assistant", tags=["智能助笔"])
 
@@ -125,7 +128,7 @@ async def send_message_stream(
         raise HTTPException(status_code=409, detail=BUSY_MESSAGE)
     user_id = getattr(request.state, "user_id", None)
     run = await agent.start_run(db, project_id=project_id, user_id=user_id, message=body.message,
-                                page=body.page.model_dump())
+                                page=body.page.model_dump(), meta={"autopilot": True} if body.autopilot else None)
     try:
         job = await _start_job(project_id=project_id, user_id=user_id, run=run, ai=user_ai_service,
                                title=f"智能助笔：{body.message.strip()[:24]}")
@@ -134,6 +137,28 @@ async def send_message_stream(
         await db.commit()
         raise HTTPException(status_code=409, detail=str(exc))
     return job_sse_response(job)
+
+
+def _running_run_id(project_id: str) -> Optional[str]:
+    job = ai_jobs.current(_scope(project_id))
+    return (job.meta or {}).get("run_id") if job is not None else None
+
+
+@router.post("/queue", summary="运行中追加要求：排队，主编下一步开始前读到（这一轮已经在收尾 → 409，直接发送）")
+async def queue_message(project_id: str, body: AssistantQueueRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    await verify_request_project(request, project_id, db)
+    run_id = _running_run_id(project_id)
+    try:
+        item = agent.queue_message(run_id, body.message)
+    except agent.AssistantStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"id": item.id, "run_id": run_id, "message": item.text}
+
+
+@router.delete("/queue/{item_id}", summary="撤回还没送达的追加要求")
+async def withdraw_queued(project_id: str, item_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    await verify_request_project(request, project_id, db)
+    return {"withdrawn": agent.withdraw_message(_running_run_id(project_id), item_id)}
 
 
 @router.post("/runs/{run_id}/answer/stream", summary="回答助笔的提问并继续（后台任务 + SSE）")
@@ -200,7 +225,7 @@ async def preview_context(project_id: str, body: AssistantSendRequest, request: 
     await verify_request_project(request, project_id, db)
     model, max_tokens = await _project_defaults(db, project_id, request)
     return await agent.preview(db, project_id, body.message, body.page.model_dump(), default_model=model,
-                               max_tokens=max_tokens)
+                               max_tokens=max_tokens, autopilot=body.autopilot)
 
 
 @router.post("/context/usage", summary="上下文用量：下一条要求开跑时大约占多少（估算，不调用模型）")
@@ -222,17 +247,9 @@ async def list_runs(project_id: str, request: Request, db: AsyncSession = Depend
     return {"items": sorted(items, key=lambda r: 0 if r["status"] in agent.ACTIVE else 1)}
 
 
-_decision_locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = weakref.WeakValueDictionary()
-
-
 def _decision_lock(project_id: str) -> asyncio.Lock:
-    """同一项目的候选处理排队做（没人用时锁自动回收）：同一张卡被同时点了两次（待确认栏的行上和对话里的卡片）、
-    两张同名新建卡同时建档、同一项内容的两份修改同时应用，不排队就都过了「还没处理 / 没有同名 / 内容没被改过」的核对，
-    建出两份或互相覆盖。"""
-    lock = _decision_locks.get(project_id)
-    if lock is None:
-        lock = _decision_locks[project_id] = asyncio.Lock()
-    return lock
+    """同一项目的候选处理排队做（锁在 assistant_persistence：运行里的自动执行也排同一把）。"""
+    return decision_lock(project_id)
 
 
 async def _candidate(db: AsyncSession, project_id: str, candidate_id: str) -> AssistantFieldCandidate:
@@ -358,6 +375,7 @@ async def _team_payload(db: AsyncSession, project_id: str, request: Request) -> 
     return {
         "members": [{**team.member_view(m, models.get(m.id)), "context_window": window(m.id).tokens} for m in team.MEMBERS],
         "starters": list(team.STARTERS),
+        "skills": [skills.skill_view(s) for s in skills.SKILLS],
         "context": {
             "setting": setting, "window": editor.tokens, "source": editor.source, "model": editor.model,
             "auto": auto.tokens, "auto_source": auto.source, "presets": list(budgeting.PRESETS),
@@ -396,6 +414,64 @@ async def set_member_model(project_id: str, member_id: str, body: AssistantTeamM
         row.model = model
     await db.commit()
     return await _team_payload(db, project_id, request)
+
+
+@router.get("/runs/{run_id}/undo", summary="撤销本轮前看看会撤回什么、哪些撤不了（不写入）")
+async def preview_undo(project_id: str, run_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    await verify_request_project(request, project_id, db)
+    try:
+        return await undo_service.preview(db, project_id, run_id,
+                                          stale_running=ai_jobs.current(_scope(project_id)) is None)
+    except undo_service.UndoError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post("/runs/{run_id}/undo", summary="撤销本轮：这一轮写进书里的修改 / 新建 / 正文 / 草案 / 备忘一次撤回")
+async def undo_run(project_id: str, run_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    await verify_request_project(request, project_id, db)
+    if ai_jobs.current(_scope(project_id)) is not None:
+        raise HTTPException(status_code=409, detail=BUSY_MESSAGE)
+    try:
+        return await undo_service.undo(db, project_id, run_id, getattr(request.state, "user_id", None),
+                                       stale_running=True)
+    except undo_service.UndoError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.get("/memos", summary="作品备忘：作者的长期偏好与已定约定（每轮都带给团队）")
+async def list_memos(project_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    await verify_request_project(request, project_id, db)
+    return {"items": [memos.memo_view(m) for m in await memos.list_memos(db, project_id)]}
+
+
+@router.post("/memos", summary="作者记一条作品备忘")
+async def add_memo(project_id: str, body: AssistantMemoRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    await verify_request_project(request, project_id, db)
+    try:
+        memo, _created = await memos.add_memo(db, project_id, body.content, source="author")
+    except memos.MemoError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return memos.memo_view(memo)
+
+
+@router.patch("/memos/{memo_id}", summary="改一条作品备忘")
+async def update_memo(project_id: str, memo_id: str, body: AssistantMemoRequest, request: Request,
+                      db: AsyncSession = Depends(get_db)):
+    await verify_request_project(request, project_id, db)
+    try:
+        return memos.memo_view(await memos.update_memo(db, project_id, memo_id, body.content))
+    except memos.MemoError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.delete("/memos/{memo_id}", summary="删一条作品备忘")
+async def delete_memo(project_id: str, memo_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    await verify_request_project(request, project_id, db)
+    try:
+        await memos.delete_memo(db, project_id, memo_id)
+    except memos.MemoError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {"deleted": memo_id}
 
 
 @router.get("/progress", summary="创作进度：世界设定 → 世界规则 → 设定条目 → 角色与组织 → 关系 → 总纲 → 卷纲 → 章纲 → 正文 "

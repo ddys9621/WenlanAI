@@ -29,6 +29,7 @@ import type {
   LedgerPromise,
   LedgerSearchItem,
   PromiseCreate,
+  PromiseReminder,
   PromiseUpdate,
   RecallPreview,
   StateCorrectionCreate,
@@ -42,7 +43,10 @@ import type {
   AssistantFieldCandidate,
   AssistantPageContext,
   AssistantPreview,
+  AssistantMemo,
   AssistantProgress,
+  AssistantQueuedMessage,
+  AssistantUndoReport,
   AssistantRunResult,
   AssistantRunView,
   AssistantSessionInfo,
@@ -679,14 +683,35 @@ export const assistantApi = {
     api.get<unknown, { items: AssistantSessionInfo[] }>(`/projects/${projectId}/assistant/sessions`),
   sessionById: (projectId: string, sessionId: string) =>
     api.get<unknown, AssistantSessionView>(`/projects/${projectId}/assistant/sessions/${sessionId}`),
-  sendStream: (projectId: string, data: { message: string; page: AssistantPageContext }, options?: SSEClientOptions<AssistantRunResult>) =>
+  /** autopilot = 自动执行：这一轮的候选直接采用 / 建档、草案直接确认、正文写完直接采用 */
+  sendStream: (projectId: string, data: { message: string; page: AssistantPageContext; autopilot?: boolean }, options?: SSEClientOptions<AssistantRunResult>) =>
     ssePost<AssistantRunResult>(`/api/projects/${projectId}/assistant/messages/stream`, data, options),
+  /** 运行中追加要求：排队，主编下一步开始前读到；409 = 这一轮已经在收尾，直接发送 */
+  queueMessage: (projectId: string, message: string) =>
+    api.post<unknown, AssistantQueuedMessage>(`/projects/${projectId}/assistant/queue`, { message }, { silent: true }),
+  /** 撤回还没送达的追加要求 */
+  withdrawQueued: (projectId: string, itemId: string) =>
+    api.delete<unknown, { withdrawn: boolean }>(`/projects/${projectId}/assistant/queue/${itemId}`, { silent: true }),
+  /** 撤销本轮前看看会撤回什么、哪些撤不了（不写入）；409 = 还没结束 / 已撤过 */
+  undoPreview: (projectId: string, runId: string) =>
+    api.get<unknown, AssistantUndoReport>(`/projects/${projectId}/assistant/runs/${runId}/undo`, { silent: true }),
+  undoRun: (projectId: string, runId: string) =>
+    api.post<unknown, AssistantUndoReport>(`/projects/${projectId}/assistant/runs/${runId}/undo`, {}, { silent: true }),
+  /** 作品备忘：作者的长期偏好与已定约定（每轮都带给团队） */
+  memos: (projectId: string) =>
+    api.get<unknown, { items: AssistantMemo[] }>(`/projects/${projectId}/assistant/memos`),
+  addMemo: (projectId: string, content: string) =>
+    api.post<unknown, AssistantMemo>(`/projects/${projectId}/assistant/memos`, { content }, { silent: true }),
+  updateMemo: (projectId: string, memoId: string, content: string) =>
+    api.patch<unknown, AssistantMemo>(`/projects/${projectId}/assistant/memos/${memoId}`, { content }, { silent: true }),
+  deleteMemo: (projectId: string, memoId: string) =>
+    api.delete<unknown, { deleted: string }>(`/projects/${projectId}/assistant/memos/${memoId}`, { silent: true }),
   answerStream: (projectId: string, runId: string, answers: AssistantAnswer[], options?: SSEClientOptions<AssistantRunResult>) =>
     ssePost<AssistantRunResult>(`/api/projects/${projectId}/assistant/runs/${runId}/answer/stream`, { answers }, options),
   /** 上游卡片处理完：接着做上一轮挂起的要求 */
   continueStream: (projectId: string, messageId: string, options?: SSEClientOptions<AssistantRunResult>) =>
     ssePost<AssistantRunResult>(`/api/projects/${projectId}/assistant/deferred/${messageId}/continue/stream`, {}, options),
-  preview: (projectId: string, data: { message: string; page: AssistantPageContext }) =>
+  preview: (projectId: string, data: { message: string; page: AssistantPageContext; autopilot?: boolean }) =>
     api.post<unknown, AssistantPreview>(`/projects/${projectId}/assistant/preview`, data),
   runs: (projectId: string) =>
     api.get<unknown, { items: AssistantRunView[] }>(`/projects/${projectId}/assistant/runs`),
@@ -1381,6 +1406,9 @@ export const ledgerApi = {
   /** 作者改伏笔 / 标回收 / 放弃 / 重新打开；改过的字段重新分析不覆盖 */
   updatePromise: (projectId: string, promiseId: string, data: PromiseUpdate) =>
     api.patch<unknown, LedgerPromise>(`${ledgerBase(projectId)}/promises/${promiseId}`, data),
+  /** 写第 chapter 章时该照应的伏笔（章纲要回收 / 推进的在前，再是超期 / 临近 / 掉线；没什么要提醒的不列） */
+  promiseReminders: (projectId: string, chapter: number) =>
+    api.get<unknown, { chapter: number; items: PromiseReminder[] }>(`${ledgerBase(projectId)}/promises/reminders`, { params: { chapter } }),
   /** 把重复的伏笔并进 keepId（章纲叙事任务里的引用改指过来） */
   mergePromises: (projectId: string, keepId: string, mergeIds: string[]) =>
     api.post<unknown, { id: string; merged: number }>(`${ledgerBase(projectId)}/promises/${keepId}/merge`, { merge_ids: mergeIds }),

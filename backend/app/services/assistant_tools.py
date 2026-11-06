@@ -35,6 +35,8 @@ from app.models.volume import Volume
 from app.services import assistant_candidate_service as cands
 from app.services import assistant_entity_candidate_service as entities
 from app.services import assistant_fields as fields
+from app.services import assistant_memo as memos
+from app.services import assistant_skills as skills
 from app.services import cocreation_team as team
 from app.services import volume_service as volumes
 from app.services.assistant_checks_service import project_checks
@@ -82,6 +84,10 @@ TOOLS: dict[str, tuple[str, str, str]] = {
     "kb_read": ("读知识库条目", "读一条知识库条目（先 kb_search 拿到 entry_id）：默认去名版（人名换成功能位，适合学结构）；"
                              "view=named 看原名版。只学结构、节奏和写法，不照搬人物、设定与情节",
                 '{"entry_id": "...", "view": "denamed|named"}'),
+    "read_skill": ("读写作技能", "读一份写作技能的全文（写法要点 + 检查清单），有：" + "、".join(s.name for s in skills.SKILLS),
+                   '{"name": "技能名"}'),
+    "remember": ("记进作品备忘", "作者说出长期偏好、拍板了约定或要避开的写法时记一句（以后每轮都带上；一次性的要求不记）",
+                 '{"content": "一句话"}'),
     "fill_basics": ("补作品信息", "按灵感模式补书名 / 简介 / 主题 / 类型（每项出 6 个候选，作者在提问卡里选，选定直接写入），"
                                  "或问作者全书章数 / 叙事视角 / 目标字数；不传 fields 就补第一项缺的",
                     '{"fields": ["description"]（可选：title / description / theme / genre / chapter_count / '
@@ -195,6 +201,9 @@ class ToolContext:
     deferred: Optional[dict] = None  # 生成总入口挂起的要求：等作者处理完上游卡片自动接着做
     declined: set = field(default_factory=set)  # 作者没采用的层 / 这一轮跳过的作品信息字段：不再自动补
     origin_goal: str = ""  # 作者最初那句要求（续跑时也是它）
+    autopilot: bool = False  # 作者打开了「自动执行」：候选直接采用 / 建档、草案直接确认、正文写完直接采用（见 assistant_autopilot）
+    # write_chapter 写的章：对话里的写作卡按它挂（进度 / 正文 / 对比 / 采用）；自动执行采用了就带 adopted（撤销本轮按它恢复正文）
+    chapter_writes: list = field(default_factory=list)
 
 
 @dataclass
@@ -792,6 +801,25 @@ async def _kb_read(ctx: ToolContext, args: dict) -> ToolOutcome:
     return ToolOutcome(True, f"读了《{entry.title}》", clip(f"{head}\n{KB_BOUNDARY}\n\n{body}", DATA_LIMIT))
 
 
+async def _read_skill(_ctx: ToolContext, args: dict) -> ToolOutcome:
+    skill = skills.find_skill(_text(args, "name", 40))
+    if skill is None:
+        raise ToolError("没有这份技能，只能读：" + "、".join(s.name for s in skills.SKILLS))
+    return ToolOutcome(True, f"读了技能《{skill.name}》", f"《{skill.name}》\n{skill.content}")
+
+
+async def _remember(ctx: ToolContext, args: dict) -> ToolOutcome:
+    try:
+        memo, created = await memos.add_memo(ctx.db, ctx.project_id, _text(args, "content", 300), source="team",
+                                             member_id=ctx.member_id, run_id=ctx.run_id)
+    except memos.MemoError as exc:
+        raise ToolError(str(exc)) from exc
+    if not created:
+        return ToolOutcome(True, "作品备忘里已经有这一条", "作品备忘里已经有这一条，不用再记。")
+    ctx.emit({"type": "memo", "memo": memos.memo_view(memo), "member_id": ctx.member_id})
+    return ToolOutcome(True, f"记进作品备忘：{clip(memo.content, 40)}", "已记进作品备忘，以后每轮都会带上（作者能在备忘里改、删）。")
+
+
 async def _plan_volumes(ctx: ToolContext, args: dict) -> ToolOutcome:
     story = await volumes.story_fields(ctx.db, ctx.project_id)
     if not (story.get("premise") or story.get("main_plot")):  # 分卷读的是已经应用的总纲：拿空总纲去分卷只会凭空编
@@ -887,7 +915,7 @@ HANDLERS = {
     "propose_membership": _propose_membership,
     "manuscript": _manuscript, "open_page": _open_page,
     "project_status": _project_status, "ask_author": _ask_author, "story_progress": _story_progress,
-    "kb_search": _kb_search, "kb_read": _kb_read,
+    "kb_search": _kb_search, "kb_read": _kb_read, "read_skill": _read_skill, "remember": _remember,
     "write_chapters": _write_chapters,
 }
 

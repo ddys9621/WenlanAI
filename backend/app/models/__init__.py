@@ -38,7 +38,7 @@ from app.models.chapter_version import ChapterVersion
 from app.models.chapter_candidate import ChapterCandidate
 from app.models.world_map import WorldMap, WorldMapLocation
 from app.models.assistant import (
-    AssistantContextSetting, AssistantFieldCandidate, AssistantMessage, AssistantRun, AssistantSession,
+    AssistantContextSetting, AssistantFieldCandidate, AssistantMemo, AssistantMessage, AssistantRun, AssistantSession,
     AssistantSessionSummary, AssistantTeamSetting,
 )
 
@@ -97,4 +97,5 @@ __all__ = [
     "AssistantTeamSetting",
     "AssistantContextSetting",
     "AssistantSessionSummary",
+    "AssistantMemo",
 ]

@@ -12,9 +12,11 @@ interface Props {
   onChange: (patch: Partial<EditorPrefs>) => void
   onReset: () => void
   onClose: () => void
+  /** 弹层和按钮哪边对齐：按钮在右边（稿纸标题栏的工具）就右对齐，往左展开 */
+  align?: 'left' | 'right'
 }
 
-export function ManuscriptLayoutPanel({ prefs, onChange, onReset, onClose }: Props) {
+export function ManuscriptLayoutPanel({ prefs, onChange, onReset, onClose, align = 'left' }: Props) {
   const ref = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -46,7 +48,10 @@ export function ManuscriptLayoutPanel({ prefs, onChange, onReset, onClose }: Pro
       role="dialog"
       aria-label="正文版式"
       onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); onClose() } }}
-      className="absolute left-0 top-full z-30 mt-1.5 w-[min(26rem,calc(100vw-2rem))] rounded border border-surface-border bg-white px-4 shadow-lg"
+      className={cn(
+        'absolute top-full z-30 mt-1.5 w-[min(26rem,calc(100vw-2rem))] rounded border border-surface-border bg-white px-4 text-content shadow-lg',
+        align === 'right' ? 'right-0' : 'left-0',
+      )}
     >
       <header className="flex items-start justify-between gap-3 border-b border-surface-border-light py-3">
         <div>

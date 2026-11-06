@@ -7,6 +7,7 @@
 - AssistantTeamSetting：共创室成员的模型设置（每个项目每位成员一行；没有行 = 跟随项目模型）
 - AssistantContextSetting：共创室的上下文上限（每个项目一行；没有行 / 空 = 自动按模型查窗口）
 - AssistantSessionSummary：对话的前情摘要（装不下的较早对话由模型压成一段，覆盖到某条消息为止）
+- AssistantMemo：作品备忘（作者的长期偏好、拍板了的约定、要避开的写法），每轮都带给团队，跨对话不丢
 """
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 
@@ -122,6 +123,21 @@ class AssistantContextSetting(Base):
 
     project_id = Column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
     context_window = Column(Integer, nullable=True, comment="上下文上限（token）；空 = 自动按成员用的模型查窗口")
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class AssistantMemo(Base):
+    """作品备忘的一条：作者在面板里写，团队用 remember 记。
+    run_id = 哪一轮记的（撤销本轮时一并删掉）；作者写的为空。"""
+    __tablename__ = "assistant_memos"
+
+    id = Column(String(36), primary_key=True, default=_id)
+    project_id = Column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    content = Column(Text, nullable=False)
+    source = Column(String(20), nullable=False, default="author", comment="author 作者写的 / team 团队记的")
+    member_id = Column(String(40), nullable=True, comment="团队里谁记的")
+    run_id = Column(String(36), nullable=True, index=True)
+    created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
 

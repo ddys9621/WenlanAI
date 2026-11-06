@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { BookMarked, Clock3, Database, Eye, Layers, Loader2, RefreshCw, Sparkles, UserRound } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
+import { DocIcon } from '@/components/project-shell/DocIcon'
 import { useStore } from '@/store/index'
 import { useChapterSync } from '@/store/hooks'
 import { useAIJobsStore } from '@/store/aiJobsStore'
@@ -119,7 +120,7 @@ export default function MemoriesPage() {
     <div className="animate-fade-in space-y-5">
       <section className="lj-page-header">
         <div className="min-w-0">
-          <h1 className="lj-page-title">故事账本</h1>
+          <h1 className="lj-page-title"><DocIcon />故事账本</h1>
           <p className="mt-2 max-w-[640px] text-sm leading-6 text-content-secondary">
             章节分析记下的伏笔、人物状态、章节档案与时间线。写正文时按「这一章需要什么」召回；记错的地方在这里改，重新分析不会冲掉你的修改。
           </p>
@@ -165,13 +166,12 @@ export default function MemoriesPage() {
         )}
       </section>
 
-      <div className="inline-flex flex-wrap border border-surface-border bg-white/60 p-1">
+      <div className="ws-seg flex-wrap">
         {TABS.map((tab) => (
           <button
             key={tab.key}
             onClick={() => setActiveTab(tab.key)}
-            className={cn('inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium transition-colors',
-              activeTab === tab.key ? 'bg-brand text-white' : 'text-content-secondary hover:text-content')}
+            className={cn('ws-seg-item px-3 py-1.5', activeTab === tab.key && 'ws-seg-item--on')}
           >
             <tab.icon className="h-3.5 w-3.5" />
             {tab.label}
