@@ -62,13 +62,31 @@ $requiredModules = @(
     "sentence_transformers"
 )
 $moduleList = ($requiredModules | ForEach-Object { "'$_'" }) -join ","
-$checkCode = "import importlib.util, sys; mods=[$moduleList]; missing=[m for m in mods if importlib.util.find_spec(m) is None]; print(','.join(missing)); sys.exit(1 if missing else 0)"
-$missingModules = (& $venvPython -c $checkCode 2>$null)
+$requirementsFile = Join-Path $backendDir "requirements.txt"
+$checkCode = @"
+import importlib.util, importlib.metadata, re, sys
+problems = ['missing ' + m for m in [$moduleList] if importlib.util.find_spec(m) is None]
+def installed(name):
+    try:
+        return importlib.metadata.version(name)
+    except Exception:
+        return None
+try:
+    for line in open(sys.argv[1], encoding='utf-8'):
+        pin = re.match(r'\s*([A-Za-z0-9_.-]+)(\[[^\]]*\])?\s*==\s*([^\s#;]+)', line)
+        if pin and installed(pin.group(1)) != pin.group(3):
+            problems.append('%s %s (requires %s)' % (pin.group(1), installed(pin.group(1)) or 'missing', pin.group(3)))
+except Exception as e:
+    problems.append('cannot read requirements.txt: %s' % e)
+print(', '.join(problems))
+sys.exit(1 if problems else 0)
+"@
+$missingModules = (& $venvPython -c $checkCode $requirementsFile 2>$null)
 $needBackendInstall = $LASTEXITCODE -ne 0
 
 if ($needBackendInstall) {
     if ($missingModules) {
-        Write-Host ("Missing backend modules: " + $missingModules) -ForegroundColor Yellow
+        Write-Host ("Backend dependencies to install or repair: " + $missingModules) -ForegroundColor Yellow
     }
     Write-Host "Installing backend dependencies..."
     if (-not (Test-Path $installDeps)) {
@@ -86,7 +104,7 @@ if ($needBackendInstall) {
     }
     Set-Location $scriptDir
 
-    $missingModules = (& $venvPython -c $checkCode 2>$null)
+    $missingModules = (& $venvPython -c $checkCode $requirementsFile 2>$null)
     if ($LASTEXITCODE -ne 0) {
         Print-Err ("Backend dependency check failed: " + $missingModules)
         pause

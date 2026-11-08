@@ -7,11 +7,12 @@ $ErrorActionPreference = "Stop"
 $backendDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $venvDir = Join-Path $backendDir ".venv"
 $venvPython = Join-Path $venvDir "Scripts\python.exe"
+$constraintsFile = Join-Path $venvDir "constraints.txt"
 
 function Run-Step($title, $packages, $timeoutSec) {
     Write-Host ""
     Write-Host $title -ForegroundColor Cyan
-    & $venvPython -m pip install --default-timeout=$timeoutSec @packages
+    & $venvPython -m pip install --default-timeout=$timeoutSec -c $constraintsFile @packages
     if ($LASTEXITCODE -ne 0) {
         throw "Install failed: $title"
     }
@@ -29,6 +30,11 @@ if (-not (Test-Path $venvPython)) {
         throw "Failed to create Python virtual environment"
     }
 }
+
+Get-Content (Join-Path $backendDir "requirements.txt") -Encoding UTF8 |
+    ForEach-Object { (($_ -replace '#.*', '') -replace '\[[^\]]*\]', '').Trim() } |
+    Where-Object { $_ } |
+    Set-Content -Path $constraintsFile -Encoding ASCII
 
 Write-Host ""
 Write-Host "[1/8] Upgrade pip" -ForegroundColor Cyan
@@ -58,6 +64,7 @@ Run-Step "[4/8] Install validation and AI clients" @(
 Run-Step "[5/8] Install tools and desktop window" @(
     "httpx==0.28.1",
     "python-dotenv==1.0.0",
+    "json-repair==0.59.10",
     "mcp==1.21.0",
     "pywebview==5.3.2"
 ) 100
