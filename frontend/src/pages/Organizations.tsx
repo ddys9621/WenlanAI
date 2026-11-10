@@ -334,7 +334,8 @@ export default function Organizations() {
               <article key={org.id} className="hh-panel flex flex-col p-5">
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex min-w-0 items-start gap-3">
-                    <span className="flex h-11 w-11 shrink-0 items-center justify-center bg-brand/10 text-brand">
+                    {/* 手机上不放图标块：组织名和下面的目标、成员对齐卡片左边 */}
+                    <span className="flex h-11 w-11 shrink-0 items-center justify-center bg-brand/10 text-brand max-sm:hidden">
                       <Building className="h-5 w-5" />
                     </span>
                     <div className="min-w-0">

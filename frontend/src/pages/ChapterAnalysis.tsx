@@ -12,7 +12,7 @@ import { createPortal } from 'react-dom';
 import { useSearchParams } from 'react-router-dom';
 import {
   BookOpen, Download, FileCheck2, History, Layers, Loader2, PanelRightClose, PanelRightOpen, Plus, RefreshCw, Search,
-  Trash2, Zap,
+  Trash2, X, Zap,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
@@ -273,12 +273,13 @@ export default function ChapterAnalysis() {
     setReaderTab('content');
   };
 
-  // 勾了「采用后自动分析」：展开「本章档案」看进度，跑完档案在原地出来
+  // 勾了「采用后自动分析」：展开「本章档案」看进度，跑完档案在原地出来。
+  // 窄屏上分析面板是盖住稿纸的抽屉，不自动弹（进度在顶栏 AI 任务里，想看再点开面板）
   const afterAdopted = (result: CandidateAdoptResult) => {
     afterContentReplaced();
     if (!result.analysis_job_id) return;
     setSidebarTab('archive');
-    setSidebarOpen(true);
+    if (window.matchMedia('(min-width: 1280px)').matches) setSidebarOpen(true);
     void jobs.followAnalysis(result.chapter, result.analysis_job_id);
   };
 
@@ -581,7 +582,7 @@ export default function ChapterAnalysis() {
               </div>
             ) : !selectedId || !detailReady || !detail ? (
               <div className="flex flex-1 items-center justify-center text-sm text-content-tertiary">
-                {contentLoading ? <Loader2 className="h-5 w-5 animate-spin text-brand" /> : '从左侧选择一个章节'}
+                {contentLoading ? <Loader2 className="h-5 w-5 animate-spin text-brand" /> : '从目录里选择一个章节'}
               </div>
             ) : readerTab === 'content' && projectId ? (
               <div className="flex min-h-0 flex-1">
@@ -598,50 +599,57 @@ export default function ChapterAnalysis() {
                   onOpenHistory={() => setReaderTab('versions')}
                   onAskAssistant={() => useAssistantStore.getState().compose('')}
                 />
-                {/* 侧栏：记忆标注 / 叙事状态（智能助笔在项目右侧的全局抽屉里） */}
+                {/* 侧栏：记忆标注 / 叙事状态（智能助笔在项目右侧的全局抽屉里）。
+                    宽屏排在稿纸右边；窄屏（< xl）放不下，改成从右边盖上来的抽屉（以前是直接不显示，按钮点了没反应） */}
                 {sidebarOpen && (
-                  <aside className="flex w-[320px] shrink-0 flex-col border-l border-surface-border bg-surface-paper max-xl:hidden">
-                    <div className="flex h-12 shrink-0 items-center border-b border-surface-border px-3">
-                      <div className="ws-seg">
-                        {([['archive', '本章档案'], ['memory', '正文标注'], ['narrative', '叙事状态']] as const).map(([key, label]) => (
-                          <button key={key} onClick={() => setSidebarTab(key)} className={cn('ws-seg-item', sidebarTab === key && 'ws-seg-item--on')}>
-                            {label}
-                          </button>
-                        ))}
+                  <>
+                    <div className="fixed inset-0 z-40 bg-content/30 xl:hidden" onClick={() => setSidebarOpen(false)} aria-hidden />
+                    <aside className="flex w-[320px] shrink-0 flex-col border-l border-surface-border bg-surface-paper max-xl:fixed max-xl:inset-y-0 max-xl:right-0 max-xl:z-50 max-xl:w-[min(360px,100vw)] max-xl:shadow-xl">
+                      <div className="flex h-12 shrink-0 items-center gap-2 border-b border-surface-border px-3">
+                        <div className="ws-seg">
+                          {([['archive', '本章档案'], ['memory', '正文标注'], ['narrative', '叙事状态']] as const).map(([key, label]) => (
+                            <button key={key} onClick={() => setSidebarTab(key)} className={cn('ws-seg-item', sidebarTab === key && 'ws-seg-item--on')}>
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                        <button onClick={() => setSidebarOpen(false)} className="ws-icon-btn ml-auto h-8 w-8 xl:hidden" title="收起" aria-label="收起分析面板">
+                          <X className="h-4 w-4" />
+                        </button>
                       </div>
-                    </div>
-                    <div className="min-h-0 flex-1 overflow-y-auto p-3">
-                      {sidebarTab === 'archive' ? (
-                        <ChapterArchivePanel
-                          key={detail.id}
-                          chapterId={detail.id}
-                          data={narrative}
-                          loading={narrativeLoading}
-                          hasContent={Boolean(detail.content?.trim())}
-                          analyzing={jobs.analyzingChapterIds.has(detail.id)}
-                          progress={selectedAnalysisJob?.progress}
-                          onShowProgress={selectedAnalysisJob ? () => useAIJobsStore.getState().openModal(selectedAnalysisJob.id) : undefined}
-                          onAnalyze={() => selectedSummary && void jobs.handleAnalyze(selectedSummary)}
-                          onChanged={() => loadAnalysis(detail.id)}
-                        />
-                      ) : sidebarTab === 'memory' ? (
-                        hasAnnotations && annotations ? (
-                          <MemorySidebar
-                            annotations={annotations.annotations}
-                            activeAnnotationId={activeAnnotationId}
-                            onAnnotationClick={(a) => handleAnnotationClick(a, 'sidebar')}
-                            scrollToAnnotation={scrollToSidebar}
+                      <div className="min-h-0 flex-1 overflow-y-auto p-3">
+                        {sidebarTab === 'archive' ? (
+                          <ChapterArchivePanel
+                            key={detail.id}
+                            chapterId={detail.id}
+                            data={narrative}
+                            loading={narrativeLoading}
+                            hasContent={Boolean(detail.content?.trim())}
+                            analyzing={jobs.analyzingChapterIds.has(detail.id)}
+                            progress={selectedAnalysisJob?.progress}
+                            onShowProgress={selectedAnalysisJob ? () => useAIJobsStore.getState().openModal(selectedAnalysisJob.id) : undefined}
+                            onAnalyze={() => selectedSummary && void jobs.handleAnalyze(selectedSummary)}
+                            onChanged={() => loadAnalysis(detail.id)}
                           />
+                        ) : sidebarTab === 'memory' ? (
+                          hasAnnotations && annotations ? (
+                            <MemorySidebar
+                              annotations={annotations.annotations}
+                              activeAnnotationId={activeAnnotationId}
+                              onAnnotationClick={(a) => handleAnnotationClick(a, 'sidebar')}
+                              scrollToAnnotation={scrollToSidebar}
+                            />
+                          ) : (
+                            <p className="py-8 text-center text-xs leading-6 text-content-tertiary">
+                              暂无标注数据。在目录里点本章的 🔍 分析后，可在「标注」视图里高亮钩子 / 伏笔 / 关键转折。
+                            </p>
+                          )
                         ) : (
-                          <p className="py-8 text-center text-xs leading-6 text-content-tertiary">
-                            暂无标注数据。点左侧 🔍 分析本章后，可在「标注」视图里高亮钩子 / 伏笔 / 关键转折。
-                          </p>
-                        )
-                      ) : (
-                        <NarrativeStatePanel data={narrative} loading={narrativeLoading} />
-                      )}
-                    </div>
-                  </aside>
+                          <NarrativeStatePanel data={narrative} loading={narrativeLoading} />
+                        )}
+                      </div>
+                    </aside>
+                  </>
                 )}
               </div>
             ) : (

@@ -1,5 +1,6 @@
 import { authApi } from '../services/api';
 import { toast } from 'sonner';
+import { loginHref, onLoginScreen } from './loginRoute';
 
 /**
  * 会话管理工具
@@ -150,9 +151,9 @@ class SessionManager {
   private async handleSessionExpired() {
     this.stop();
     
-    const currentPath = window.location.pathname;
-    // 如果已经在登录页，不显示错误提示
-    if (currentPath === '/login') {
+    const currentPath = window.location.pathname + window.location.search;
+    // 已经在登录弹窗上，不显示错误提示
+    if (onLoginScreen(window.location)) {
       return;
     }
     
@@ -167,9 +168,9 @@ class SessionManager {
       duration: 3000,
     });
     
-    // 延迟跳转，让用户看到提示
+    // 延迟跳转，让用户看到提示；回首页打开登录弹窗，登录完回到这一页
     setTimeout(() => {
-      window.location.href = `/login?redirect=${encodeURIComponent(currentPath)}`;
+      window.location.href = loginHref(currentPath);
     }, 1000);
   }
 

@@ -6,6 +6,7 @@ import { AIJobHost } from '@/components/ai-job/AIJobHost'
 import { PageLoading } from '@/components/ui/PageLoading'
 import { CurrentUserContext, useCurrentUser } from '@/hooks/useCurrentUser'
 import { sessionManager } from '@/utils/sessionManager'
+import { loginHref } from '@/utils/loginRoute'
 import type { User } from '@/types'
 
 export function ProtectedRoute({ children }: { children: ReactNode }) {
@@ -40,7 +41,8 @@ export function ProtectedRoute({ children }: { children: ReactNode }) {
 
   if (loading) return <PageLoading />
   if (!user) {
-    return <Navigate to={`/login?redirect=${encodeURIComponent(location.pathname)}`} replace />
+    // 登录是首页上的弹窗；带上查询参数（如 /projects?panel=inspiration），登录完回到原样
+    return <Navigate to={loginHref(location.pathname + location.search)} replace />
   }
   // 公告弹窗只在登录后出现；同一浏览器会话关过就不再弹（见 AnnouncementGate）
   // AI 任务弹窗 + 后台任务同步也放在登录确认之后：避免未登录时多打一次 401（会重复弹"未授权"提示）

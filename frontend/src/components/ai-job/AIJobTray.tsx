@@ -6,7 +6,8 @@ import { useAIJobsStore, useAllAIJobs } from '@/store/aiJobsStore';
 import { kindLabel, type AIJobSummary } from '@/types/ai_job';
 import { formatElapsed } from './format';
 
-export function AIJobTray() {
+/** className 只加在托盘按钮上（全局顶栏把它改成圆角胶囊，项目工作台照旧） */
+export function AIJobTray({ className }: { className?: string } = {}) {
   const jobs = useAllAIJobs();
   const runningCount = jobs.filter((j) => j.status === 'running').length;
   const [open, setOpen] = useState(false);
@@ -34,6 +35,7 @@ export function AIJobTray() {
           runningCount > 0
             ? 'border-brand/40 bg-brand/5 text-brand'
             : 'border-transparent text-content-secondary hover:border-surface-border hover:bg-white/70',
+          className,
         )}
       >
         {runningCount > 0 ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
@@ -41,7 +43,9 @@ export function AIJobTray() {
         {runningCount > 0 && <span className="tabular-nums">{runningCount}</span>}
       </button>
       {open && (
-        <div className="hh-menu absolute right-0 top-full mt-2 max-h-[70vh] w-[360px] overflow-y-auto">
+        // 手机上按钮离右边还有一截，360px 的下拉往左伸会出屏：改成贴着顶栏下沿、左右各留 12px。
+        // 两处顶栏（全局 Header / 工作台 .ws-appbar）在手机上都贴着视口顶、高 56px、铺满全宽，按视口还是按工具栏定位落点都一样
+        <div className="hh-menu absolute right-0 top-full mt-2 max-h-[70vh] w-[360px] overflow-y-auto max-sm:fixed max-sm:inset-x-3 max-sm:top-14 max-sm:w-auto">
           <ul className="divide-y divide-surface-border/70">
             {jobs.map((j) => (
               <TrayRow key={j.id} job={j} onOpened={() => setOpen(false)} />

@@ -133,25 +133,26 @@ export default function MemoriesPage() {
         </div>
       </section>
 
-      <section className="hh-panel flex flex-wrap items-start gap-x-8 gap-y-3 px-4 py-3">
+      {/* 手机上九个数排成三列整齐的格子（两组拆开并进同一个网格），检索索引另起一行 */}
+      <section className="hh-panel flex flex-wrap items-start gap-x-8 gap-y-3 px-4 py-3 max-sm:grid max-sm:grid-cols-3 max-sm:gap-x-3">
         {!overview ? (
-          <span className="flex items-center gap-2 text-xs text-content-tertiary"><Loader2 className="h-4 w-4 animate-spin" />读取中…</span>
+          <span className="flex items-center gap-2 text-xs text-content-tertiary max-sm:col-span-3"><Loader2 className="h-4 w-4 animate-spin" />读取中…</span>
         ) : (
           <>
-            <div className="flex flex-wrap gap-4">
+            <div className="flex flex-wrap gap-4 max-sm:contents">
               <Stat label="已写章节" value={chaptersStat?.written ?? 0} />
               <Stat label="已分析" value={chaptersStat?.ok ?? 0} tone="green" />
               <Stat label="分析过期" value={chaptersStat?.stale ?? 0} tone={chaptersStat?.stale ? 'gold' : undefined} />
               <Stat label="未分析" value={chaptersStat?.missing ?? 0} tone={chaptersStat?.missing ? 'gold' : undefined} />
               <Stat label="分析失败" value={chaptersStat?.failed ?? 0} tone={chaptersStat?.failed ? 'red' : undefined} />
             </div>
-            <div className="flex flex-wrap gap-4">
+            <div className="flex flex-wrap gap-4 max-sm:contents">
               <Stat label="未回收伏笔" value={promiseStat?.active ?? 0} />
               <Stat label="已超期" value={promiseStat?.overdue ?? 0} tone={promiseStat?.overdue ? 'red' : undefined} />
               <Stat label="久未提起" value={promiseStat?.dropout ?? 0} tone={promiseStat?.dropout ? 'gold' : undefined} />
               <Stat label="已回收" value={promiseStat?.resolved ?? 0} tone="green" />
             </div>
-            <div className="ml-auto text-xs leading-5 text-content-secondary">
+            <div className="ml-auto text-xs leading-5 text-content-secondary max-sm:col-span-3 max-sm:ml-0 max-sm:border-t max-sm:border-surface-border/70 max-sm:pt-2.5">
               <p className="flex items-center gap-1.5 font-medium text-content"><Database className="h-3.5 w-3.5" />检索索引</p>
               {index?.available ? (
                 <>
@@ -166,7 +167,7 @@ export default function MemoriesPage() {
         )}
       </section>
 
-      <div className="ws-seg flex-wrap">
+      <div className="ws-seg lj-seg-fill flex-wrap">
         {TABS.map((tab) => (
           <button
             key={tab.key}

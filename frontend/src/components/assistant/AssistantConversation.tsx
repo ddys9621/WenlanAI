@@ -49,6 +49,8 @@ const INPUT_MAX_HEIGHT = 200;
 const STICK_PX = 80;
 /** 成员回复超过这么长就先折起来（窄抽屉里 300 字就快一屏了，几千字的草稿会占好几屏） */
 const LONG_REPLY = 300;
+/** 触屏键盘没有 Ctrl+Enter，输入框的提示里不提它（点发送键发） */
+const SEND_HINT = typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches ? '' : 'Ctrl+Enter 发送';
 
 /** 一条发言带出的卡片（与消息里存的同一组字段） */
 type Attachments = ChangeCards;
@@ -145,7 +147,8 @@ function ChapterCandidateLink({ item, onOpen }: { item: AssistantChapterCandidat
 
 interface AssistantConversationProps {
   projectId: string;
-  onNavigate: (page: string, search?: string) => void;
+  /** auto = 一轮结束时团队带作者去的页面（不是作者点的） */
+  onNavigate: (page: string, search?: string, auto?: boolean) => void;
 }
 
 export function AssistantConversation({ projectId, onNavigate }: AssistantConversationProps) {
@@ -155,6 +158,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
   const newSessionNonce = useAssistantStore((s) => s.newSessionNonce);
   const reviewNonce = useAssistantStore((s) => s.reviewNonce);
   const memoNonce = useAssistantStore((s) => s.memoNonce);
+  const sessionNonce = useAssistantStore((s) => s.sessionNonce);
   const visible = useAssistantStore((s) => s.open && s.mode === 'agent');
   const page = useMemo(() => pageContextOf({ route, detail }), [route, detail]);
 
@@ -168,6 +172,8 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
   const [preview, setPreview] = useState<{ data: AssistantPreview; key: string } | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
+  /** 触屏上点开了小操作的那条消息（见 messageActions） */
+  const [activeMsg, setActiveMsg] = useState<string | null>(null);
   const [team, setTeam] = useState<AssistantTeam | null>(null);
   const [showTeam, setShowTeam] = useState(false);
   const [showMemo, setShowMemo] = useState(false);
@@ -407,7 +413,7 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
     const { nav, data } = pendingRef.current;
     pendingRef.current = { nav: null, data: [] };
     data.forEach(emitAssistantData);
-    if (nav) onNavigate(nav);
+    if (nav) onNavigate(nav, undefined, true);
   }, [onNavigate]);
 
   /** 跟进一个已在跑的任务（刷新页面 / 切回项目后续接） */
@@ -584,6 +590,15 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
     seenNewSession.current = newSessionNonce;
     void startNew();
   }, [newSessionNonce, startNew]);
+
+  // 「任务」里删了当前对话（后端已换成一段新的）：重读，发送前核对作废（挂载时的初始值不算）
+  const seenSession = useRef(sessionNonce);
+  useEffect(() => {
+    if (sessionNonce === seenSession.current) return;
+    seenSession.current = sessionNonce;
+    setPreview(null);
+    void reload();
+  }, [sessionNonce, reload]);
 
   // 「核对」页点了待确认的候选：展开待确认栏（挂载时的初始值不算）
   const seenReview = useRef(reviewNonce);
@@ -835,9 +850,23 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
     ? [...messages].reverse().find((m) => m.question && m.run_id === waitingRun.id)?.id
     : undefined;
 
-  /** 悬停才出现的小操作：字数、复制、引用（作者自己的话还能改了再发） */
+  const lastReplyId = [...messages].reverse().find((m) => m.role === 'assistant')?.id;
+  /** 点消息本身（不是里面的按钮、链接、输入框）时开 / 关它的小操作 */
+  const toggleActions = (id: string) => (e: { target: EventTarget }) => {
+    if (e.target instanceof Element && e.target.closest('button, a, input, textarea, select, [role="button"]')) return;
+    setActiveMsg((cur) => (cur === id ? null : id));
+  };
+
+  /** 悬停才出现的小操作：字数、复制、引用（作者自己的话还能改了再发）。
+   * 触屏没有悬停：每条都露着太乱，改成点一下那条消息才露出来（再点收起），最后一条团队回复一直露着；
+   * 没露出来时不接点按（透明的按钮会被误点），也不认触屏上的「粘住的悬停」 */
   const messageActions = (m: AssistantMessageView): ReactNode => (
-    <span className="flex items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+    <span className={cn(
+      'flex items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100',
+      m.id === activeMsg || m.id === lastReplyId
+        ? '[@media(pointer:coarse)]:opacity-100'
+        : '[@media(pointer:coarse)]:pointer-events-none group-hover:[@media(pointer:coarse)]:opacity-0',
+    )}>
       {m.role !== 'user' && <span className="mr-1 text-[11px] tabular-nums text-content-tertiary">{m.content.length} 字</span>}
       <button onClick={() => void copy(m)} className="as-icon-btn h-6 w-6" title="复制">
         {copied === m.id ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
@@ -882,9 +911,9 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
       );
     }
     if (m.role === 'user') {
-      // 操作按钮浮在下方的间隔里（悬停才出现），不占行高
+      // 操作按钮浮在下方的间隔里（悬停才出现，触屏上点一下这条才出现），不占行高
       return (
-        <div key={m.id} className="group flex flex-col items-end">
+        <div key={m.id} className="group flex flex-col items-end" onClick={toggleActions(m.id)}>
           {m.answer && <span className="as-meta mb-1">回答提问</span>}
           {m.queued && <span className="as-meta mb-1">处理中追加</span>}
           {m.autopilot && <span className="as-meta mb-1 inline-flex items-center gap-1"><Zap className="h-3 w-3" />自动执行</span>}
@@ -897,14 +926,15 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
       );
     }
     const note = [m.delegated && '受主编委托', m.question && '向你提问'].filter(Boolean).join(' · ');
-    // 顺序：处理过程（每步那句话 + 回执）在前，改动一行，回复正文在最后
+    // 顺序：处理过程（每步那句话 + 回执）在前，改动一行，回复正文在最后；
+    // 存下的处理过程在窄屏上先收成一行（点开看每一步），运行中的那一轮照样一步步展开
     return (
-      <div key={m.id} className="group">
+      <div key={m.id} className="group" onClick={toggleActions(m.id)}>
         <SpeakerLine member={m.member} note={note}>
           <span className="ml-auto">{messageActions(m)}</span>
         </SpeakerLine>
         <div className="space-y-2">
-          <StepTimeline steps={m.steps} />
+          <StepTimeline steps={m.steps} collapsible />
           <ChangeList items={changeItems(attachmentsOf(m), lookups)} renderDetail={renderDetail} />
           {writeCards(m.chapter_writes, m.id)}
           {m.id === activeQuestionId
@@ -1153,7 +1183,9 @@ export function AssistantConversation({ projectId, onNavigate }: AssistantConver
             onKeyDown={onKeyDown}
             rows={3}
             maxLength={MAX_CHARS}
-            placeholder={busy ? '想到什么接着说，会排队送给主编；Ctrl+Enter 发送' : '和主编说说你的想法，打「/」点名写作技能，Ctrl+Enter 发送'}
+            placeholder={busy
+              ? `想到什么接着说，会排队送给主编${SEND_HINT && `；${SEND_HINT}`}`
+              : `和主编说说你的想法，打「/」点名写作技能${SEND_HINT && `，${SEND_HINT}`}`}
             className="block min-h-[76px] w-full resize-none !rounded-none !border-0 !bg-transparent px-3.5 pb-1 pt-3 text-[14px] leading-[1.6] !text-content outline-none placeholder:!text-content-tertiary focus:!shadow-none"
           />
           <div className="flex items-center gap-2.5 px-2.5 pb-2 pt-1">

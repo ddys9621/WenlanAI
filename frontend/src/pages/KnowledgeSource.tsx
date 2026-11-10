@@ -2,7 +2,7 @@
  * 知识库来源详情：左侧按类型分组的条目目录，右侧阅读 / 编辑。
  * 每条有「原名版」（给作者读）和「去名版」（人名换成功能位，仿写注入用）；作者改过的条目重新拆书不会被覆盖。
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, CheckCircle2, Loader2, Pencil, RefreshCw, RotateCcw, Save, X } from 'lucide-react';
 import { toast } from 'sonner';
@@ -32,7 +32,15 @@ export default function KnowledgeSource() {
   const [mode, setMode] = useState<EntryViewMode>('named');
   const [draft, setDraft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const entryRef = useRef<HTMLElement>(null);
   const currentId = params.get('entry') ?? entries[0]?.id ?? null;
+
+  const openEntry = (id: string) => {
+    setParams({ entry: id });
+    if (window.matchMedia('(max-width: 1023px)').matches) {
+      requestAnimationFrame(() => entryRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -115,7 +123,8 @@ export default function KnowledgeSource() {
   };
 
   return (
-    <div className="mx-auto max-w-7xl px-6 py-6">
+    // 外壳已经留了边距；手机上再加一圈 24px，内容只剩一半宽
+    <div className="mx-auto max-w-7xl sm:px-6 sm:py-6">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <Link to="/knowledge" className="inline-flex items-center gap-1 text-xs text-content-secondary hover:text-brand">
@@ -138,7 +147,8 @@ export default function KnowledgeSource() {
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[320px_minmax(0,1fr)]">
-        <aside className="max-h-[75vh] overflow-y-auto rounded-2xl border border-surface-border bg-surface p-3">
+        {/* 窄屏目录和正文上下排：目录矮一些，点了条目把正文滚进视野 */}
+        <aside className="max-h-[45vh] overflow-y-auto rounded-2xl border border-surface-border bg-surface p-3 lg:max-h-[75vh]">
           <input
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
@@ -155,7 +165,7 @@ export default function KnowledgeSource() {
                   <li key={item.id}>
                     <button
                       type="button"
-                      onClick={() => setParams({ entry: item.id })}
+                      onClick={() => openEntry(item.id)}
                       className={cn(
                         'w-full truncate rounded-lg px-2 py-1 text-left text-sm',
                         item.id === currentId ? 'bg-brand/10 text-brand' : 'text-content hover:bg-surface-hover',
@@ -172,9 +182,9 @@ export default function KnowledgeSource() {
           ))}
         </aside>
 
-        <main className="rounded-2xl border border-surface-border bg-surface p-4">
+        <main ref={entryRef} className="scroll-mt-4 rounded-2xl border border-surface-border bg-surface p-4">
           {!entry ? (
-            <div className="py-16 text-center text-sm text-content-secondary">选择左侧条目查看</div>
+            <div className="py-16 text-center text-sm text-content-secondary">选一个条目查看</div>
           ) : (
             <>
               <div className="mb-3 flex flex-wrap items-center justify-between gap-2">

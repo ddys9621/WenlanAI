@@ -118,6 +118,31 @@ async def get_session_by_id(project_id: str, session_id: str, request: Request, 
     return _session_payload(project_id, await agent.build_session_view(db, session))
 
 
+@router.delete("/sessions/{session_id}", summary="删除一段对话（消息、处理记录一起删；删当前对话会先开一段新的，没处理的卡跟过去）")
+async def delete_session(project_id: str, session_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    await verify_request_project(request, project_id, db)
+    session = await db.get(AssistantSession, session_id)
+    if session is None or session.project_id != project_id:
+        raise HTTPException(status_code=404, detail="对话不存在")
+    archived = bool(session.archived)
+    job = ai_jobs.current(_scope(project_id))
+    if job is not None and (not archived or (job.meta or {}).get("session_id") == session_id):
+        raise HTTPException(status_code=409, detail=BUSY_MESSAGE)
+    async with decision_lock(project_id):
+        if not archived:
+            await agent.new_session(db, project_id, getattr(request.state, "user_id", None))
+        await agent.delete_session(db, project_id, session_id)
+    return {"deleted": 1, "current_replaced": not archived}
+
+
+@router.delete("/sessions", summary="清空已归档的对话（当前对话不动）")
+async def clear_archived_sessions(project_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    await verify_request_project(request, project_id, db)
+    async with decision_lock(project_id):
+        deleted = await agent.delete_archived_sessions(db, project_id)
+    return {"deleted": deleted, "current_replaced": False}
+
+
 @router.post("/messages/stream", summary="发一条要求给智能助笔（后台任务 + SSE）")
 async def send_message_stream(
     project_id: str, body: AssistantSendRequest, request: Request, db: AsyncSession = Depends(get_db),

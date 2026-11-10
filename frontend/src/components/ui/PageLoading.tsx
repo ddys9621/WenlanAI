@@ -2,7 +2,7 @@ import { Loader2, Sparkles } from 'lucide-react'
 
 export function PageLoading() {
   return (
-    <div className="flex min-h-screen items-center justify-center bg-transparent px-4">
+    <div className="flex min-h-screen items-center justify-center bg-transparent px-4 supports-[height:100dvh]:min-h-dvh">
       <div className="fanqie-soft-card flex min-w-[240px] flex-col items-center gap-4 px-8 py-10 text-center">
         <div className="flex h-14 w-14 items-center justify-center rounded-full bg-brand/10 text-brand">
           <Loader2 className="h-6 w-6 animate-spin" />

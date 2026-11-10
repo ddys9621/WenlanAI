@@ -48,7 +48,11 @@ interface ChapterWritingPaneProps {
   onAskAssistant: () => void
 }
 
-const COMPLETION_TIP = '停笔约 1 秒，光标后出现灰色建议：Tab 采用，Ctrl+→ 采用一小句，Esc 收起，继续打字则忽略；Alt+\\ 随时要一条'
+/** 触屏键盘没有 Tab / Esc 这些键：补全的说明换成点按的说法 */
+const TOUCH = typeof window !== 'undefined' && Boolean(window.matchMedia?.('(pointer: coarse)').matches)
+const COMPLETION_TIP = TOUCH
+  ? '停笔约 1 秒，光标后出现灰色建议：点一下灰字整条采用，继续打字则忽略'
+  : '停笔约 1 秒，光标后出现灰色建议：Tab 采用，Ctrl+→ 采用一小句，Esc 收起，继续打字则忽略；Alt+\\ 随时要一条'
 const EMPTY_SELECTION: TextSelection = { start: 0, end: 0, text: '' }
 
 function clock(date: Date) {
@@ -57,9 +61,9 @@ function clock(date: Date) {
 
 /** 标题栏里的图标工具：只有图标，说明在 title 里；keepFocus = 点了不抢走正文的光标（撤销 / 重做）；
  * holdOutside = 弹层开着时按下这个按钮不算「点在弹层外」（否则弹层先关、再被这次点击打开，关不掉） */
-function ToolButton({ label, onClick, active, disabled, keepFocus, holdOutside, children }: {
+function ToolButton({ label, onClick, active, disabled, keepFocus, holdOutside, className, children }: {
   label: string; onClick: () => void; active?: boolean; disabled?: boolean; keepFocus?: boolean; holdOutside?: boolean
-  children: ReactNode
+  className?: string; children: ReactNode
 }) {
   return (
     <button
@@ -72,7 +76,7 @@ function ToolButton({ label, onClick, active, disabled, keepFocus, holdOutside, 
       aria-pressed={active}
       aria-label={label}
       title={label}
-      className={cn('lj-tool h-7 w-7 justify-center px-0', active && 'lj-tool--active')}
+      className={cn('lj-tool h-7 w-7 justify-center px-0', active && 'lj-tool--active', className)}
     >
       {children}
     </button>
@@ -272,11 +276,12 @@ export const ChapterWritingPane = forwardRef<ChapterWritingPaneHandle, ChapterWr
         />
       )}
 
-      {/* 稿纸：顶上一行章节标题栏（标题 + 工具 + 正文 / 候选稿 / 历史版本），下面横线正文 */}
-      <div className={cn('min-h-0 flex-1 overflow-hidden', focusMode ? 'px-4 py-5' : 'p-3')}>
+      {/* 稿纸：顶上一行章节标题栏（标题 + 工具 + 正文 / 候选稿 / 历史版本），下面横线正文；
+          稿纸窄（手机）时标题自己占一行，工具和正文 / 候选稿 / 历史版本排到第二行（globals.css 的 .lj-chapter-head 容器查询） */}
+      <div className={cn('min-h-0 flex-1 overflow-hidden', focusMode ? 'px-4 py-5 max-sm:px-2 max-sm:py-3' : 'p-2 sm:p-3')}>
         <div className="lj-paper mx-auto flex h-full w-full flex-col" data-paper={prefs.paper} data-guide={prefs.guideStyle} style={paperStyle}>
-          <div className="lj-chapter-head relative flex shrink-0 items-center gap-2 border-b border-[rgba(185,174,155,0.5)] px-[var(--manuscript-pad-x)] py-1.5">
-            <label className="flex min-w-0 flex-1 items-baseline gap-2.5 font-serif">
+          <div className="lj-chapter-head relative flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-[rgba(185,174,155,0.5)] px-[var(--manuscript-pad-x)] py-1.5">
+            <label className="lj-chapter-title flex min-w-0 flex-1 items-baseline gap-2.5 font-serif">
               <span className="shrink-0 text-[13px] text-[color:var(--manuscript-ghost)]">第 {chapter.chapter_number} 章</span>
               <input
                 value={titleDraft}
@@ -299,10 +304,11 @@ export const ChapterWritingPane = forwardRef<ChapterWritingPaneHandle, ChapterWr
               <ToolButton label="重做（Ctrl+Y 或 Ctrl+Shift+Z）" onClick={() => editorRef.current?.redo()} disabled={!history.canRedo} keepFocus>
                 <Redo2 className="h-4 w-4" />
               </ToolButton>
-              <ToolButton label="查找与替换（Ctrl+F）" onClick={() => setFindOpen((v) => !v)} active={findOpen}>
+              {/* 稿纸窄时查找挪进「更多」（lj-wide-only，见 globals.css 的 .lj-chapter-head 容器查询） */}
+              <ToolButton label="查找与替换（Ctrl+F）" onClick={() => setFindOpen((v) => !v)} active={findOpen} className="lj-wide-only">
                 <Search className="h-4 w-4" />
               </ToolButton>
-              <span className="lj-tool-sep" />
+              <span className="lj-tool-sep lj-wide-only" />
               <ToolButton label="版式：字体、字号、行距、行宽、横线和纸色" onClick={() => setLayoutOpen((v) => !v)} active={layoutOpen} holdOutside={layoutOpen}>
                 <LayoutTemplate className="h-4 w-4" />
               </ToolButton>
@@ -322,6 +328,9 @@ export const ChapterWritingPane = forwardRef<ChapterWritingPaneHandle, ChapterWr
                 </ToolButton>
                 {toolsOpen && (
                   <div className="absolute right-0 top-full z-30 mt-1.5 grid w-48 gap-0.5 rounded border border-surface-border bg-white p-1 text-content shadow-lg" onMouseLeave={() => setToolsOpen(false)} role="menu">
+                    <button onClick={() => { setFindOpen(true); setToolsOpen(false) }} className="lj-narrow-only lj-tool w-full justify-start" role="menuitem" title="查找与替换（Ctrl+F）">
+                      <Search className="h-4 w-4" />查找与替换
+                    </button>
                     <button onClick={() => { formatAll(); setToolsOpen(false) }} disabled={!content.trim()} className="lj-tool w-full justify-start" role="menuitem" title="按当前版式统一段落缩进和段间空行">
                       <AlignLeft className="h-4 w-4" />一键排版
                     </button>
@@ -354,7 +363,7 @@ export const ChapterWritingPane = forwardRef<ChapterWritingPaneHandle, ChapterWr
                 )}
               </div>
             </div>
-            {!focusMode && props.headerRight && <div className="flex flex-none items-center">{props.headerRight}</div>}
+            {!focusMode && props.headerRight && <div className="ml-auto flex flex-none items-center">{props.headerRight}</div>}
             {/* 版式弹层挂在整条标题栏上、贴右边展开：按钮在右边，挂在按钮上往左展开会被稿纸左边的栏挡住 */}
             {layoutOpen && (
               <ManuscriptLayoutPanel
@@ -372,7 +381,7 @@ export const ChapterWritingPane = forwardRef<ChapterWritingPaneHandle, ChapterWr
                 ref={editorRef}
                 docKey={chapter.id}
                 initialContent={chapter.content ?? ''}
-                placeholder="从这里开始写……（打开「AI 补全」后，停笔片刻会在光标后给出灰色建议；也可以点左侧 ⚡ 先让 AI 写一份候选稿）"
+                placeholder="从这里开始写……（打开「AI 补全」后，停笔片刻会在光标后给出灰色建议；也可以点目录里的 ⚡ 先让 AI 写一份候选稿）"
                 format={{ firstLineIndent: prefs.firstLineIndent, paragraphSpacing: prefs.paragraphSpacing }}
                 typewriter={prefs.typewriter}
                 completionEnabled={prefs.completion}
@@ -419,9 +428,11 @@ export const ChapterWritingPane = forwardRef<ChapterWritingPaneHandle, ChapterWr
                 : <AlertTriangle className="h-3 w-3" />}
           {saveLabel}
         </span>
-        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 tabular-nums">
-          <span>第 {chapter.chapter_number} 章</span>
-          {dot}
+        {/* 按内容宽度起排（flex-basis auto）：放不下就整组换到下一行，而不是被挤成一字一行的竖条；
+            手机上章号（标题栏有）、全书字数、段数不显示，一行放得下 */}
+        <div className="flex min-w-0 flex-[1_1_auto] flex-wrap items-center gap-x-2 gap-y-1 tabular-nums">
+          <span className="max-sm:hidden">第 {chapter.chapter_number} 章</span>
+          <span className="contents max-sm:hidden">{dot}</span>
           <span>本章 {words.toLocaleString()} 字</span>
           {selectedWords > 0 && (
             <>
@@ -432,10 +443,12 @@ export const ChapterWritingPane = forwardRef<ChapterWritingPaneHandle, ChapterWr
               </button>
             </>
           )}
-          {dot}
-          <span className="text-brand">全书 {bookWords.toLocaleString()} 字</span>
-          {dot}
-          <span>{paragraphs} 段</span>
+          <span className="contents max-sm:hidden">
+            {dot}
+            <span className="text-brand">全书 {bookWords.toLocaleString()} 字</span>
+            {dot}
+            <span>{paragraphs} 段</span>
+          </span>
           {delta !== 0 && (
             <>
               {dot}
@@ -445,9 +458,15 @@ export const ChapterWritingPane = forwardRef<ChapterWritingPaneHandle, ChapterWr
           {prefs.completion && completion.state === 'error' && (
             <span className="text-cinnabar" title={completion.message}>· 补全失败：{completion.message.slice(0, 40)}</span>
           )}
-          {focusMode && <em className="ml-1 not-italic text-brand">按 Esc 退出专注</em>}
+          {focusMode && (
+            <em className="ml-1 not-italic text-brand">
+              {/* 触屏键盘没有 Esc */}
+              <span className="[@media(pointer:coarse)]:hidden">按 Esc 退出专注</span>
+              <span className="hidden [@media(pointer:coarse)]:inline">再点一次「专注」按钮退出</span>
+            </em>
+          )}
         </div>
-        <div className="relative flex items-center gap-1.5">
+        <div className="relative ml-auto flex items-center gap-1.5">
           <button onClick={() => setMoreOpen((v) => !v)} aria-expanded={moreOpen} className="lj-tool h-7 w-7 justify-center px-0" title="更多">
             <MoreHorizontal className="h-4 w-4" />
           </button>
@@ -461,8 +480,9 @@ export const ChapterWritingPane = forwardRef<ChapterWritingPaneHandle, ChapterWr
               </button>
             </div>
           )}
-          <button onClick={props.onOpenHistory} className="lj-tool h-7" title="历史版本：手改 / 采用候选稿 / 恢复前的旧稿">
-            <History className="h-4 w-4" />历史版本
+          {/* 手机上这两个只留图标（左边的保存状态已经写着在不在保存） */}
+          <button onClick={props.onOpenHistory} className="lj-tool h-7 max-sm:w-7 max-sm:justify-center max-sm:px-0" title="历史版本：手改 / 采用候选稿 / 恢复前的旧稿">
+            <History className="h-4 w-4" /><span className="max-sm:hidden">历史版本</span>
           </button>
           <button
             onClick={() => void flush()}
@@ -471,7 +491,7 @@ export const ChapterWritingPane = forwardRef<ChapterWritingPaneHandle, ChapterWr
             title="立即保存（Ctrl+S）"
           >
             <Save className="h-3.5 w-3.5" />
-            {status === 'saving' ? '正在保存…' : status === 'error' ? '重试保存' : '立即保存'}
+            <span className="max-sm:hidden">{status === 'saving' ? '正在保存…' : status === 'error' ? '重试保存' : '立即保存'}</span>
           </button>
         </div>
       </footer>

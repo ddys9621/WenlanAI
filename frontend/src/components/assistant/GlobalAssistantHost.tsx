@@ -10,7 +10,7 @@ import { useNavigate } from 'react-router-dom';
 import { History, NotebookPen, PanelRightClose, PanelRightOpen, Plus, Sparkles, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useRunningAIJobs } from '@/store/aiJobsStore';
-import { useAssistantStore, type AssistantMode } from '@/store/assistantStore';
+import { isWideViewport, useAssistantStore, type AssistantMode } from '@/store/assistantStore';
 import { ResizeHandle } from '@/components/project-shell/ResizeHandle';
 import { RIGHT_PANE, RIGHT_PANE_KEY } from '@/components/project-shell/paneSizes';
 import { usePaneWidth } from '@/components/project-shell/usePaneWidth';
@@ -39,9 +39,14 @@ export function GlobalAssistantHost({ projectId }: { projectId: string }) {
   const navigate = useNavigate();
   const pane = usePaneWidth(RIGHT_PANE_KEY, RIGHT_PANE);
 
+  // 窄屏上抽屉盖满整屏：作者点了「去页面查看」之类就收起，不然跳过去了也看不见；
+  // 一轮结束时团队自己带过去的（auto）不收，作者还要看回复
   const onNavigate = useCallback(
-    (page: string, search?: string) => navigate(`/project/${projectId}/${page}${search ? `?${search}` : ''}`),
-    [navigate, projectId],
+    (page: string, search?: string, auto?: boolean) => {
+      navigate(`/project/${projectId}/${page}${search ? `?${search}` : ''}`);
+      if (!auto && !isWideViewport()) setOpen(false);
+    },
+    [navigate, projectId, setOpen],
   );
 
   useEffect(() => {

@@ -2,13 +2,8 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
-  Plus,
-  FileText,
-  MoreHorizontal,
-  Download,
   Upload,
   Trash2,
-  Clock,
   Sparkles,
   Loader2,
   AlertTriangle,
@@ -22,7 +17,6 @@ import {
   ArrowRight,
   Wand2,
   Play,
-  type LucideIcon,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
@@ -36,8 +30,13 @@ import { MCPSelector } from '@/components/MCPSelector'
 import { KbSourcePicker } from '@/components/knowledge/KbSourcePicker'
 import type { KbSourceChoice } from '@/types/knowledge'
 import { kbChoicePayload, NO_KB_CHOICE } from '@/utils/knowledge'
-import { BrandLogo } from '@/components/ui/BrandLogo'
-import { parseServerTime } from '@/utils/serverTime'
+import { BookCard } from '@/components/shelf/BookCard'
+import { ShelfToolbar } from '@/components/shelf/ShelfToolbar'
+import { EmptyShelf, NoMatch, ShelfSkeleton } from '@/components/shelf/ShelfStates'
+import {
+  countByState, displayTitle, filterProjects, groupProjects, readShelfPrefs, shelfSummary, sortProjects, writeShelfPrefs,
+  type ShelfFilter, type ShelfPrefs,
+} from '@/components/shelf/shelf'
 import type { SSEClientOptions } from '@/utils/sseClient'
 import type {
   GenerateCharactersResponse,
@@ -47,323 +46,6 @@ import type {
   WizardVolumesResponse,
   WorldBuildingResponse,
 } from '@/types'
-
-/* ─── 常量 ─── */
-
-const STATUS_MAP: Record<Project['status'], { label: string; color: string }> = {
-  planning: { label: '规划中', color: 'bg-surface-hover text-content-secondary' },
-  writing: { label: '创作中', color: 'bg-emerald-50 text-emerald-600' },
-  revising: { label: '修改中', color: 'bg-amber-50 text-amber-600' },
-  completed: { label: '已完成', color: 'bg-violet-50 text-violet-600' },
-}
-
-const COVER_STYLES = [
-  'from-[#204a3e] to-[#4f8a76]',
-  'from-[#8f483e] to-[#c06a57]',
-  'from-[#4d657b] to-[#7d93a8]',
-  'from-[#80601e] to-[#b8913f]',
-] as const
-
-/* ─── 工具函数 ─── */
-
-function formatWords(n: number) {
-  if (n >= 10000) return `${(n / 10000).toFixed(1)} 万`
-  return `${n}`
-}
-
-function formatDate(iso: string) {
-  const d = parseServerTime(iso) ?? new Date(iso)
-  const now = new Date()
-  const diff = now.getTime() - d.getTime()
-  const mins = Math.floor(diff / 60000)
-  if (mins < 1) return '刚刚'
-  if (mins < 60) return `${mins} 分钟前`
-  const hours = Math.floor(mins / 60)
-  if (hours < 24) return `${hours} 小时前`
-  const days = Math.floor(hours / 24)
-  if (days < 30) return `${days} 天前`
-  return d.toLocaleDateString('zh-CN')
-}
-
-function getCoverStyle(seed: string) {
-  const value = [...seed].reduce((sum, char) => sum + char.charCodeAt(0), 0)
-  return COVER_STYLES[value % COVER_STYLES.length]
-}
-
-const TITLE_WRAPPERS: Record<string, string> = {
-  '《': '》',
-  '「': '」',
-  '『': '』',
-  '【': '】',
-  '（': '）',
-  '(': ')',
-  '[': ']',
-  '{': '}',
-  '“': '”',
-  '‘': '’',
-  '"': '"',
-  "'": "'",
-}
-
-function getDisplayTitle(title: string) {
-  let value = title.trim()
-
-  while (value.length > 1) {
-    const chars = Array.from(value)
-    const first = chars[0]
-    const last = chars[chars.length - 1]
-
-    if (TITLE_WRAPPERS[first] !== last) break
-    value = chars.slice(1, -1).join('').trim()
-  }
-
-  return value || title.trim() || '未命名项目'
-}
-
-function getCoverLetter(title: string) {
-  const displayTitle = getDisplayTitle(title).replace(/^[《》「」『』【】〈〉（）()[\]{}“”‘’"'`\s]+/, '')
-  const chars = Array.from(displayTitle)
-
-  return (
-    chars.find((char) => /[A-Za-z0-9\u4e00-\u9fa5]/.test(char)) ??
-    chars.find((char) => !/[\s《》「」『』【】〈〉（）()[\]{}“”‘’"'`~!@#$%^&*+=|\\/:;,.!?，。！？；：、-]/.test(char)) ??
-    '书'
-  )
-}
-
-/* ─── 骨架屏 ─── */
-
-function SkeletonCards() {
-  return (
-    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-      {Array.from({ length: 8 }).map((_, i) => (
-        <div key={i} className="hh-panel p-5">
-          <div className="flex items-start justify-between">
-            <div className="h-12 w-12 animate-pulse bg-brand/10" />
-            <div className="h-5 w-14 animate-pulse bg-brand/5" />
-          </div>
-          <div className="mt-4 h-5 w-3/4 animate-pulse bg-brand/10" />
-          <div className="mt-3 space-y-2">
-            <div className="h-3.5 animate-pulse bg-brand/5" />
-            <div className="h-3.5 w-2/3 animate-pulse bg-brand/5" />
-          </div>
-          <div className="mt-5 flex justify-between border-t border-surface-border/80 pt-3.5">
-            <div className="h-3 w-16 animate-pulse bg-brand/5" />
-            <div className="h-3 w-20 animate-pulse bg-brand/5" />
-          </div>
-        </div>
-      ))}
-    </div>
-  )
-}
-
-/* ─── 空状态：两种创建方式各出现一次 ─── */
-
-function ModeCard({
-  icon: Icon,
-  title,
-  description,
-  primary,
-  onClick,
-}: {
-  icon: LucideIcon
-  title: string
-  description: string
-  primary?: boolean
-  onClick: () => void
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className="hh-subpanel group flex items-start gap-4 p-5 text-left transition-all hover:-translate-y-0.5 hover:border-brand/40 hover:bg-white hover:shadow-card"
-    >
-      <span
-        className={cn(
-          'flex h-11 w-11 shrink-0 items-center justify-center transition-colors',
-          primary ? 'bg-brand text-white' : 'bg-brand/10 text-brand',
-        )}
-      >
-        <Icon className="h-5 w-5" />
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="flex items-center gap-2 text-[15px] font-semibold text-content">
-          {title}
-          <ArrowRight className="h-4 w-4 text-content-tertiary transition-all group-hover:translate-x-0.5 group-hover:text-brand" />
-        </span>
-        <span className="mt-1 block text-[13px] leading-6 text-content-secondary">{description}</span>
-      </span>
-    </button>
-  )
-}
-
-function EmptyState({ onCreate, onInspiration }: { onCreate: () => void; onInspiration: () => void }) {
-  return (
-    <section className="hh-panel flex flex-col items-center px-6 py-14 text-center md:py-16">
-      <BrandLogo size="lg" />
-      <h2 className="mt-6 text-2xl font-semibold tracking-tight text-content">创建第一个小说项目</h2>
-      <p className="mt-2 max-w-[440px] text-sm leading-6 text-content-secondary">
-        选择一种方式开始，AI 都会为你生成世界观、角色与故事大纲。
-      </p>
-      <div className="mt-8 grid w-full max-w-[720px] gap-4 md:grid-cols-2">
-        <ModeCard
-          icon={Plus}
-          title="快速开始"
-          description="已经有书名和故事想法？填好基本信息，一次生成完整设定。"
-          primary
-          onClick={onCreate}
-        />
-        <ModeCard
-          icon={Sparkles}
-          title="灵感模式"
-          description="只有一句灵感？AI 逐步引导你确定书名、简介、主题与类型。"
-          onClick={onInspiration}
-        />
-      </div>
-      <p className="mt-6 text-xs text-content-tertiary">已有导出的项目文件？可从右上角「更多」导入。</p>
-    </section>
-  )
-}
-
-/* ─── 项目卡片 ─── */
-
-function ProjectCard({
-  project,
-  onClick,
-  onDelete,
-}: {
-  project: Project
-  onClick: () => void
-  onDelete: () => void
-}) {
-  const status = STATUS_MAP[project.status] ?? STATUS_MAP.planning
-  const cover = getCoverStyle(project.title)
-  const tags = project.genre?.split(/[,，、/]/).filter(Boolean).slice(0, 3) ?? []
-  const displayTitle = getDisplayTitle(project.title)
-  const coverLetter = getCoverLetter(project.title)
-
-  return (
-    <article
-      role="button"
-      tabIndex={0}
-      onClick={onClick}
-      onKeyDown={(e) => e.key === 'Enter' && onClick()}
-      className="hh-panel group flex cursor-pointer flex-col p-5 transition-all hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/20"
-    >
-      <div className="pb-5">
-        <div className="flex items-start justify-between gap-3">
-          <div
-            className={`flex h-12 w-12 shrink-0 items-center justify-center bg-gradient-to-br ${cover} text-lg font-semibold text-white`}
-          >
-            {coverLetter}
-          </div>
-          <div className="flex items-center gap-1">
-            <span className={`px-2 py-1 text-[11px] font-medium ${status.color}`}>{status.label}</span>
-            <button
-              onClick={(e) => {
-                e.stopPropagation()
-                onDelete()
-              }}
-              className="hh-icon-btn-plain h-8 w-8 opacity-0 transition-opacity hover:text-red-500 focus-visible:opacity-100 group-hover:opacity-100"
-              title="删除项目"
-              aria-label="删除项目"
-            >
-              <Trash2 className="h-4 w-4" />
-            </button>
-          </div>
-        </div>
-
-        <h3 className="mt-4 line-clamp-1 text-[17px] font-semibold tracking-tight text-content">{displayTitle}</h3>
-        <p className="mt-1.5 line-clamp-2 min-h-[2.75rem] text-[13px] leading-[1.375rem] text-content-secondary">
-          {project.description || '还没有添加简介，进入项目后可以继续补充世界观、剧情与角色设定。'}
-        </p>
-
-        {tags.length > 0 && (
-          <div className="mt-3 flex flex-wrap gap-1.5">
-            {tags.map((g) => (
-              <span key={g} className="hh-tag">
-                {g.trim()}
-              </span>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <div className="mt-auto flex items-center justify-between border-t border-surface-border/80 pt-3.5 text-xs text-content-tertiary">
-        <span className="inline-flex items-center gap-1.5">
-          <FileText className="h-3.5 w-3.5" />
-          {formatWords(project.current_words)} 字
-        </span>
-        <span className="inline-flex items-center gap-1.5">
-          <Clock className="h-3.5 w-3.5" />
-          {formatDate(project.updated_at)}
-        </span>
-      </div>
-    </article>
-  )
-}
-
-/* ─── 统计 ─── */
-
-function StatItem({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div className="px-5 py-4 md:px-6">
-      <p className="text-xs text-content-tertiary">{label}</p>
-      <p className="mt-1 text-2xl font-semibold tracking-tight text-content tabular-nums">{value}</p>
-    </div>
-  )
-}
-
-/* ─── 更多菜单 ─── */
-
-function MoreMenu({
-  onImport,
-  onExport,
-  onExportTxt,
-}: {
-  onImport: () => void
-  onExport: () => void
-  onExportTxt: () => void
-}) {
-  const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    function handleClick(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', handleClick)
-    return () => document.removeEventListener('mousedown', handleClick)
-  }, [])
-
-  const run = (fn: () => void) => () => {
-    fn()
-    setOpen(false)
-  }
-
-  return (
-    <div ref={ref} className="relative">
-      <button onClick={() => setOpen(!open)} className="hh-icon-btn h-11 w-11" title="更多操作" aria-label="更多操作">
-        <MoreHorizontal className="h-5 w-5" />
-      </button>
-      {open && (
-        <div className="hh-menu absolute right-0 mt-2 w-44">
-          <button onClick={run(onImport)} className="hh-menu-item">
-            <Upload className="h-4 w-4 text-content-secondary" />
-            导入项目
-          </button>
-          <button onClick={run(onExport)} className="hh-menu-item">
-            <Download className="h-4 w-4 text-content-secondary" />
-            导出项目
-          </button>
-          <button onClick={run(onExportTxt)} className="hh-menu-item">
-            <FileText className="h-4 w-4 text-content-secondary" />
-            导出 TXT
-          </button>
-        </div>
-      )}
-    </div>
-  )
-}
 
 /* ─── 删除确认弹窗 ─── */
 
@@ -390,7 +72,7 @@ function DeleteDialog({
         </div>
         <div className="hh-modal-body">
           <p className="text-sm leading-7 text-content-secondary">
-            确定要删除「<span className="font-medium text-content">{getDisplayTitle(project.title)}</span>」吗？
+            确定要删除「<span className="font-medium text-content">{displayTitle(project.title)}</span>」吗？
             项目下的世界观、角色、大纲与章节都会被永久删除，此操作不可撤销。
           </p>
         </div>
@@ -610,6 +292,8 @@ export default function ProjectList() {
   // 拆书页跳转过来预选本书做对标书。仅首次 mount 读取 + 状态保留，避免反复触发
   const [pendingDissectTaskId, setPendingDissectTaskId] = useState<string | null>(null)
   const inspirationOpen = searchParams.get('panel') === 'inspiration'
+  // 首页「一句话开新书」带过来的灵感：打开灵感模式时预填进输入框
+  const inspirationIdea = searchParams.get('idea') ?? ''
 
   const openInspiration = () => {
     const next = new URLSearchParams(searchParams)
@@ -620,6 +304,7 @@ export default function ProjectList() {
   const closeInspiration = () => {
     const next = new URLSearchParams(searchParams)
     next.delete('panel')
+    next.delete('idea')
     setSearchParams(next, { replace: true })
   }
 
@@ -645,14 +330,23 @@ export default function ProjectList() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // 统计数据
-  const stats = useMemo(() => {
-    const total = projects.length
-    const writing = projects.filter((p) => p.status === 'writing').length
-    const totalWords = projects.reduce((sum, p) => sum + (p.current_words || 0), 0)
-    const completed = projects.filter((p) => p.status === 'completed').length
-    return { total, writing, totalWords, completed }
-  }, [projects])
+  // 书架：搜索 / 状态筛选只在这一次打开里有效；排序、分组、书封 / 列表记在本机
+  const [query, setQuery] = useState('')
+  const [filter, setFilter] = useState<ShelfFilter>('all')
+  const [prefs, setPrefs] = useState<ShelfPrefs>(() => readShelfPrefs(typeof localStorage === 'undefined' ? null : localStorage))
+  const patchPrefs = (patch: Partial<ShelfPrefs>) => setPrefs((prev) => ({ ...prev, ...patch }))
+  useEffect(() => {
+    writeShelfPrefs(localStorage, prefs)
+  }, [prefs])
+  const summary = useMemo(() => shelfSummary(projects), [projects])
+  const counts = useMemo(() => countByState(projects), [projects])
+  const visible = useMemo(() => sortProjects(filterProjects(projects, { query, filter }), prefs.sort), [projects, query, filter, prefs.sort])
+  const groups = useMemo(() => groupProjects(visible, prefs.group), [visible, prefs.group])
+  const searching = query.trim() !== '' || filter !== 'all'
+  const clearSearch = () => {
+    setQuery('')
+    setFilter('all')
+  }
 
   // 新建项目 — 打开向导弹窗
   const handleCreate = () => {
@@ -716,30 +410,9 @@ export default function ProjectList() {
     }
   }
 
-  // 导出 — 如果只有一个项目直接导出，否则提示
-  const handleExport = () => {
-    if (projects.length === 0) {
-      toast.info('暂无可导出的项目')
-      return
-    }
-    if (projects.length === 1) {
-      projectApi.exportProjectData(projects[0].id, {})
-      return
-    }
-    toast.info('请进入具体项目后导出')
-  }
-
-  // TXT 导出
-  const handleExportTxt = () => {
-    if (projects.length === 0) {
-      toast.info('暂无可导出的项目')
-      return
-    }
-    if (projects.length === 1) {
-      projectApi.exportTxt(projects[0].id)
-      return
-    }
-    toast.info('请进入具体项目后导出 TXT')
+  // 导出：每本书卡片的「⋯」菜单里各自导出（导出接口走裸 axios，失败不会经拦截器提示）
+  const handleExport = (project: Project) => {
+    projectApi.exportProjectData(project.id, {}).catch(() => toast.error('导出失败，请重试'))
   }
 
   // 加载中
@@ -749,60 +422,69 @@ export default function ProjectList() {
   const showHeaderCreateActions = showSkeleton || hasProjects
 
   return (
-    <div className="animate-fade-in space-y-6">
-      <section className="lj-page-header">
-        <div className="min-w-0">
-          <h1 className="lj-page-title">我的项目</h1>
-          <p className="mt-2 max-w-[560px] text-sm leading-6 text-content-secondary">
-            在这里管理全部小说项目，随时回到最近推进的作品。
-          </p>
-        </div>
+    <div className="animate-fade-in">
+      <ShelfToolbar
+        summary={summary}
+        counts={counts}
+        matched={searching ? visible.length : null}
+        showCreate={showHeaderCreateActions}
+        showTools={hasProjects}
+        query={query}
+        onQuery={setQuery}
+        filter={filter}
+        onFilter={setFilter}
+        prefs={prefs}
+        onPrefs={patchPrefs}
+        onImport={handleImport}
+        onInspiration={openInspiration}
+        onCreate={handleCreate}
+      />
 
-        <div className="flex shrink-0 items-center gap-2.5">
-          {showHeaderCreateActions && (
-            <>
-              <button onClick={openInspiration} className="hh-btn-secondary">
-                <Sparkles className="h-4 w-4 text-brand" />
-                灵感模式
-              </button>
-              <button onClick={handleCreate} className="hh-btn-primary">
-                <Plus className="h-4 w-4" />
-                快速开始
-              </button>
-            </>
-          )}
-          <MoreMenu onImport={handleImport} onExport={handleExport} onExportTxt={handleExportTxt} />
-        </div>
-      </section>
-
-      {hasProjects && (
-        <section className="hh-panel grid grid-cols-2 divide-surface-border/80 md:grid-cols-4 md:divide-x">
-          <StatItem label="项目总数" value={stats.total} />
-          <StatItem label="创作中" value={stats.writing} />
-          <StatItem label="已完成" value={stats.completed} />
-          <StatItem label="累计字数" value={formatWords(stats.totalWords)} />
-        </section>
-      )}
-
-      {showSkeleton ? (
-        <SkeletonCards />
-      ) : !hasProjects ? (
-        <EmptyState onCreate={handleCreate} onInspiration={openInspiration} />
-      ) : (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {projects.map((project) => (
-            <ProjectCard
-              key={project.id}
-              project={project}
-              onClick={() => navigate(`/project/${project.id}`)}
-              onDelete={() => setDeletingProject(project)}
-            />
-          ))}
-        </div>
-      )}
+      <div className="pt-7">
+        {showSkeleton ? (
+          <ShelfSkeleton view={prefs.view} />
+        ) : !hasProjects ? (
+          <EmptyShelf onCreate={handleCreate} onInspiration={openInspiration} onImport={handleImport} />
+        ) : visible.length === 0 ? (
+          <NoMatch onClear={clearSearch} />
+        ) : (
+          <div className="space-y-10">
+            {groups.map((group) => (
+              <section key={group.key} aria-label={group.label || '全部作品'}>
+                {group.label && (
+                  <h2 className="mb-4 flex items-baseline gap-2 font-serif text-[15px] font-semibold text-content">
+                    {group.label}
+                    <span className="font-sans text-[12px] font-normal text-content-tertiary tabular-nums">{group.items.length}</span>
+                  </h2>
+                )}
+                <div
+                  className={
+                    prefs.view === 'grid'
+                      ? 'grid grid-cols-2 gap-x-5 gap-y-8 sm:grid-cols-3 sm:gap-x-6 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6'
+                      : 'flex flex-col gap-3'
+                  }
+                >
+                  {group.items.map((project) => (
+                    <BookCard
+                      key={project.id}
+                      project={project}
+                      view={prefs.view}
+                      onOpen={() => navigate(`/project/${project.id}`)}
+                      onExport={() => handleExport(project)}
+                      onExportTxt={() => projectApi.exportTxt(project.id)}
+                      onDelete={() => setDeletingProject(project)}
+                    />
+                  ))}
+                </div>
+              </section>
+            ))}
+          </div>
+        )}
+      </div>
 
       <InspirationModal
         open={inspirationOpen}
+        initialIdea={inspirationIdea}
         onClose={closeInspiration}
         onEnterProject={handleEnterInspiredProject}
         onProjectCreated={handleInspirationProjectCreated}

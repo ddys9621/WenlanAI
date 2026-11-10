@@ -4,6 +4,8 @@ declare module 'axios' {
   export interface AxiosRequestConfig {
     /** 为 true 时响应错误不弹全局 toast，由调用方自行处理（如「暂无分析结果」404 属正常态） */
     silent?: boolean;
+    /** 公开页（首页）探测登录态：401 = 没登录，属正常结果，不打开登录弹窗也不提示 */
+    probe?: boolean;
   }
 }
 
@@ -15,6 +17,7 @@ import { toast } from 'sonner';
 import { ssePost } from '../utils/sseClient';
 import type { SSEClientOptions } from '../utils/sseClient';
 import { PROJECT_HEADER, getActiveProjectId } from '../utils/activeProject';
+import { loginHref, onLoginScreen } from '../utils/loginRoute';
 import type { MemoryAnnotation } from '../utils/annotationSegments';
 import type { UpdateCheckResult, UpdateJobStatus } from '../types/system_update';
 import type { EmbeddingDownloadResult, EmbeddingStatus } from '../types/embedding';
@@ -266,18 +269,22 @@ api.interceptors.response.use(
         case 400:
           errorMessage = data?.detail || '请求参数错误';
           break;
-        case 401:
-          if (window.location.pathname !== '/login') {
-            errorMessage = '未授权，请先登录';
-            window.location.href = '/login';
-          } else if (typeof error.config?.url === 'string' && error.config.url.endsWith('/auth/user')) {
-            // 登录页探测登录态，「未登录」是正常结果，不提示
+        case 401: {
+          if (error.config?.probe) return Promise.reject(error);
+          const url = typeof error.config?.url === 'string' ? error.config.url : '';
+          if (/\/auth\/(local|email)\/(login|register)$/.test(url)) {
+            // 登录弹窗里的 401 是凭据错误，直接展示后端原因（用户名或密码错误 / 邮箱或密码错误）
+            errorMessage = data?.detail || '账号或密码错误';
+          } else if (onLoginScreen(window.location)) {
+            // 登录弹窗开着时探测登录态，「未登录」是正常结果，不提示
             return Promise.reject(error);
           } else {
-            // 登录页上的其他 401 是凭据错误，直接展示后端原因（用户名或密码错误 / 邮箱或密码错误）
-            errorMessage = data?.detail || '账号或密码错误';
+            // 会话没了：回首页打开登录弹窗，登录完回到这一页
+            errorMessage = '未授权，请先登录';
+            window.location.href = loginHref(window.location.pathname + window.location.search);
           }
           break;
+        }
         case 403:
           errorMessage = '没有权限访问';
           break;
@@ -321,7 +328,7 @@ export const authApi = {
   localLogin: (username: string, password: string) =>
     api.post<unknown, { success: boolean; message: string; user: User }>('/auth/local/login', { username, password }),
 
-  // Linux.do OAuth：拿到授权地址后整页跳转，回调由后端设 Cookie 并 302 回首页
+  // Linux.do OAuth：拿到授权地址后整页跳转，回调由后端设 Cookie 并 302 到书架（/projects）
   getLinuxDOAuthUrl: () => api.get<unknown, { auth_url: string; state: string }>('/auth/linuxdo/url'),
 
   // 邮箱注册（验证码）/ 邮箱密码登录
@@ -335,6 +342,8 @@ export const authApi = {
     api.post<unknown, { success: boolean; message: string; user: User }>('/auth/email/login', { email, password }),
   
   getCurrentUser: () => api.get<unknown, User>('/auth/user'),
+  /** 公开页探测登录态：没登录就 reject，不打开登录弹窗、不弹提示 */
+  probeCurrentUser: () => api.get<unknown, User>('/auth/user', { probe: true, silent: true }),
   
   getPasswordStatus: () => api.get<unknown, {
     has_password: boolean;
@@ -683,6 +692,12 @@ export const assistantApi = {
     api.get<unknown, { items: AssistantSessionInfo[] }>(`/projects/${projectId}/assistant/sessions`),
   sessionById: (projectId: string, sessionId: string) =>
     api.get<unknown, AssistantSessionView>(`/projects/${projectId}/assistant/sessions/${sessionId}`),
+  /** 删一段对话（消息、处理记录一起删）；删的是当前对话时后端先开一段新的，没处理的卡跟过去（current_replaced） */
+  deleteSession: (projectId: string, sessionId: string) =>
+    api.delete<unknown, { deleted: number; current_replaced: boolean }>(`/projects/${projectId}/assistant/sessions/${sessionId}`),
+  /** 清空已归档的对话（当前对话不动） */
+  clearArchivedSessions: (projectId: string) =>
+    api.delete<unknown, { deleted: number; current_replaced: boolean }>(`/projects/${projectId}/assistant/sessions`),
   /** autopilot = 自动执行：这一轮的候选直接采用 / 建档、草案直接确认、正文写完直接采用 */
   sendStream: (projectId: string, data: { message: string; page: AssistantPageContext; autopilot?: boolean }, options?: SSEClientOptions<AssistantRunResult>) =>
     ssePost<AssistantRunResult>(`/api/projects/${projectId}/assistant/messages/stream`, data, options),

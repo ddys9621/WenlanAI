@@ -127,7 +127,7 @@ export default function WorldRules() {
       </section>
 
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap gap-2">
+        <div className="lj-chip-scroll flex flex-wrap gap-2">
           <button
             onClick={() => setActiveCategory('all')}
             className={cn('hh-chip', activeCategory === 'all' && 'hh-chip--active')}
@@ -172,12 +172,14 @@ export default function WorldRules() {
               <article key={rule.id} className="hh-panel flex flex-col p-5">
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex min-w-0 items-start gap-3">
-                    <span className="flex h-11 w-11 shrink-0 items-center justify-center bg-brand/10 text-brand">
+                    {/* 手机上不放图标块：标题和下面的简述、详情对齐卡片左边 */}
+                    <span className="flex h-11 w-11 shrink-0 items-center justify-center bg-brand/10 text-brand max-sm:hidden">
                       <Icon className="h-5 w-5" />
                     </span>
-                    <div className="min-w-0">
-                      <h3 className="truncate text-[15px] font-semibold text-content">{rule.name}</h3>
-                      <span className="mt-1 inline-block bg-surface-hover px-2 py-0.5 text-[11px] font-medium text-content-secondary">
+                    {/* 手机上分类标签跟在名字后面，不单占一行 */}
+                    <div className="min-w-0 max-sm:flex max-sm:items-center max-sm:gap-2">
+                      <h3 className="truncate text-[15px] font-semibold text-content max-sm:min-w-0">{rule.name}</h3>
+                      <span className="mt-1 inline-block bg-surface-hover px-2 py-0.5 text-[11px] font-medium text-content-secondary max-sm:mt-0 max-sm:shrink-0">
                         {getCategoryLabel(rule.category)}
                       </span>
                     </div>
@@ -192,7 +194,7 @@ export default function WorldRules() {
                   </div>
                 </div>
                 {(rule.summary || rule.details) && (
-                  <div className="mt-4 space-y-3">
+                  <div className="mt-4 space-y-3 max-sm:mt-3">
                     {rule.summary && <p className="line-clamp-2 text-[13px] leading-6 text-content-secondary">{rule.summary}</p>}
                     {rule.details && (
                       <div className="hh-subpanel px-3.5 py-3">

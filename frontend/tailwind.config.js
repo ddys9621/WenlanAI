@@ -73,15 +73,6 @@ export default {
           deep: '#87362c',
           wash: '#faeae7',
         },
-        // 墨绿图标栏
-        sidebar: {
-          DEFAULT: '#202825',
-          hover: '#28322e',
-          active: '#2f3a35',
-          border: '#323d38',
-          text: '#b4c1b9',
-          'text-active': '#f3f5f3',
-        },
         surface: {
           DEFAULT: '#f3f5f3',
           card: '#ffffff',

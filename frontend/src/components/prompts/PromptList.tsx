@@ -1,3 +1,4 @@
+import { ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { ProjectPromptGroup, ProjectPromptItem } from '@/types/prompts';
 import { groupPrompts } from '@/utils/projectPrompts';
@@ -18,15 +19,17 @@ export function PromptList({ groups, items, selectedKey, onSelect }: PromptListP
           <ul className="pb-2">
             {groupItems.map((item) => (
               <li key={item.key}>
+                {/* 窄屏点一条进编辑页：行高一些、右边带箭头 */}
                 <button
                   type="button"
+                  data-prompt-key={item.key}
                   onClick={() => onSelect(item.key)}
                   className={cn(
-                    'flex w-full items-start justify-between gap-2 px-4 py-2 text-left hover:bg-surface-hover',
+                    'flex w-full items-start justify-between gap-2 px-4 py-2 text-left hover:bg-surface-hover max-lg:items-center max-lg:py-3',
                     item.key === selectedKey && 'lj-selected',
                   )}
                 >
-                  <span className="min-w-0">
+                  <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm font-medium text-content">{item.title}</span>
                     <span className="mt-0.5 block truncate text-xs text-content-tertiary">{item.description}</span>
                   </span>
@@ -34,6 +37,7 @@ export function PromptList({ groups, items, selectedKey, onSelect }: PromptListP
                     {item.customized && <span className="lj-badge lj-badge--ok">已改</span>}
                     {item.default_changed && <span className="lj-badge lj-badge--draft">默认已更新</span>}
                   </span>
+                  <ChevronRight className="h-4 w-4 shrink-0 text-content-tertiary lg:hidden" />
                 </button>
               </li>
             ))}

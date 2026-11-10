@@ -30,7 +30,11 @@
     transition: color 0.14s ease, background-color 0.14s ease, border-color 0.14s ease, box-shadow 0.14s ease;
   }
 
-  button {
+  button,
+  a,
+  summary,
+  label,
+  [role='button'] {
     -webkit-tap-highlight-color: transparent;
   }
 
@@ -184,27 +188,33 @@
     @apply flex w-full items-center gap-2.5 rounded px-3 py-2 text-left text-sm text-content hover:bg-brand-50;
   }
 
-  /* ─── 弹窗 ─── */
+  /* ─── 弹窗（手机上四周和内边距收一点，正文多出一截宽度）─── */
   .hh-modal-mask {
-    @apply fixed inset-0 z-50 flex items-center justify-center px-4 py-6 animate-fade-in;
+    @apply fixed inset-0 z-50 flex items-center justify-center px-3 py-4 animate-fade-in sm:px-4 sm:py-6;
     background: rgba(29, 36, 32, 0.38);
   }
 
   .hh-modal {
     @apply relative flex w-full flex-col overflow-hidden rounded-modal border border-surface-border bg-white shadow-xl animate-scale-in;
-    max-height: calc(100dvh - 3rem);
+    max-height: calc(100dvh - 2rem);
+  }
+
+  @media (min-width: 640px) {
+    .hh-modal {
+      max-height: calc(100dvh - 3rem);
+    }
   }
 
   .hh-modal-head {
-    @apply flex shrink-0 items-start justify-between gap-4 border-b border-surface-border px-6 pt-5 pb-4;
+    @apply flex shrink-0 items-start justify-between gap-4 border-b border-surface-border px-5 pt-5 pb-4 sm:px-6;
   }
 
   .hh-modal-body {
-    @apply min-h-0 flex-1 overflow-y-auto px-6 py-5;
+    @apply min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-6;
   }
 
   .hh-modal-foot {
-    @apply flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-surface-border bg-surface-paper px-6 py-3.5;
+    @apply flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-surface-border bg-surface-paper px-5 py-3.5 sm:px-6;
   }
 
   /* ─── 进度条 ─── */
@@ -246,51 +256,6 @@
   }
 
   /* ─── 岚笺风格新组件 ─── */
-
-  /* 纸色顶栏：右下角墨绿→朱砂的细强调线 */
-  .lj-topbar {
-    @apply relative z-20 flex h-12 shrink-0 items-center justify-between gap-4 border-b border-surface-border bg-surface-paper px-4 md:px-6;
-  }
-
-  .lj-topbar::after {
-    content: '';
-    position: absolute;
-    right: 0;
-    bottom: -1px;
-    width: min(36vw, 520px);
-    height: 2px;
-    pointer-events: none;
-    opacity: 0.6;
-    background: linear-gradient(90deg, transparent, #285b4d 68%, #d15b3d 68% 74%, transparent 74%);
-  }
-
-  /* 墨绿图标栏 */
-  .lj-rail {
-    @apply flex h-full flex-col bg-sidebar text-sidebar-text;
-  }
-
-  .lj-rail-item {
-    @apply relative flex min-h-[42px] w-full items-center gap-3 rounded-sm px-3 text-sm text-sidebar-text hover:bg-sidebar-hover hover:text-sidebar-text-active;
-  }
-
-  .lj-rail-item--active {
-    @apply bg-sidebar-hover font-medium text-sidebar-text-active;
-    clip-path: polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 0 100%);
-  }
-
-  .lj-rail-item--active::before {
-    content: '';
-    position: absolute;
-    left: 0;
-    top: 6px;
-    bottom: 6px;
-    width: 3px;
-    background: #d15b3d;
-  }
-
-  .lj-rail-caption {
-    @apply px-3 pb-1.5 pt-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-sidebar-text/60;
-  }
 
   /* 页头：衬线标题 + 朱砂短下划线 */
   .lj-page-header {
@@ -384,7 +349,8 @@
     --manuscript-caret: #a84337;
     --manuscript-selection: rgba(150, 115, 68, 0.22);
     --manuscript-pad-top: 22px;
-    --manuscript-pad-x: clamp(20px, 4vw, 48px);
+    /* 下限 16px：手机上稿纸两边少留一点（视口 ≥ 500px 时 4vw 已过 20px，桌面不受影响） */
+    --manuscript-pad-x: clamp(16px, 4vw, 48px);
     --manuscript-rule-inset: calc(var(--manuscript-pad-x) - 8px);
     background: var(--manuscript-paper);
     color: var(--manuscript-ink);
@@ -498,6 +464,31 @@
   @container (max-width: 640px) {
     .lj-chapter-head .lj-seg-label {
       display: none;
+    }
+  }
+
+  /* 再窄（手机）：标题自己占一行，工具和正文 / 候选稿 / 历史版本排第二行；查找挪进「更多」、分段页签收紧 */
+  .lj-chapter-head .lj-narrow-only {
+    display: none;
+  }
+
+  @container (max-width: 560px) {
+    .lj-chapter-head .lj-chapter-title {
+      flex-basis: 100%;
+    }
+  }
+
+  @container (max-width: 400px) {
+    .lj-chapter-head .lj-wide-only {
+      display: none;
+    }
+
+    .lj-chapter-head .lj-narrow-only {
+      display: inline-flex;
+    }
+
+    .lj-chapter-head .ws-seg-item {
+      @apply px-1.5;
     }
   }
 
@@ -800,7 +791,7 @@
 
   /* 中栏工具栏：图标按钮，中栏够宽时带文字（容器查询看工具栏自己的宽度，左右两栏开合都算进去） */
   .ws-appbar {
-    @apply relative z-20 flex h-14 shrink-0 items-center justify-between gap-3 border-b border-surface-border bg-surface-paper px-3;
+    @apply relative z-20 flex h-14 shrink-0 items-center justify-between gap-3 border-b border-surface-border bg-surface-paper px-3 max-sm:gap-2 max-sm:px-2;
     container-type: inline-size;
   }
 
@@ -820,6 +811,38 @@
   @container (min-width: 820px) {
     .ws-tool-label {
       display: inline;
+    }
+  }
+
+  /* 中栏窄（手机、两侧栏都拉宽）时按次要程度收起：全书字数（状态栏 / 稿纸底栏有）→ 搜索（左栏里有）→ 模型名只留图标
+     → 按钮收到 36px → 「全部页面」（左栏里有）。左边一组是横向可滚的，极窄时剩下的也不会被裁掉、点不到 */
+  @container (max-width: 600px) {
+    .ws-appbar .ws-counter {
+      display: none;
+    }
+  }
+
+  @container (max-width: 520px) {
+    .ws-appbar .ws-tool--search {
+      display: none;
+    }
+  }
+
+  @container (max-width: 460px) {
+    .ws-appbar .ws-chip-label {
+      display: none;
+    }
+  }
+
+  @container (max-width: 420px) {
+    .ws-appbar :is(.ws-tool, .ws-icon-btn) {
+      @apply h-9 w-9 justify-center px-0;
+    }
+  }
+
+  @container (max-width: 320px) {
+    .ws-appbar .ws-tool--pages {
+      display: none;
     }
   }
 
@@ -922,8 +945,20 @@
     min-width: 0;
   }
 
+  /* 按钮组折到自己那一行还放不下时在组里再折行：页面上常写着 shrink-0，这里压过它（否则窄屏上后面几个按钮被裁掉） */
   :where(.wl-ws) .lj-page-header > :last-child:not(:first-child) {
     margin-left: auto;
+    min-width: 0;
+    max-width: 100%;
+    flex-shrink: 1;
+    justify-content: flex-end;
+  }
+
+  /* 手机竖屏 / 横屏：页头说明常有两三行，吸顶会占掉五分之一到三分之一屏，改成跟着内容滚走（顶部工具栏仍在） */
+  @media (max-width: 639px), (max-height: 520px) {
+    :where(.wl-ws) .lj-page-header {
+      position: static;
+    }
   }
 
   :where(.wl-ws) .lj-page-header::after {
@@ -1022,6 +1057,98 @@
   :where(.wl-ws) select {
     border-radius: 6px;
   }
+
+  /* ─── 手机（< 640px）上的工作台 ───
+     桌面是按 13px 按钮、12px 说明的紧凑密度排的，原样放到手机上：字小，按钮靠右参差折行、一行剩一个，框里套框把正文挤窄。
+     手机上统一成：说明 13px、按钮 14px、输入框 15px；页头和列表区的操作按钮在标题下面按行铺满；
+     包一组卡片的外框（lj-list-panel）不画框，卡片白底直接排在纸色底上；卡片的操作折下来时排成底栏（lj-card-actions）。
+     正文小字的下限在 @layer 外（要压过页面上直接写的字号工具类）。 */
+  @media (max-width: 639px) {
+    :where(.wl-ws) .lj-page-header {
+      @apply gap-y-3 py-3.5;
+    }
+
+    :where(.wl-ws) .lj-page-header > :first-child {
+      flex-basis: 100%;
+    }
+
+    :where(.wl-ws) .lj-page-header p {
+      @apply text-[13px] leading-[1.65];
+    }
+
+    /* 页头 / 列表区的操作：占标题下面一整行，按钮按行分完宽度；同一行的按钮一个样子（幽灵按钮补上边框和白底） */
+    :where(.wl-ws) .lj-page-header > :last-child:not(:first-child):not(.ws-seg),
+    .lj-fill-actions {
+      display: flex;
+      flex: 1 1 100%;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: flex-start;
+      width: 100%;
+      margin-left: 0;
+    }
+
+    :where(.wl-ws) .lj-page-header > :last-child:not(:first-child):not(.ws-seg) > :not(.hh-icon-btn, .hh-icon-btn-plain),
+    .lj-fill-actions > :not(.hh-icon-btn, .hh-icon-btn-plain) {
+      flex: 1 1 auto;
+    }
+
+    :where(.wl-ws) .lj-page-header > :last-child:not(:first-child) .hh-btn-ghost,
+    .lj-fill-actions .hh-btn-ghost {
+      @apply border border-surface-border bg-white;
+    }
+
+    /* 包着一组卡片的外框：不画框、不留边，卡片改白底 */
+    :where(.wl-ws) .hh-panel.lj-list-panel {
+      @apply border-transparent bg-transparent p-0 shadow-none;
+    }
+
+    :where(.wl-ws) .lj-list-panel .hh-subpanel:not(.lj-selected) {
+      @apply bg-white;
+    }
+
+    :where(.wl-ws) .lj-list-panel > :first-child h2 {
+      @apply text-base leading-6;
+    }
+
+    /* 列表区的说明和页头说明一个颜色、一个字号（原来比页头说明还大还深，主次倒过来了） */
+    :where(.wl-ws) .lj-list-panel > :first-child p {
+      @apply text-[13px] leading-[1.65] text-content-tertiary;
+    }
+
+    /* 卡片右上角的操作折到底下时排成一条底栏：上面一道细线、靠右，和角色卡的底栏一个样子 */
+    .lj-card-actions {
+      @apply basis-full justify-end border-t border-surface-border/70 pt-1.5;
+    }
+
+    :where(.wl-ws) :is(.hh-btn-primary, .hh-btn-secondary, .hh-btn-ghost, .hh-btn-danger) {
+      @apply text-[14px];
+    }
+
+    :where(.wl-ws) .hh-btn-sm {
+      @apply text-[13px];
+    }
+
+    :where(.wl-ws) :is(.hh-chip, .ws-seg-item) {
+      @apply text-[13px];
+    }
+
+    :where(.wl-ws) :is(.hh-field, .hh-textarea) {
+      @apply text-[15px];
+    }
+
+    :where(.wl-ws) .hh-field {
+      @apply h-10;
+    }
+
+    :where(.wl-ws) .hh-label {
+      @apply text-[13px];
+    }
+
+    :where(.wl-ws) .lj-badge {
+      @apply text-[12px];
+    }
+  }
 }
 
 /* 工作台：右侧智能助笔开着时中栏窄一截，页面里按视口断点排的三 / 四列卡片在 1800px 以下少排一列
@@ -1033,5 +1160,256 @@
 
   .ws-root:has(> .ws-assistant:not(.hidden)) .ws-main .lg\:grid-cols-4 {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+/* 手机上的工作台：正文小字抬一档（13 → 14px，11 → 12px，10 → 11px），输入框里的字不小于 14px，卡片内边距收到 16px。
+   页面上直接写的字号 / 内边距工具类要压过去，所以写在 @layer 外、带上 .wl-ws 抬一级特异性。
+   工具类名用属性选择器写（[class~='text-[13px]']）：写成 .text-\[13px\] 的话，别处 @apply 这个工具类时 Tailwind 会把这条也算进去（报循环依赖）。
+   元素上另外写了手机字号（max-sm:text-…）的不管，照它写的来（不然这几条特异性更高，会把它压回 14px） */
+@media (max-width: 639px) {
+  .wl-ws [class~='text-[13px]']:not([class*='max-sm:text-']) {
+    font-size: 14px;
+  }
+
+  .wl-ws [class~='text-[11px]']:not([class*='max-sm:text-']) {
+    font-size: 12px;
+  }
+
+  .wl-ws [class~='text-[10px]']:not([class*='max-sm:text-']) {
+    font-size: 11px;
+  }
+
+  .wl-ws :is(input:not([type='checkbox'], [type='radio'], [type='range']), textarea, select):is([class~='text-xs'], [class~='text-[11px]'], [class~='text-[12px]'], [class~='text-[13px]']):not([class*='max-sm:text-']) {
+    font-size: 14px;
+  }
+
+  .wl-ws .hh-panel:is([class~='p-5'], [class~='p-6']) {
+    padding: 16px;
+  }
+
+  /* 分段页签（lj-seg-fill）铺满整行、各格分完宽度；格子多了放不下就横着滑，不折成两行 */
+  .wl-ws .lj-seg-fill {
+    display: flex;
+    width: 100%;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+  }
+
+  .wl-ws .lj-seg-fill > .ws-seg-item {
+    flex: 1 0 auto;
+    justify-content: center;
+  }
+
+  /* 筛选胶囊（lj-chip-scroll）排成一行、放不下横着滑，左右滑到屏幕边（伸进中栏 16px 的边距里） */
+  .wl-ws .lj-chip-scroll {
+    flex: 0 0 calc(100% + 32px);
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    margin-inline: -16px;
+    padding-inline: 16px;
+  }
+
+  .wl-ws .lj-chip-scroll > * {
+    flex-shrink: 0;
+  }
+
+  .wl-ws :is(.lj-seg-fill, .lj-chip-scroll) {
+    scrollbar-width: none;
+  }
+
+  .wl-ws :is(.lj-seg-fill, .lj-chip-scroll)::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* ─── 首页（pages/Home + components/home）：滚动显现、进场、墨痕、打字光标、进度线、无限滚动、稿纸横线底纹 ─── */
+.home-reveal {
+  opacity: 0;
+  transform: translateY(18px);
+  transition: opacity 0.7s cubic-bezier(0.22, 1, 0.36, 1), transform 0.7s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.home-reveal--in {
+  opacity: 1;
+  transform: none;
+}
+
+.home-fade-up {
+  animation: home-fade-up 0.8s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes home-fade-up {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* 「完本」「写得完」下面那一笔：进场时从左往右画出来 */
+.home-brush path {
+  stroke-dasharray: 130;
+  stroke-dashoffset: 130;
+  animation: home-draw 1s 0.7s cubic-bezier(0.65, 0, 0.35, 1) forwards;
+}
+
+@keyframes home-draw {
+  to { stroke-dashoffset: 0; }
+}
+
+.home-caret {
+  animation: home-caret 1s steps(1) infinite;
+}
+
+@keyframes home-caret {
+  50% { opacity: 0; }
+}
+
+/* 自动播放的进度线（走完由 animationend 换下一项；鼠标停住时 animation-play-state: paused） */
+.home-pill-progress {
+  transform: scaleX(0);
+  animation-name: home-progress;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+
+@keyframes home-progress {
+  to { transform: scaleX(1); }
+}
+
+@keyframes home-marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+.home-marquee-mask {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 12%, #000 88%, transparent);
+  mask-image: linear-gradient(to right, transparent, #000 12%, #000 88%, transparent);
+}
+
+/* 稿纸横线底纹，往四周淡出 */
+.home-ruled {
+  background-image: repeating-linear-gradient(to bottom, transparent 0, transparent 39px, rgba(139, 108, 67, 0.09) 39px, rgba(139, 108, 67, 0.09) 40px);
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 30%, #000 30%, transparent 75%);
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 30%, #000 30%, transparent 75%);
+}
+
+.home-ruled--dark {
+  background-image: repeating-linear-gradient(to bottom, transparent 0, transparent 39px, rgba(246, 243, 234, 0.06) 39px, rgba(246, 243, 234, 0.06) 40px);
+  -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 50%, #000 20%, transparent 80%);
+  mask-image: radial-gradient(ellipse 80% 70% at 50% 50%, #000 20%, transparent 80%);
+}
+
+/* 减少动态效果：全站规则把时长压到 0.01ms，循环动画会变成闪烁，这里直接关掉 */
+@media (prefers-reduced-motion: reduce) {
+  .home-marquee ul,
+  .home-caret,
+  .home-pill-progress {
+    animation: none !important;
+  }
+
+  .home-reveal {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 登录弹窗：输入框圆角跟卡片、按钮一个调子（账号 / 邮箱两种表单都管到） */
+.login-dialog .hh-field {
+  /* base 层的 input:not(...) 选择器权重更高（带 4 个 :not），只能 !important */
+  border-radius: 12px !important;
+}
+
+/* ─── 全局顶栏（components/layout/Header，参考马良写作）与书架（pages/ProjectList + components/shelf）─── */
+@layer components {
+  .app-nav-link {
+    @apply inline-flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-3 text-[14px] text-content-secondary transition-colors hover:text-content;
+  }
+
+  .app-nav-link--active {
+    @apply bg-white font-medium text-content shadow-xs;
+  }
+
+  /* 书架工具带上的小按钮：平时灰字透明底，悬停浅底；筛选 / 分组生效时浅墨绿 */
+  .shelf-tool {
+    @apply inline-flex h-9 items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 text-[13px] text-content-secondary hover:bg-surface-hover hover:text-content;
+  }
+
+  .shelf-tool--on {
+    @apply bg-brand-50 text-brand-600 hover:bg-brand-50 hover:text-brand-600;
+  }
+}
+
+/* 窄屏导航抽屉从左边滑出 */
+.app-drawer {
+  animation: app-drawer-in 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes app-drawer-in {
+  from { transform: translateX(-100%); }
+  to { transform: none; }
+}
+
+/* 书架工具带下沿：细线铺满中栏（box-shadow 不撑出横向滚动条），左端一小段朱砂，和别的页头一个记号 */
+.shelf-rule {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  pointer-events: none;
+}
+
+.shelf-rule::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: theme('colors.surface.border');
+  box-shadow: 0 0 0 100vmax theme('colors.surface.border');
+  clip-path: inset(0 -100vmax);
+}
+
+.shelf-rule::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 32px;
+  height: 2px;
+  background: #d15b3d;
+}
+
+/* 书封上的竖排题签：字号跟着书封宽度走（容器查询单位），放不下按高度截出省略号 */
+.shelf-cover {
+  container-type: inline-size;
+}
+
+.shelf-label {
+  writing-mode: vertical-rl;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: clamp(11px, 8cqw, 17px);
+  line-height: 1.2;
+  letter-spacing: 0.16em;
+  padding: 0.7em 0.45em 0.55em;
+  box-shadow: 0 1px 2px rgba(29, 36, 32, 0.08);
+}
+
+/* 列表视图的小书封：字小一号、字距收紧，多放几个字 */
+.shelf-label--sm {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  padding: 0.5em 0.3em 0.4em;
+}
+
+/* ─── 触屏（手机 / 平板）───
+   iOS Safari 聚焦字号小于 16px 的输入框会放大整页：由 index.html 只给 iOS 的 viewport 加 maximum-scale=1 拦住，
+   输入框照设计的字号排（以前在这里统一抬到 16px，搜索框、占位字比周围的字大一圈，看着不齐） */
+@media (pointer: coarse) {
+  /* 触屏键盘没有 Tab：行内补全的灰字接收点按，点一下整条采用（editor/inlineSuggestion 的 tapToAccept） */
+  .cm-inline-suggestion {
+    pointer-events: auto !important;
   }
 }

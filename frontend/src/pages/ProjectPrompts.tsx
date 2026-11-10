@@ -1,14 +1,17 @@
 /**
  * 项目提示词：按本项目改写 AI 的写作指导（正文写作 + 总纲 / 卷纲 / 章纲的写法），单条或全部恢复默认。
  * 只开放最影响成稿的几段；输出格式、作品资料由后端自动附加，作者怎么改都不会让生成结果解析出错。
+ * 宽屏左列表右编辑；窄屏（< lg）一次只看一样：先是列表，点一条进编辑（顶上「全部提示词」返回），
+ * 不然编辑框排在十几条列表下面，点了条目还得往下翻一大截才改得到。
  */
 import { DocIcon } from '@/components/project-shell/DocIcon';
 import { useEffect, useRef, useState } from 'react';
-import { Loader2, RotateCcw, ScrollText } from 'lucide-react';
+import { ChevronLeft, Loader2, RotateCcw, ScrollText } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { PromptEditor } from '@/components/prompts/PromptEditor';
 import { PromptList } from '@/components/prompts/PromptList';
+import { cn } from '@/lib/utils';
 import { projectPromptApi } from '@/services/api';
 import { useStore } from '@/store/index';
 import type { ProjectPromptGroup, ProjectPromptItem } from '@/types/prompts';
@@ -24,7 +27,10 @@ export default function ProjectPrompts() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [showDefault, setShowDefault] = useState(false);
+  /** 窄屏上现在看的是列表还是编辑（宽屏两样都在，这个不起作用） */
+  const [mobileView, setMobileView] = useState<'list' | 'editor'>('list');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const topRef = useRef<HTMLDivElement>(null);
 
   const selected = items.find((item) => item.key === selectedKey) ?? null;
   const dirty = selected !== null && draft !== selected.content;
@@ -55,12 +61,25 @@ export default function ProjectPrompts() {
 
   const replaceItem = (next: ProjectPromptItem) => setItems((prev) => prev.map((item) => (item.key === next.key ? next : item)));
 
+  const narrow = () => window.matchMedia('(max-width: 1023px)').matches;
+
   const select = (key: string) => {
-    if (key === selectedKey) return;
-    if (dirty && !confirm('当前条目还有没保存的修改，放弃修改并切换？')) return;
-    setSelectedKey(key);
-    setDraft(items.find((item) => item.key === key)?.content ?? '');
-    setShowDefault(false);
+    if (key !== selectedKey) {
+      if (dirty && !confirm('当前条目还有没保存的修改，放弃修改并切换？')) return;
+      setSelectedKey(key);
+      setDraft(items.find((item) => item.key === key)?.content ?? '');
+      setShowDefault(false);
+    }
+    setMobileView('editor');
+    if (narrow()) requestAnimationFrame(() => topRef.current?.scrollIntoView({ block: 'start' }));
+  };
+
+  /** 窄屏从编辑回到列表：没保存的修改留着（再点同一条接着改），列表滚到刚才那一条 */
+  const backToList = () => {
+    setMobileView('list');
+    requestAnimationFrame(() => {
+      document.querySelector(`[data-prompt-key="${CSS.escape(selectedKey ?? '')}"]`)?.scrollIntoView({ block: 'center' });
+    });
   };
 
   const save = async () => {
@@ -127,8 +146,8 @@ export default function ProjectPrompts() {
   };
 
   return (
-    <div className="animate-fade-in space-y-6">
-      <section className="lj-page-header">
+    <div ref={topRef} className="animate-fade-in space-y-6 scroll-mt-0">
+      <section className={cn('lj-page-header', mobileView === 'editor' && 'max-lg:hidden')}>
         <div className="min-w-0">
           <h1 className="lj-page-title"><DocIcon />提示词</h1>
           <p className="lj-page-desc">
@@ -148,28 +167,36 @@ export default function ProjectPrompts() {
           <Loader2 className="h-6 w-6 animate-spin text-brand" />
         </section>
       ) : (
+        // 两层包裹只在窄屏起作用（切列表 / 编辑）；宽屏 display: contents，列表和编辑照旧直接排进两列
         <div className="grid gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
-          <PromptList groups={groups} items={items} selectedKey={selectedKey} onSelect={select} />
-          {selected ? (
-            <PromptEditor
-              item={selected}
-              draft={draft}
-              saving={saving}
-              showDefault={showDefault}
-              textareaRef={textareaRef}
-              onDraftChange={setDraft}
-              onInsertVariable={insertVariable}
-              onSave={save}
-              onRevert={() => setDraft(selected.content)}
-              onReset={reset}
-              onToggleDefault={() => setShowDefault((v) => !v)}
-            />
-          ) : (
-            <section className="hh-panel flex flex-col items-center px-6 py-14 text-center">
-              <ScrollText className="h-7 w-7 text-brand" />
-              <p className="mt-3 text-sm text-content-secondary">选择左侧的一条提示词查看和修改</p>
-            </section>
-          )}
+          <div className={cn('min-w-0 lg:contents', mobileView === 'editor' && 'max-lg:hidden')}>
+            <PromptList groups={groups} items={items} selectedKey={selectedKey} onSelect={select} />
+          </div>
+          <div className={cn('min-w-0 lg:contents', mobileView === 'list' && 'max-lg:hidden')}>
+            <button type="button" onClick={backToList} className="-ml-1 mb-3 inline-flex h-9 items-center gap-1 rounded-lg px-1 text-[14px] text-brand-600 lg:hidden">
+              <ChevronLeft className="h-4 w-4" />全部提示词
+            </button>
+            {selected ? (
+              <PromptEditor
+                item={selected}
+                draft={draft}
+                saving={saving}
+                showDefault={showDefault}
+                textareaRef={textareaRef}
+                onDraftChange={setDraft}
+                onInsertVariable={insertVariable}
+                onSave={save}
+                onRevert={() => setDraft(selected.content)}
+                onReset={reset}
+                onToggleDefault={() => setShowDefault((v) => !v)}
+              />
+            ) : (
+              <section className="hh-panel flex flex-col items-center px-6 py-14 text-center">
+                <ScrollText className="h-7 w-7 text-brand" />
+                <p className="mt-3 text-sm text-content-secondary">选择一条提示词查看和修改</p>
+              </section>
+            )}
+          </div>
         </div>
       )}
     </div>

@@ -217,13 +217,14 @@ export default function MCPPlugins() {
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-4">
-          <h1 className="lj-page-title">MCP 插件管理</h1>
+        {/* 窄屏放不下时页签折到标题下面一行（以前挤在同一行，标题和页签文字都被压成两行） */}
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
+          <h1 className="lj-page-title whitespace-nowrap">MCP 插件管理</h1>
           <div className="flex gap-2" role="tablist">
-            <button type="button" role="tab" aria-selected={tab === 'mine'} onClick={() => setTab('mine')} className={cn('hh-chip', tab === 'mine' && 'hh-chip--active')}>
+            <button type="button" role="tab" aria-selected={tab === 'mine'} onClick={() => setTab('mine')} className={cn('hh-chip whitespace-nowrap', tab === 'mine' && 'hh-chip--active')}>
               <Plug className="w-3.5 h-3.5" />我的插件 <span className="tabular-nums opacity-70">{plugins.length}</span>
             </button>
-            <button type="button" role="tab" aria-selected={tab === 'market'} onClick={() => setTab('market')} className={cn('hh-chip', tab === 'market' && 'hh-chip--active')}>
+            <button type="button" role="tab" aria-selected={tab === 'market'} onClick={() => setTab('market')} className={cn('hh-chip whitespace-nowrap', tab === 'market' && 'hh-chip--active')}>
               <Store className="w-3.5 h-3.5" />MCP 商城
             </button>
           </div>

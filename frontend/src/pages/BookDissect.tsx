@@ -81,6 +81,15 @@ export default function BookDissect() {
   const [cancelling, setCancelling] = useState(false)
   const [modalMode, setModalMode] = useState<BookDissectRunMode | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const detailRef = useRef<HTMLDivElement>(null)
+
+  // 窄屏列表和详情上下排：点了任务把详情滚进视野，不然看上去像没反应
+  const selectTask = useCallback((id: string) => {
+    setSelectedId(id)
+    if (window.matchMedia('(max-width: 1023px)').matches) {
+      requestAnimationFrame(() => detailRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+    }
+  }, [])
   // 抽取跑在通用 AI 后台任务里：启动后接入弹窗 / 托盘；刷新后由 AIJobHost.syncFromServer 找回运行中的任务
   const attachJob = useAIJobsStore((s) => s.attach)
   const openJobModal = useAIJobsStore((s) => s.openModal)
@@ -254,19 +263,21 @@ export default function BookDissect() {
           loading={loading}
           uploading={uploading}
           selectedId={selectedId}
-          onSelect={setSelectedId}
+          onSelect={selectTask}
           onDropFile={(file) => void uploadFile(file)}
         />
-        <TaskDetail
-          task={selectedTask}
-          job={selectedJob}
-          extracting={extracting}
-          cancelling={cancelling}
-          onOpenExtraction={setModalMode}
-          onCancelExtraction={handleCancelExtraction}
-          onOpenJob={() => selectedJobId && openJobModal(selectedJobId)}
-          onDelete={handleDelete}
-        />
+        <div ref={detailRef} className="min-w-0 scroll-mt-4">
+          <TaskDetail
+            task={selectedTask}
+            job={selectedJob}
+            extracting={extracting}
+            cancelling={cancelling}
+            onOpenExtraction={setModalMode}
+            onCancelExtraction={handleCancelExtraction}
+            onOpenJob={() => selectedJobId && openJobModal(selectedJobId)}
+            onDelete={handleDelete}
+          />
+        </div>
       </div>
 
       {selectedTask && (
@@ -427,7 +438,8 @@ function TaskDetail({ task, job, extracting, cancelling, onOpenExtraction, onCan
 
   if (!task) {
     return (
-      <div className="hh-panel flex h-72 flex-col items-center justify-center gap-3 text-content-secondary">
+      // 窄屏上它排在列表下面，空着只占地方
+      <div className="hh-panel flex h-72 flex-col items-center justify-center gap-3 text-content-secondary max-lg:hidden">
         <BookOpen className="h-10 w-10 text-content-tertiary" />
         <p className="text-sm">从左侧选一个任务，或上传一本新参考书</p>
       </div>

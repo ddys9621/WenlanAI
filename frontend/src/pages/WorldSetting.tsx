@@ -489,9 +489,9 @@ export default function WorldSetting() {
 
 function StatItem({ label, value, unit, hint }: { label: string; value: ReactNode; unit?: string; hint: string }) {
   return (
-    <div className="px-5 py-4 md:px-6">
+    <div className="px-5 py-4 max-sm:px-4 max-sm:py-3 md:px-6">
       <p className="text-xs text-content-tertiary">{label}</p>
-      <p className="mt-1 text-2xl font-semibold tracking-tight text-content tabular-nums">
+      <p className="mt-1 text-2xl font-semibold tracking-tight text-content tabular-nums max-sm:text-xl">
         {value}
         {unit && <span className="ml-1 text-sm font-medium tracking-normal text-content-tertiary">{unit}</span>}
       </p>
@@ -515,7 +515,8 @@ function CardHeader({
 }) {
   return (
     <div className="flex items-start gap-3">
-      <span className="flex h-11 w-11 shrink-0 items-center justify-center bg-brand/10 text-brand">
+      {/* 手机上不放图标块：标题、说明和下面的输入框 / 正文对齐卡片左边 */}
+      <span className="flex h-11 w-11 shrink-0 items-center justify-center bg-brand/10 text-brand max-sm:hidden">
         <Icon className="h-5 w-5" />
       </span>
       <div className="min-w-0 flex-1">

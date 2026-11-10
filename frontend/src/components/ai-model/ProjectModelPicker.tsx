@@ -47,7 +47,8 @@ export function ProjectModelPicker({ projectId }: { projectId: string }) {
         title="本项目使用的 AI 模型与参数（接口复用「设置」页配置）"
       >
         <Cpu className="h-3.5 w-3.5 shrink-0" />
-        <span className="truncate">{pref ? modelChipLabel(pref.effective) : '模型…'}</span>
+        {/* 工具栏窄时只留图标（globals.css 的 .ws-appbar 容器查询） */}
+        <span className="ws-chip-label truncate">{pref ? modelChipLabel(pref.effective) : '模型…'}</span>
         {active > 0 && <span className="shrink-0 bg-white/25 px-1.5 text-[10px]">覆盖 {active}</span>}
       </button>
       {open && pref && (

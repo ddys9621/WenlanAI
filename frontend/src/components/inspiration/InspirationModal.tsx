@@ -27,6 +27,8 @@ import type { MCPSelectorValue } from '@/components/MCPSelector';
 
 interface InspirationModalProps {
   open: boolean;
+  /** 打开时预填进灵感输入框的一句话（首页「一句话开新书」带过来的）；作者照样可以改了再发 */
+  initialIdea?: string;
   onClose: () => void;
   /** T2.1：第二参带上 outline 完成时后端给的下一步路由建议 */
   onEnterProject: (
@@ -41,6 +43,7 @@ const ERROR_SUFFIX = /\n*你可以选择[：:]?\s*$/;
 
 export default function InspirationModal({
   open,
+  initialIdea,
   onClose,
   onEnterProject,
   onProjectCreated,
@@ -183,6 +186,13 @@ export default function InspirationModal({
     setManualOpen(false);
     setInput('');
   }, [state.currentStep]);
+
+  // 带着首页写的灵感打开：预填进输入框（写在上面「换阶段清空输入」之后，首次挂载时以这里为准）
+  useEffect(() => {
+    if (open && initialIdea && state.currentStep === 'idea') setInput(initialIdea);
+    // 只在打开 / 换了带过来的灵感时填一次，作者改过的不覆盖
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, initialIdea]);
 
   // 换阶段时回到顶部，让用户先看到新阶段的标题与说明
   useEffect(() => {
@@ -351,7 +361,7 @@ export default function InspirationModal({
           )}
           style={{ maxHeight: 'calc(100dvh - 3rem)' }}
         >
-          <header className="shrink-0 border-b border-surface-border/80 px-7 pb-5 pt-6">
+          <header className="shrink-0 border-b border-surface-border/80 px-5 pb-4 pt-5 sm:px-7 sm:pb-5 sm:pt-6">
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0">
                 <p className="hh-eyebrow">灵感模式</p>
@@ -438,7 +448,8 @@ function Stepper({ activeIndex, currentStep }: { activeIndex: number; currentSte
         return (
           <li
             key={step}
-            className={cn('flex min-w-0 items-center', !last && 'flex-1')}
+            // 按内容宽度起排再分剩下的空间：手机上只有当前一步带名字，它要比别的宽，等分会把名字和下一格叠在一起
+            className={cn('flex min-w-0 items-center', !last && 'flex-auto')}
             aria-current={status === 'current' ? 'step' : undefined}
           >
             <span className="flex shrink-0 items-center gap-1.5">
@@ -454,20 +465,21 @@ function Stepper({ activeIndex, currentStep }: { activeIndex: number; currentSte
               >
                 {status === 'done' ? <Check className="h-3 w-3" /> : index + 1}
               </span>
+              {/* 手机上七步的名字排不下（挤成一团叠在一起），只给当前这一步留名字 */}
               <span
                 className={cn(
                   'text-xs',
                   status === 'current'
                     ? 'font-medium text-content'
                     : status === 'done'
-                      ? 'text-content-secondary'
-                      : 'text-content-tertiary',
+                      ? 'text-content-secondary max-sm:hidden'
+                      : 'text-content-tertiary max-sm:hidden',
                 )}
               >
                 {label}
               </span>
             </span>
-            {!last && <span className={cn('mx-2 h-px min-w-2 flex-1', status === 'done' ? 'bg-brand' : 'bg-surface-border')} />}
+            {!last && <span className={cn('mx-1 h-px min-w-2 flex-1 sm:mx-2', status === 'done' ? 'bg-brand' : 'bg-surface-border')} />}
           </li>
         );
       })}

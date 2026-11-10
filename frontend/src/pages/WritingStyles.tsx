@@ -8,6 +8,10 @@ import { writingStyleApi } from '@/services/api'
 import { Modal } from '@/components/ui/Modal'
 import type { WritingStyle, PresetStyle, WritingStyleCreate, WritingStyleUpdate } from '@/types'
 
+/** 卡片上的 Prompt 预览：去掉 Markdown 记号（**加粗**、列表短横、标题井号），三行里多看几句正文、不见一串星号 */
+const promptPreview = (text: string) =>
+  text.replace(/\*\*|__/g, '').replace(/^\s*(?:#{1,6}|[-*+]|\d+[.)])\s+/gm, '')
+
 export default function WritingStyles() {
   const { currentProject } = useStore()
   const [styles, setStyles] = useState<WritingStyle[]>([])
@@ -125,12 +129,14 @@ export default function WritingStyles() {
             <article key={s.id} className={cn('hh-panel flex flex-col p-5', s.is_default && 'border-brand')}>
               <div className="flex items-start justify-between gap-3">
                 <div className="flex min-w-0 items-start gap-3">
-                  <span className="flex h-11 w-11 shrink-0 items-center justify-center bg-brand/10 text-brand">
+                  {/* 手机上不放图标块：标题和下面的说明、Prompt 对齐卡片左边 */}
+                  <span className="flex h-11 w-11 shrink-0 items-center justify-center bg-brand/10 text-brand max-sm:hidden">
                     <Palette className="h-5 w-5" />
                   </span>
-                  <div className="min-w-0">
-                    <h3 className="truncate text-[15px] font-semibold text-content">{s.name}</h3>
-                    <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                  {/* 手机上「预设 / 默认」标签跟在名字后面，不单占一行 */}
+                  <div className="min-w-0 max-sm:flex max-sm:items-center max-sm:gap-2">
+                    <h3 className="truncate text-[15px] font-semibold text-content max-sm:min-w-0">{s.name}</h3>
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5 max-sm:mt-0 max-sm:shrink-0 max-sm:flex-nowrap">
                       <span className="bg-surface-hover px-2 py-0.5 text-[11px] font-medium text-content-secondary">
                         {s.style_type === 'preset' ? '预设' : '自定义'}
                       </span>
@@ -160,7 +166,7 @@ export default function WritingStyles() {
               <div className="mt-4 space-y-3">
                 {s.description && <p className="line-clamp-2 text-[13px] leading-6 text-content-secondary">{s.description}</p>}
                 <div className="hh-subpanel px-3.5 py-3">
-                  <p className="line-clamp-3 font-mono text-xs leading-5 text-content-tertiary">{s.prompt_content}</p>
+                  <p className="line-clamp-3 font-mono text-xs leading-5 text-content-tertiary">{promptPreview(s.prompt_content)}</p>
                 </div>
               </div>
             </article>

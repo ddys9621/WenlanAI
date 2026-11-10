@@ -169,7 +169,7 @@ export function VolumesView({
   }
 
   return (
-    <section className="hh-panel space-y-4 p-6">
+    <section className="hh-panel lj-list-panel space-y-4 p-4 sm:p-6">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           <h2 className="text-lg font-semibold tracking-tight text-content">卷纲</h2>
@@ -178,7 +178,7 @@ export function VolumesView({
             AI 草拟的内容都要看过再确认，共 {volumes.length} 卷。
           </p>
         </div>
-        <div className="flex shrink-0 flex-wrap items-center gap-2.5">
+        <div className="lj-fill-actions flex shrink-0 flex-wrap items-center gap-2.5">
           {unconfirmed.length > 0 && (
             <button onClick={() => void confirmAll()} disabled={busy !== null} className="hh-btn-secondary">
               {busy === 'all' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}全部确认 ({unconfirmed.length})
@@ -195,9 +195,10 @@ export function VolumesView({
       </div>
 
       {volumes.length === 0 ? (
-        <div className="mt-6 flex flex-col items-center px-6 py-12 text-center">
+        // 手机上外框（lj-list-panel）不画框，空状态自己带一道虚线框
+        <div className="mt-6 flex flex-col items-center px-6 py-12 text-center max-sm:mt-4 max-sm:rounded-xl max-sm:border max-sm:border-dashed max-sm:border-surface-border max-sm:px-5 max-sm:py-10">
           <span className="flex h-14 w-14 items-center justify-center bg-brand/10 text-brand"><Layers className="h-7 w-7" /></span>
-          <h3 className="mt-5 text-xl font-semibold tracking-tight text-content">还没有卷纲</h3>
+          <h3 className="mt-5 text-xl font-semibold tracking-tight text-content max-sm:text-lg">还没有卷纲</h3>
           <p className="mt-2 max-w-md text-sm leading-6 text-content-secondary">
             先在「总纲」里写好梗概和全书主线，再点「按总纲分卷」；也可以在智能助笔里对主编说「帮我分卷」。
           </p>
@@ -207,9 +208,10 @@ export function VolumesView({
           {volumes.map((v) => {
             const open = expanded.has(v.id)
             return (
-              <article key={v.id} className="hh-subpanel p-4">
-                <div className="flex items-start justify-between gap-3">
-                  <button onClick={() => toggle(v.id)} className="flex min-w-0 flex-1 items-start gap-2 text-left">
+              <article key={v.id} className="hh-subpanel p-3 sm:p-4">
+                {/* 标题按 16rem 起排：窄屏放不下按钮就把按钮折到下一行，标题不被挤成「第2卷 · …」 */}
+                <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
+                  <button onClick={() => toggle(v.id)} className="flex min-w-0 flex-[1_1_16rem] items-start gap-2 text-left">
                     {open ? <ChevronDown className="mt-1 h-4 w-4 shrink-0 text-content-tertiary" /> : <ChevronRight className="mt-1 h-4 w-4 shrink-0 text-content-tertiary" />}
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
@@ -221,7 +223,7 @@ export function VolumesView({
                       {v.goal && <p className="mt-1 line-clamp-1 text-[13px] text-content-secondary">{v.goal}</p>}
                     </div>
                   </button>
-                  <div className="flex shrink-0 items-center gap-1">
+                  <div className="ml-auto flex shrink-0 items-center gap-1">
                     {(v.review_status === 'draft' || v.upstream_stale) && (
                       <button onClick={() => void withBusy(`c-${v.id}`, () => confirmVolume(v.id), '已确认')} disabled={busy !== null} className="hh-btn-secondary hh-btn-sm h-8">
                         {busy === `c-${v.id}` ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}确认
@@ -266,7 +268,8 @@ export function VolumesView({
                             const stats = unitStats(u)
                             const missing = stats.total - stats.have
                             return (
-                              <div key={u.index} className="border border-surface-border/80 bg-white/60 p-3">
+                              // 手机上卷卡片已经是白底卡片，单元不再套一层框：左边一道墨绿细线分开
+                              <div key={u.index} className="border border-surface-border/80 bg-white/60 p-3 max-sm:border-0 max-sm:border-l-2 max-sm:border-brand/25 max-sm:bg-transparent max-sm:py-1 max-sm:pl-3 max-sm:pr-0">
                                 <div className="flex flex-wrap items-center justify-between gap-2">
                                   <div className="flex min-w-0 flex-wrap items-center gap-2">
                                     <span className="text-xs font-medium text-brand">单元 {u.index}</span>

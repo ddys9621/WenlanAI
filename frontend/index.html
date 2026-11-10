@@ -3,7 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/logo.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content" />
+    <script>
+      // iOS Safari 聚焦字号小于 16px 的输入框会放大整页、失焦也不缩回：只给 iOS 加 maximum-scale=1 拦住这个自动放大
+      // （iOS 10 起双指缩放不受它限制）。安卓不加：那边不会自动放大，maximum-scale 反而会禁掉双指缩放。
+      if (/iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent))) {
+        var viewport = document.querySelector('meta[name="viewport"]')
+        if (viewport) viewport.setAttribute('content', viewport.getAttribute('content') + ', maximum-scale=1')
+      }
+    </script>
+    <meta name="theme-color" content="#faf9f5" />
     <title>文澜 AI</title>
   </head>
   <body>

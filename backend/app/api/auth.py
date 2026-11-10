@@ -332,7 +332,7 @@ async def linuxdo_callback(
 
     await _init_user_db(user.user_id, "Linux.do 用户")
 
-    response = RedirectResponse(url="/", status_code=302)
+    response = RedirectResponse(url="/projects", status_code=302)  # 首页是公开介绍页，登录完直接进书架
     await _set_session_cookies(response, user.user_id)
     logger.info(f"✅ [Linux.do登录] 用户 {user.user_id} ({user.username}) 登录成功{'' if existing else '（新注册）'}")
     return response

@@ -1,6 +1,6 @@
 /**
  * CodeMirror 6 行内补全（像写代码的 Copilot）：建议以灰字 widget 显示在光标后（不进文档、不破坏撤销与输入法），
- * Tab 整条采用、Ctrl+→ 采用一小句、Esc 收起、继续打字则顺着建议吃掉相同的字或让建议作废；Alt+\ 随时手动要一条。
+ * Tab 整条采用（触屏上点一下灰字）、Ctrl+→ 采用一小句、Esc 收起、继续打字则顺着建议吃掉相同的字或让建议作废；Alt+\ 随时手动要一条。
  * 打开开关后，作者停笔 delay 毫秒且光标在段尾时自动请求；任何输入 / 移动光标都会取消正在进行的请求。
  */
 import { Prec, StateEffect, StateField, type EditorState, type Extension, type TransactionSpec } from '@codemirror/state'
@@ -126,6 +126,18 @@ const ghostTheme = EditorView.baseTheme({
   '.cm-inline-suggestion': { color: 'var(--manuscript-ghost, #a3a89f)', pointerEvents: 'none' },
 })
 
+/** 触屏键盘没有 Tab：点一下灰字整条采用。灰字平时不接收指针事件（点了等于点它后面的正文），
+ * 只在触屏上打开（globals.css 的 pointer: coarse），所以桌面上这个处理器碰不到灰字、什么也不做 */
+const tapToAccept = EditorView.domEventHandlers({
+  mousedown(event, view) {
+    const target = event.target
+    if (!(target instanceof Element) || !target.closest('.cm-inline-suggestion')) return false
+    if (!accept(view, 'all')) return false
+    event.preventDefault()
+    return true
+  },
+})
+
 export function inlineCompletion(config: InlineCompletionConfig): Extension {
   const delay = config.delay ?? 1200
 
@@ -200,6 +212,7 @@ export function inlineCompletion(config: InlineCompletionConfig): Extension {
     suggestionField,
     plugin,
     ghostTheme,
+    tapToAccept,
     Prec.highest(keymap.of([
       { key: 'Tab', run: (view) => accept(view, 'all') },
       { key: 'Mod-ArrowRight', run: (view) => accept(view, 'chunk') },

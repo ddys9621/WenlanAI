@@ -223,7 +223,8 @@ export function MapCanvas({
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerCancel}
       className={cn(
-        'relative h-[min(72vh,760px)] min-h-[420px] w-full touch-none select-none overflow-hidden bg-[#dfe6e1] outline-none focus-visible:ring-2 focus-visible:ring-brand/40',
+        // 手机竖屏按地图的横幅比例给高度：固定 72vh 时地图（10:7）只占中间一条，上下大片空白，还要多滑一屏才到地点列表
+        'relative h-[min(72vh,760px)] min-h-[420px] w-full touch-none select-none overflow-hidden bg-[#dfe6e1] outline-none focus-visible:ring-2 focus-visible:ring-brand/40 max-sm:aspect-[10/8] max-sm:h-auto max-sm:min-h-[260px]',
         placing ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing',
       )}
       aria-label="世界地图画布：方向键平移，加减号缩放，0 复位"

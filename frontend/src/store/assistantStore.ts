@@ -29,6 +29,8 @@ interface AssistantState {
   reviewNonce: number;
   /** 头部「作品备忘」按钮每点一次加一，对话界面看到变化就开 / 关备忘面板 */
   memoNonce: number;
+  /** 当前对话在别处变了（「任务」里删了当前对话）每次加一，对话界面看到变化就重读 */
+  sessionNonce: number;
   setOpen: (open: boolean) => void;
   toggle: () => void;
   setMode: (mode: AssistantMode) => void;
@@ -42,6 +44,8 @@ interface AssistantState {
   openReview: () => void;
   /** 切回对话并开 / 关作品备忘 */
   toggleMemo: () => void;
+  /** 让对话界面重读当前对话（不切界面） */
+  reloadSession: () => void;
 }
 
 const OPEN_KEY = 'assistant-open';
@@ -51,10 +55,15 @@ const writeFlag = (key: string, value: boolean) => {
   if (typeof localStorage !== 'undefined') localStorage.setItem(key, String(value));
 };
 
+/** 宽屏（≥ lg）助笔是并排的一栏；窄屏是盖满整屏的抽屉 */
+export const isWideViewport = () =>
+  typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(min-width: 1024px)').matches;
+
 let nonce = 0;
 
 export const useAssistantStore = create<AssistantState>((set, get) => ({
-  open: readFlag(OPEN_KEY),
+  // 窄屏上次开着也不自动打开：一进项目（刷新、换项目）就被整屏的抽屉挡住，得先关掉才看得到页面
+  open: readFlag(OPEN_KEY) && isWideViewport(),
   mode: 'agent',
   wide: readFlag(WIDE_KEY),
   route: { page: '', label: '' },
@@ -63,6 +72,7 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
   newSessionNonce: 0,
   reviewNonce: 0,
   memoNonce: 0,
+  sessionNonce: 0,
   setOpen: (open) => {
     writeFlag(OPEN_KEY, open);
     set({ open });
@@ -86,6 +96,7 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
     set((s) => ({ open: true, mode: 'agent', reviewNonce: s.reviewNonce + 1 }));
   },
   toggleMemo: () => set((s) => ({ mode: 'agent', memoNonce: s.memoNonce + 1 })),
+  reloadSession: () => set((s) => ({ sessionNonce: s.sessionNonce + 1 })),
 }));
 
 export function pageContextOf(state: Pick<AssistantState, 'route' | 'detail'>): AssistantPageContext {

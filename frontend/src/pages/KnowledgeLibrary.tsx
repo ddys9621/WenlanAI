@@ -76,7 +76,8 @@ export default function KnowledgeLibrary() {
   };
 
   return (
-    <div className="mx-auto max-w-7xl space-y-5 px-6 py-6">
+    // 外壳已经留了边距；手机上再加一圈 24px，内容只剩一半宽
+    <div className="mx-auto max-w-7xl space-y-5 sm:px-6 sm:py-6">
       <header className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <div className="inline-flex items-center gap-2 rounded-pill bg-brand/10 px-3 py-1 text-xs font-medium text-brand">

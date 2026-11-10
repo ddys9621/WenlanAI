@@ -109,7 +109,10 @@ export function VersionHistoryPanel({ chapter, onRestored }: VersionHistoryPanel
           </div>
         </div>
       ) : (
-        <div className="flex flex-1 items-center justify-center px-6 py-16 text-sm text-content-tertiary">从左侧选一个版本预览</div>
+        <div className="flex flex-1 items-center justify-center px-6 py-16 text-sm text-content-tertiary">
+          <span className="max-lg:hidden">从左侧选一个版本预览</span>
+          <span className="lg:hidden">从上面选一个版本预览</span>
+        </div>
       )}
     </div>
   );

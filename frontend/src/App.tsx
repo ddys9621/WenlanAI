@@ -5,6 +5,7 @@ import { AdminRoute, ProtectedRoute } from '@/components/ProtectedRoute'
 import { PageLoading } from '@/components/ui/PageLoading'
 
 // 页面懒加载
+const Home = lazy(() => import('@/pages/Home'))
 const Login = lazy(() => import('@/pages/Login'))
 const ProjectList = lazy(() => import('@/pages/ProjectList'))
 const ProjectDetail = lazy(() => import('@/pages/ProjectDetail'))
@@ -33,12 +34,12 @@ export default function App() {
     <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <Suspense fallback={<PageLoading />}>
         <Routes>
-          {/* 公开页面 - 无布局 */}
+          {/* 公开页面 - 无布局：首页（介绍与入口，登录了列出最近的作品）、登录页 */}
+          <Route path="/" element={<Home />} />
           <Route path="/login" element={<Login />} />
 
-          {/* 受保护页面 - 带布局 */}
+          {/* 受保护页面 - 带布局（书架在 /projects） */}
           <Route element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
-            <Route path="/" element={<ProjectList />} />
             <Route path="/projects" element={<ProjectList />} />
             <Route path="/book-dissect" element={<BookDissect />} />
             {/* 参考库已并入知识库，老链接重定向 */}

@@ -131,22 +131,23 @@ export function PromisesTab({ projectId, latestChapter, onChanged }: { projectId
 
   return (
     <section className="hh-panel p-4">
+      {/* 手机上一样东西一行：页签铺满、搜索框铺满，两个按钮平分最后一行 */}
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <div className="ws-seg">
+        <div className="ws-seg lj-seg-fill">
           {FILTERS.map(([key, label]) => (
             <button key={key} onClick={() => setFilter(key)} className={cn('ws-seg-item', filter === key && 'ws-seg-item--on')}>
               {label}
             </button>
           ))}
         </div>
-        <div className="relative min-w-[180px] flex-1">
-          <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-content-tertiary" />
-          <input value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void load()} placeholder="按标题 / 内容找（回车）" className="h-8 w-full pl-7 text-xs" />
+        <div className="relative min-w-[180px] flex-1 max-sm:basis-full">
+          <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-content-tertiary max-sm:left-3 max-sm:h-4 max-sm:w-4" />
+          <input value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void load()} placeholder="按标题 / 内容找（回车）" className="h-8 w-full pl-7 text-xs max-sm:h-10 max-sm:pl-9" />
         </div>
-        <button onClick={() => setTimeline(true)} className="hh-btn-ghost hh-btn-sm" title="全书悬念时间线：埋设、回收和核对建议">
+        <button onClick={() => setTimeline(true)} className="hh-btn-ghost hh-btn-sm max-sm:h-9 max-sm:flex-1 max-sm:border max-sm:border-surface-border max-sm:bg-white" title="全书悬念时间线：埋设、回收和核对建议">
           <ChartGantt className="h-3.5 w-3.5" />时间线
         </button>
-        <button onClick={() => setCreating((v) => !v)} className="hh-btn-secondary hh-btn-sm"><Plus className="h-3.5 w-3.5" />登记伏笔</button>
+        <button onClick={() => setCreating((v) => !v)} className="hh-btn-secondary hh-btn-sm max-sm:h-9 max-sm:flex-1"><Plus className="h-3.5 w-3.5" />登记伏笔</button>
       </div>
       {timeline && <PromiseTimeline projectId={projectId} onClose={() => setTimeline(false)} />}
 

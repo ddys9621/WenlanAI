@@ -95,7 +95,7 @@ export default function ProjectDetail() {
       } catch {
         if (!cancelled) {
           toast.error('加载项目失败')
-          navigate('/')
+          navigate('/projects')
         }
       } finally {
         if (!cancelled) setLoading(false)
@@ -206,7 +206,8 @@ export default function ProjectDetail() {
 
   return (
     <ProjectShellContext.Provider value={shell}>
-      <div className="ws-root relative flex h-screen overflow-hidden">
+      {/* 高度跟着可见视口走（dvh）：手机浏览器地址栏露出来时 100vh 比可见区高，底下的状态栏、输入框会被挡住、又滚不出来 */}
+      <div className="ws-root relative flex h-screen overflow-hidden supports-[height:100dvh]:h-dvh">
         {mobileOpen && (
           <div
             className="fixed inset-0 z-40 bg-content/30 lg:hidden"
@@ -217,8 +218,11 @@ export default function ProjectDetail() {
           style={{ '--ws-left': `${leftPane.width}px` } as CSSProperties}
           className={cn(
             'z-50 flex shrink-0 flex-col',
-            'max-lg:fixed max-lg:inset-y-0 max-lg:left-0 max-lg:w-[min(320px,88vw)] max-lg:shadow-xl max-lg:transition-transform max-lg:duration-200',
-            mobileOpen ? 'max-lg:translate-x-0' : 'max-lg:-translate-x-full',
+            'max-lg:fixed max-lg:inset-y-0 max-lg:left-0 max-lg:w-[min(320px,88vw)] max-lg:shadow-xl',
+            // 收起后藏起来：只移出视口的话阴影会在屏幕左边漏出一道，Tab 也会跳进去。滑出动画走完再藏，打开时立刻可见（「搜索」打开就要聚焦里面的输入框）
+            mobileOpen
+              ? 'max-lg:translate-x-0 max-lg:[transition:transform_200ms_ease-out]'
+              : 'max-lg:invisible max-lg:-translate-x-full max-lg:[transition:transform_200ms_ease-out,visibility_0s_200ms]',
             'lg:relative lg:z-auto lg:w-[var(--ws-left)]',
             collapsed && 'lg:hidden',
           )}

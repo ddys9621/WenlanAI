@@ -91,7 +91,7 @@ export default function OutlinePage() {
           </p>
         </div>
 
-        <div className="ws-seg self-start md:self-auto">
+        <div className="ws-seg lj-seg-fill self-start md:self-auto">
           {TABS.map(tab => {
             const selected = activeTab === tab.key
             return (
@@ -171,11 +171,12 @@ function Modal({ title, onClose, children, size = 'xl', footer, closeOnMaskClick
 // ==================== 通用空状态（面板内） ====================
 function EmptyBlock({ icon: Icon, title, hint }: { icon: React.ElementType; title: string; hint: string }) {
   return (
-    <div className="mt-6 flex flex-col items-center px-6 py-12 text-center">
+    // 手机上外框（lj-list-panel）不画框，空状态自己带一道虚线框
+    <div className="mt-6 flex flex-col items-center px-6 py-12 text-center max-sm:mt-4 max-sm:rounded-xl max-sm:border max-sm:border-dashed max-sm:border-surface-border max-sm:px-5 max-sm:py-10">
       <span className="flex h-14 w-14 items-center justify-center bg-brand/10 text-brand">
         <Icon className="h-7 w-7" />
       </span>
-      <h3 className="mt-5 text-xl font-semibold tracking-tight text-content">{title}</h3>
+      <h3 className="mt-5 text-xl font-semibold tracking-tight text-content max-sm:text-lg">{title}</h3>
       <p className="mt-2 max-w-md text-sm leading-6 text-content-secondary">{hint}</p>
     </div>
   )
@@ -298,7 +299,7 @@ export function OutlinesView({ outlines, projectId, project, createOutline, upda
   }
 
   return (
-    <section className="hh-panel p-6">
+    <section className="hh-panel lj-list-panel p-4 sm:p-6">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           <h2 className="text-lg font-semibold tracking-tight text-content">大纲版本</h2>
@@ -306,7 +307,7 @@ export function OutlinesView({ outlines, projectId, project, createOutline, upda
             整本书的骨架：梗概、全书主线、卖点与终极目标。活跃版本是分卷、细化卷纲和生成章纲的依据，共 {outlines.length} 个版本。
           </p>
         </div>
-        <div className="flex shrink-0 flex-wrap items-center gap-2.5">
+        <div className="lj-fill-actions flex shrink-0 flex-wrap items-center gap-2.5">
           <button onClick={openGenerate} disabled={generating || !projectId} className="hh-btn-secondary">
             {generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4 text-brand" />}
             AI 生成
@@ -325,12 +326,14 @@ export function OutlinesView({ outlines, projectId, project, createOutline, upda
           hint="点击右上角「新建大纲」手动填写，或用「AI 生成」根据项目设定生成一版初稿，再回来细修。"
         />
       ) : (
-        <div className="mt-6 space-y-3">
+        <div className="mt-4 space-y-3 sm:mt-6">
           {outlines.map(o => (
-            <article key={o.id} className="hh-subpanel p-4">
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex min-w-0 flex-1 items-start gap-3">
-                  <span className="flex h-10 w-10 shrink-0 items-center justify-center bg-brand/10 text-brand">
+            <article key={o.id} className="hh-subpanel p-3 sm:p-4">
+              {/* 正文按 16rem 起排：窄屏放不下按钮就把按钮折到下一行（手机上排成底栏），正文不被挤成一列；
+                  手机上不放图标块，标题和正文对齐卡片左边 */}
+              <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
+                <div className="flex min-w-0 flex-[1_1_16rem] items-start gap-3">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center bg-brand/10 text-brand max-sm:hidden">
                     <FileText className="h-5 w-5" />
                   </span>
                   <div className="min-w-0 flex-1">
@@ -344,7 +347,7 @@ export function OutlinesView({ outlines, projectId, project, createOutline, upda
                     })()}</p>}
                   </div>
                 </div>
-                <div className="flex shrink-0 items-center gap-1">
+                <div className="lj-card-actions ml-auto flex shrink-0 items-center gap-1">
                   {!o.is_active && (
                     <button onClick={() => handleActivate(o)} className="hh-btn-secondary h-8 px-3 text-xs">
                       <Check className="h-3 w-3" />激活
@@ -684,7 +687,7 @@ function ChapterOutlinesView({ chapterOutlines, volumes, projectId, createChapte
   }
 
   return (
-    <section className="hh-panel p-6">
+    <section className="hh-panel lj-list-panel p-4 sm:p-6">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           <h2 className="font-serif text-lg font-semibold text-content">章纲</h2>
@@ -693,7 +696,7 @@ function ChapterOutlinesView({ chapterOutlines, volumes, projectId, createChapte
             AI 草拟或上游改过的章纲要确认后再写正文。
           </p>
         </div>
-        <div className="flex shrink-0 flex-wrap items-center gap-2.5">
+        <div className="lj-fill-actions flex shrink-0 flex-wrap items-center gap-2.5">
           {unconfirmed.length > 0 && (
             <button onClick={() => void confirmAll()} disabled={confirming !== null} className="hh-btn-secondary">
               {confirming === 'all' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}全部确认 ({unconfirmed.length})
@@ -723,15 +726,16 @@ function ChapterOutlinesView({ chapterOutlines, volumes, projectId, createChapte
           hint="章纲由「卷纲」里的剧情单元展开生成（按事件分章，长短不一）；也可点「新建章纲」手动添加，或在智能助笔里让章节策划师生成。"
         />
       ) : (
-        <div className="mt-6 space-y-3">
+        <div className="mt-4 space-y-3 sm:mt-6">
           <div className="flex items-center gap-2.5 px-1">
             <input type="checkbox" checked={selectedIds.size === chapterOutlines.length && chapterOutlines.length > 0} onChange={toggleSelectAll} className="h-4 w-4" />
             <span className="text-xs text-content-secondary tabular-nums">{selectedIds.size > 0 ? `已选 ${selectedIds.size}/${chapterOutlines.length}` : '全选'}</span>
           </div>
           {sorted.map(co => (
-            <article key={co.id} className={cn('hh-subpanel p-4 transition-colors', selectedIds.has(co.id) && 'lj-selected')}>
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex min-w-0 flex-1 items-start gap-3">
+            <article key={co.id} className={cn('hh-subpanel p-3 transition-colors sm:p-4', selectedIds.has(co.id) && 'lj-selected')}>
+              {/* 同总纲卡片：窄屏按钮折到下一行 */}
+              <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
+                <div className="flex min-w-0 flex-[1_1_16rem] items-start gap-3">
                   <input type="checkbox" checked={selectedIds.has(co.id)} onChange={() => toggleSelect(co.id)} className="mt-1 h-4 w-4 shrink-0" />
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
@@ -765,7 +769,7 @@ function ChapterOutlinesView({ chapterOutlines, volumes, projectId, createChapte
                     )}
                   </div>
                 </div>
-                <div className="flex shrink-0 items-center gap-1">
+                <div className="lj-card-actions ml-auto flex shrink-0 items-center gap-1">
                   {(co.review_status === 'draft' || co.upstream_stale) && (
                     <button onClick={() => void confirmOne(co)} disabled={confirming !== null} className="hh-btn-secondary hh-btn-sm h-8" title="看过了，可以照这份章纲写正文">
                       {confirming === co.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}确认

@@ -1,12 +1,15 @@
 /**
- * 全局智能助笔 ·「任务」界面：本项目正在跑的后台任务、助笔的处理记录、之前的对话（只读回看）。
+ * 全局智能助笔 ·「任务」界面：本项目正在跑的后台任务、助笔的处理记录、之前的对话（只读回看，可删除）。
  * 回看用和对话一样的排版（作者浅灰块、团队正文），卡片只列名称和处理结果。
+ * 删当前对话：后端先开一段新的（没处理的卡跟过去）再删，对话界面经 store 的 reloadSession 重读。
  */
 import { useCallback, useEffect, useState } from 'react';
-import { ChevronLeft, ChevronRight, Eye, Loader2, RefreshCw, Sparkles, Square } from 'lucide-react';
+import { toast } from 'sonner';
+import { ChevronLeft, ChevronRight, Eye, Loader2, RefreshCw, Sparkles, Square, Trash2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { assistantApi } from '@/services/api';
 import { useAIJobsStore, useRunningAIJobs } from '@/store/aiJobsStore';
+import { useAssistantStore } from '@/store/assistantStore';
 import { kindLabel } from '@/types/ai_job';
 import type {
   AssistantMessageView, AssistantRunStatus, AssistantRunView, AssistantSessionInfo, AssistantSessionView,
@@ -98,6 +101,9 @@ export function AssistantTasks({ projectId, onOpenConversation }: AssistantTasks
   const [loading, setLoading] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [reading, setReading] = useState<AssistantSessionView | null>(null);
+  /** 正在删的对话 id（清空归档时是 'archived'）：删的时候别的删除按钮先禁用 */
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const archivedCount = sessions.filter((s) => s.archived).length;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -114,13 +120,60 @@ export function AssistantTasks({ projectId, onOpenConversation }: AssistantTasks
 
   useEffect(() => { void load(); }, [load]);
 
+  /** 删一段对话；删成了返回 true。正在运行时删当前对话后端回 409，拦截器已提示 */
+  const removeSession = async (s: AssistantSessionInfo): Promise<boolean> => {
+    const ask = s.archived
+      ? `删除对话「${s.title}」？\n消息和这几轮的处理记录一起删掉，删了找不回来；已经写进书里的内容不受影响。`
+      : `删除当前对话「${s.title}」？\n消息和处理记录一起删掉，删了找不回来；还没处理的卡片会挪进一段新对话，已经写进书里的内容不受影响。`;
+    if (!window.confirm(ask)) return false;
+    setDeleting(s.id);
+    try {
+      const result = await assistantApi.deleteSession(projectId, s.id);
+      if (result.current_replaced) useAssistantStore.getState().reloadSession();
+      toast.success(result.current_replaced ? '已删除当前对话，换成了一段新对话' : '已删除这段对话');
+      await load();
+      return true;
+    } catch {
+      return false;
+    } finally {
+      setDeleting(null);
+    }
+  };
+
+  const clearArchived = async () => {
+    if (!archivedCount) return;
+    if (!window.confirm(`清空 ${archivedCount} 段已归档的对话？\n消息和处理记录一起删掉，删了找不回来；当前对话和已经写进书里的内容不受影响。`)) return;
+    setDeleting('archived');
+    try {
+      const result = await assistantApi.clearArchivedSessions(projectId);
+      toast.success(`已清空 ${result.deleted} 段归档对话`);
+      await load();
+    } catch {
+      /* 拦截器已提示 */
+    } finally {
+      setDeleting(null);
+    }
+  };
+
   if (reading) {
+    const session = reading.session;
     return (
       <div className="flex h-full min-h-0 flex-col">
         <div className="flex flex-none items-center gap-2 border-b border-surface-border-light px-2 py-1.5">
           <button onClick={() => setReading(null)} className="as-btn-ghost px-2"><ChevronLeft className="h-4 w-4" />任务</button>
-          <p className="min-w-0 flex-1 truncate text-[13px] font-medium text-content">{reading.session?.title}</p>
-          <span className="as-meta pr-2">只读回看</span>
+          <p className="min-w-0 flex-1 truncate text-[13px] font-medium text-content">{session?.title}</p>
+          <span className="as-meta">只读回看</span>
+          {session && (
+            <button
+              onClick={() => void removeSession(session).then((done) => { if (done) setReading(null); })}
+              disabled={deleting !== null}
+              className="as-icon-btn hover:bg-cinnabar-wash hover:text-cinnabar"
+              title="删除这段对话"
+              aria-label="删除这段对话"
+            >
+              {deleting === session.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+            </button>
+          )}
         </div>
         <div className="min-h-0 flex-1 space-y-6 overflow-y-auto px-4 py-5">
           {reading.messages.map((m) => <ReadMessage key={m.id} view={reading} m={m} />)}
@@ -203,14 +256,26 @@ export function AssistantTasks({ projectId, onOpenConversation }: AssistantTasks
       </section>
 
       <section>
-        <p className="as-section-title">对话记录<span className="ml-auto text-[12px] font-normal tabular-nums text-content-tertiary">{sessions.length}</span></p>
+        <p className="as-section-title">
+          对话记录<span className="ml-auto text-[12px] font-normal tabular-nums text-content-tertiary">{sessions.length}</span>
+          {archivedCount > 0 && (
+            <button
+              onClick={() => void clearArchived()}
+              disabled={deleting !== null}
+              className="as-link text-content-tertiary hover:text-cinnabar"
+              title="删掉所有已归档的对话（当前对话不动）"
+            >
+              {deleting === 'archived' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}清空归档
+            </button>
+          )}
+        </p>
         {sessions.length ? (
           <ul className="as-list">
             {sessions.map((s) => (
-              <li key={s.id}>
+              <li key={s.id} className="flex items-center">
                 <button
                   onClick={() => (s.archived ? void assistantApi.sessionById(projectId, s.id).then(setReading) : onOpenConversation())}
-                  className="as-row"
+                  className="as-row min-w-0 flex-1 pr-1"
                 >
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-[13px] text-content">{s.title}</span>
@@ -218,6 +283,15 @@ export function AssistantTasks({ projectId, onOpenConversation }: AssistantTasks
                   </span>
                   <StatusDot tone={s.archived ? 'gray' : 'green'} label={s.archived ? '已归档' : '当前'} />
                   <ChevronRight className="h-4 w-4 flex-none text-content-tertiary" />
+                </button>
+                <button
+                  onClick={() => void removeSession(s)}
+                  disabled={deleting !== null}
+                  className="as-icon-btn mr-2 hover:bg-cinnabar-wash hover:text-cinnabar"
+                  title={s.archived ? '删除这段对话' : '删除当前对话（没处理的卡片挪进新对话）'}
+                  aria-label={`删除对话「${s.title}」`}
+                >
+                  {deleting === s.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
                 </button>
               </li>
             ))}

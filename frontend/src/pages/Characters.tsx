@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Plus, Sparkles, Pencil, Trash2, X, Loader2, Building, Users, UserPlus, UserMinus, WandSparkles } from 'lucide-react';
+import { Plus, Sparkles, Pencil, Trash2, X, Loader2, Building, Users, UserPlus, UserMinus, WandSparkles, ChevronDown, type LucideIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useDismiss } from '@/hooks/useDismiss';
 import { DocIcon } from '@/components/project-shell/DocIcon';
 import { toast } from 'sonner';
 import { useStore } from '@/store';
@@ -314,11 +315,19 @@ export default function Characters() {
           </p>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2.5">
-          <button onClick={() => setShowBatchModal(true)} disabled={generatingBatch} className="hh-btn-secondary">
+          {/* 手机上五个按钮要排三行：三个 AI 入口收进「AI 生成」菜单，页头只留一行 */}
+          <AIGenerateMenu
+            items={[
+              { label: 'AI 生成角色', icon: Sparkles, busy: generating, onClick: () => setShowGenModal(true) },
+              { label: 'AI 生成组织', icon: Sparkles, busy: generatingOrg, onClick: () => setShowGenOrgModal(true) },
+              { label: 'AI 批量生成', icon: WandSparkles, busy: generatingBatch, onClick: () => setShowBatchModal(true) },
+            ]}
+          />
+          <button onClick={() => setShowBatchModal(true)} disabled={generatingBatch} className="hh-btn-secondary max-sm:hidden">
             {generatingBatch ? <Loader2 className="h-4 w-4 animate-spin" /> : <WandSparkles className="h-4 w-4 text-brand" />}
             AI 批量生成
           </button>
-          <button onClick={() => setShowGenOrgModal(true)} disabled={generatingOrg} className="hh-btn-ghost">
+          <button onClick={() => setShowGenOrgModal(true)} disabled={generatingOrg} className="hh-btn-ghost max-sm:hidden">
             {generatingOrg ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
             AI 生成组织
           </button>
@@ -326,7 +335,7 @@ export default function Characters() {
             <Building className="h-4 w-4" />
             添加组织
           </button>
-          <button onClick={() => setShowGenModal(true)} disabled={generating} className="hh-btn-secondary">
+          <button onClick={() => setShowGenModal(true)} disabled={generating} className="hh-btn-secondary max-sm:hidden">
             {generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4 text-brand" />}
             AI 生成角色
           </button>
@@ -337,7 +346,7 @@ export default function Characters() {
         </div>
       </section>
 
-      <div className="ws-seg">
+      <div className="ws-seg lj-seg-fill">
         {([
           { key: 'all', label: '全部', count: characters.length, icon: null },
           { key: 'character', label: '人物', count: charCount, icon: Users },
@@ -399,7 +408,7 @@ export default function Characters() {
                     )}
                   </div>
                 </div>
-                <div className="mt-4 flex items-center justify-end gap-1 border-t border-surface-border/80 pt-3">
+                <div className="mt-4 flex items-center justify-end gap-1 border-t border-surface-border/80 pt-3 max-sm:mt-3 max-sm:pt-2">
                   <button onClick={() => openEdit(c)} className="hh-btn-ghost hh-btn-sm">
                     <Pencil className="h-3.5 w-3.5" />
                     编辑
@@ -843,6 +852,40 @@ export default function Characters() {
           </div>
         </div>,
         document.body,
+      )}
+    </div>
+  );
+}
+
+/** 手机上页头的「AI 生成」菜单（≥ sm 时三个按钮照常平铺，这个不显示） */
+function AIGenerateMenu({ items }: { items: { label: string; icon: LucideIcon; busy: boolean; onClick: () => void }[] }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useDismiss(ref, open, () => setOpen(false));
+  const busy = items.some((item) => item.busy);
+
+  return (
+    <div ref={ref} className="relative sm:hidden">
+      <button onClick={() => setOpen((v) => !v)} aria-expanded={open} aria-haspopup="menu" className="hh-btn-secondary w-full">
+        {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4 text-brand" />}
+        AI 生成
+        <ChevronDown className="h-3.5 w-3.5 text-content-tertiary" />
+      </button>
+      {open && (
+        <div className="hh-menu absolute left-0 top-full mt-1 w-48" role="menu">
+          {items.map((item) => (
+            <button
+              key={item.label}
+              role="menuitem"
+              disabled={item.busy}
+              onClick={() => { setOpen(false); item.onClick(); }}
+              className="hh-menu-item disabled:opacity-50"
+            >
+              {item.busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <item.icon className="h-4 w-4 text-brand" />}
+              {item.label}
+            </button>
+          ))}
+        </div>
       )}
     </div>
   );

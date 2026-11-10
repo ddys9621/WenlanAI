@@ -234,8 +234,9 @@ export default function UserManagement() {
         </div>
       ) : (
         <div className="bg-white border border-surface-border rounded-card overflow-hidden">
+          {/* 单元格不折行，窄屏整表横向滑动（以前挤进屏宽，「本地管理员」「管理员」被压成一字一行） */}
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="w-full whitespace-nowrap text-sm">
               <thead>
                 <tr className="border-b border-surface-border bg-surface-hover/50">
                   <th className="text-left px-4 py-3 text-content-secondary font-medium">用户</th>

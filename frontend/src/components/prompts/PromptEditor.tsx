@@ -30,7 +30,7 @@ export function PromptEditor({
 
   return (
     <section className="hh-panel flex flex-col">
-      <header className="flex flex-wrap items-start justify-between gap-3 border-b border-surface-border px-5 py-4">
+      <header className="flex flex-wrap items-start justify-between gap-3 border-b border-surface-border px-5 py-4 max-sm:px-4">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <h2 className="text-base font-semibold text-content">{item.title}</h2>
@@ -49,14 +49,14 @@ export function PromptEditor({
       </header>
 
       {item.default_changed && (
-        <div className="mx-5 mt-4 flex items-start gap-2 rounded border border-gold-300/40 bg-gold-50 px-3 py-2 text-xs leading-5 text-gold-500">
+        <div className="mx-5 mt-4 flex items-start gap-2 rounded border border-gold-300/40 bg-gold-50 px-3 py-2 text-xs leading-5 text-gold-500 max-sm:mx-4">
           <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span>系统默认已更新（版本升级，或本书换了类型 / 视角）：可以查看系统默认对照，需要时恢复默认。</span>
         </div>
       )}
 
       {item.variables.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2 px-5 pt-4">
+        <div className="flex flex-wrap items-center gap-2 px-5 pt-4 max-sm:px-4">
           <span className="text-xs text-content-tertiary">可用变量（点一下插入到光标处，生成时自动换成本书的值）：</span>
           {item.variables.map((v) => (
             <button key={v.name} type="button" onClick={() => onInsertVariable(v.name)} className="hh-chip" title={v.label}>
@@ -67,7 +67,7 @@ export function PromptEditor({
         </div>
       )}
 
-      <div className="px-5 py-4">
+      <div className="px-5 py-4 max-sm:px-4">
         <textarea
           ref={textareaRef}
           value={draft}
@@ -91,9 +91,10 @@ export function PromptEditor({
         )}
       </div>
 
-      <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-surface-border bg-surface-paper px-5 py-3">
+      {/* 窄屏底栏贴住屏幕下沿：改长提示词时不用翻到最底下才点得到「保存」 */}
+      <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-surface-border bg-surface-paper px-5 py-3 max-lg:sticky max-lg:bottom-0 max-lg:z-10 max-lg:shadow-[0_-8px_16px_-14px_rgba(29,36,32,0.45)] max-sm:px-4">
         <p className="text-xs text-content-tertiary">
-          {draft.trim().length} 字 · 输出格式、作品资料由系统自动附加，改这里不会让生成结果解析出错
+          {draft.trim().length} 字<span className="max-sm:hidden"> · 输出格式、作品资料由系统自动附加，改这里不会让生成结果解析出错</span>
         </p>
         <div className="flex flex-wrap items-center gap-2">
           {item.customized && (

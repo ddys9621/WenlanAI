@@ -58,7 +58,7 @@ export function ManuscriptLayoutPanel({ prefs, onChange, onReset, onClose, align
           <p className="text-sm font-semibold text-content">正文版式</p>
           <p className="mt-0.5 text-xs text-content-tertiary">只改变阅读与输入方式；「一键排版」才会整理文字。</p>
         </div>
-        <button onClick={onClose} className="hh-btn-ghost hh-btn-sm">关闭</button>
+        <button onClick={onClose} className="hh-btn-ghost hh-btn-sm shrink-0">关闭</button>
       </header>
       <div className="grid grid-cols-2 gap-x-4 gap-y-3 py-3 text-xs text-content-secondary">
         <label className="grid gap-1.5">

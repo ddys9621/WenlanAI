@@ -181,7 +181,7 @@ export function ProjectSidebar({
             <ScrollText className="h-4 w-4" />
           </button>
         )}
-        <button onClick={() => navigate('/')} className="ws-icon-btn" title="返回书架">
+        <button onClick={() => navigate('/projects')} className="ws-icon-btn" title="返回书架">
           <Library className="h-4 w-4" />
         </button>
       </footer>

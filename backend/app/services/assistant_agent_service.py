@@ -25,7 +25,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import delete, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.logger import get_logger
@@ -340,6 +340,42 @@ async def new_session(db: AsyncSession, project_id: str, user_id: Optional[str])
 
     await write_verified(db, write, verify, "新对话")
     return await _fresh(db, AssistantSession, session_id)
+
+
+async def delete_session(db: AsyncSession, project_id: str, session_id: str) -> None:
+    """删掉一段已归档的对话：消息、这几轮的处理记录（它们的「撤销本轮」也就做不了了）、前情摘要、挂在这段对话下已经处理过的卡。
+    还没处理的卡不删，挪进当前对话的待确认栏（归档时本该已经挪走，这里兜底）；作品备忘是全书的，不动。
+    SQLite 没开外键约束（ondelete=CASCADE 不生效），逐张表删；删完读回核对。当前对话要先 new_session 归档再删。"""
+    current = await current_session(db, project_id)
+    home = current.id if current is not None and current.id != session_id else None
+
+    async def write() -> None:
+        for model in (AssistantFieldCandidate, AssistantEntityCandidate):
+            if home:
+                await db.execute(update(model).where(model.session_id == session_id, model.status == "candidate")
+                                 .values(session_id=home))
+            await db.execute(delete(model).where(model.session_id == session_id, model.status != "candidate"))
+        await db.execute(delete(AssistantMessage).where(AssistantMessage.session_id == session_id))
+        await db.execute(delete(AssistantRun).where(AssistantRun.session_id == session_id))
+        await db.execute(delete(AssistantSessionSummary).where(AssistantSessionSummary.session_id == session_id))
+        await db.execute(delete(AssistantSession).where(
+            AssistantSession.id == session_id, AssistantSession.project_id == project_id))
+
+    async def verify() -> bool:
+        leftover = await db.scalar(select(AssistantMessage.id).where(AssistantMessage.session_id == session_id).limit(1))
+        return leftover is None and not await _exists(db, AssistantSession, session_id)
+
+    await write_verified(db, write, verify, "删除对话")
+
+
+async def delete_archived_sessions(db: AsyncSession, project_id: str) -> int:
+    """清空已归档的对话（当前对话不动），返回删了几段。"""
+    ids = list((await db.execute(select(AssistantSession.id).where(
+        AssistantSession.project_id == project_id, AssistantSession.archived.is_(True),
+    ))).scalars())
+    for session_id in ids:
+        await delete_session(db, project_id, session_id)
+    return len(ids)
 
 
 async def session_messages(db: AsyncSession, session_id: str) -> list[AssistantMessage]:
