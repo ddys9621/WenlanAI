@@ -21,7 +21,8 @@ TASK_KINDS: tuple[str, ...] = ("resolve", "advance", "plant")
 READER_KEYS: tuple[str, ...] = ("waiting", "payoff", "gap")
 READER_LABELS = {"waiting": "读者在等", "payoff": "本章兑现", "gap": "信息差"}
 READER_LIMIT = 160
-PAYOFF_HINT = "（给足：不一句带过，写出在场者的反应和主角实际拿到的东西）"
+# 「本章兑现」可能是一次真兑现，也可能只是蓄势章把期待推近一步：前半句两种都适用，后半句只管真兑现（不逼着硬凑围观的人）
+PAYOFF_HINT = "（落到具体的事上，不一句带过；是兑现就写出在场者的反应和主角实际拿到的东西）"
 GAP_HINT = "（没揭开之前，不知情的人照着错的认知说话做事；本章揭开的话，看错的人要在场、有反应）"
 
 

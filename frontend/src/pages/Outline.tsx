@@ -854,7 +854,7 @@ function ChapterOutlinesView({ chapterOutlines, volumes, projectId, createChapte
             </div>
             <div className="space-y-4 rounded border border-surface-border bg-surface-paper p-4">
               <p className="text-xs leading-5 text-content-secondary">
-                <span className="font-medium text-content">读者线</span>：站在读者的位置写三句短话。写正文时「本章兑现」会单独写成一场，「信息差」揭开之前不知情的人不会突然知道；遵循度审校也核对这两句。都可以留空。
+                <span className="font-medium text-content">读者线</span>：站在读者的位置写三句短话。写正文时「本章兑现」会落到具体的事上、不一句带过，「信息差」揭开之前不知情的人不会突然知道；遵循度审校也核对这两句。都可以留空。
               </p>
               {READER_FIELDS.map((field) => (
                 <div key={field.key}>
