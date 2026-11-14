@@ -1,6 +1,7 @@
 """项目自定义提示词：只开放最影响成稿的写作指导，输出格式、作品资料、字段规则留在代码里自动拼接。
 
-- 每条有固定 key、默认文本（就是生成器里的原文）与可用变量；项目只存改过的条目，没改过的跟随系统默认
+- 每条有固定 key、默认文本（就是生成器里的原文；「读者视角」来自 reader_lens）与可用变量；项目只存改过的条目，
+  没改过的跟随系统默认
 - 类型 / 视角指导的默认值按项目当前的类型 / 视角选取：项目换了类型，没改过的条目跟着换
 - 生成时由调用方 load_overrides 后交给生成器（ChapterPromptInput.prompt_overrides、volume_planning 的 guide 参数等）
 """
@@ -78,6 +79,12 @@ PROMPT_SPECS: tuple[PromptSpec, ...] = (
         _chapter("chapter_style"),
         (PromptVariable("narrative_perspective", "本书叙事视角"),
          PromptVariable("perspective_boundary_clause", "视角信息边界（按本书视角自动生成的一条约束）")),
+    ),
+    PromptSpec(
+        "reader_lens", "chapter", "读者视角",
+        "站在读者的位置写：用好读者知道而场内人不知道的事、让期待等得值、兑现给足、每章有收获、章末停在半空。"
+        "整章生成和助笔的续写 / 改写都带上；清空保存就是不用这一段。",
+        _chapter("reader_lens"),
     ),
     PromptSpec(
         "chapter_closing", "chapter", "落笔提醒",

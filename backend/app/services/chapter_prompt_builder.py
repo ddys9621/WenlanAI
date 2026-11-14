@@ -4,8 +4,9 @@
 「MCP 参考资料」、收尾一律"停在钩子上"与兑现章"不留钩子"冲突、多处"最高优先级 / 禁止自由发挥"互相打架。
 
 这里：
-- system：人设 + 视角 / 类型指导 + 文风 + 平台写法 + 项目风格 + 写作优先级（只说一次）+ 输出要求——跨章稳定，
-  可命中各家的前缀缓存
+- system：人设 + 视角 / 类型指导 + 读者视角（reader_lens）+ 文风 + 平台写法 + 项目风格 + 写作优先级（只说一次）+
+  输出要求——跨章稳定，可命中各家的前缀缓存；build_writing_system 是正文写法 system 的唯一出口，
+  助笔的续写 / 改写 / 润色也用它（不带整章才有的写作优先级与输出要求）
 - user：作品设定 → 前情脉络（层级摘要）→ 近期剧情 → 相关旧事 → 出场角色与状态 → 地图与方位 → 叙事账本 → 参考资料 →
   上一章正文 → 本段章纲 → 本章任务（章纲 / 叙事任务 / 结构要求 / 字数 / 用户微调）→ 收尾
 - 全部上下文过预算器（context_budget），本章任务与收尾永不裁剪
@@ -17,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, Optional
 
+from app.services import reader_lens as lens
 from app.services.context_budget import ContextSection, budget_report, clip_text, fit_sections, render_sections
 from app.services.prompt_service import CHAPTER_OUTPUT_INSTRUCTION, CHAPTER_STYLE_RULES, PromptService
 from app.utils.prompt_safety import UNTRUSTED_DATA_RULE, quote_untrusted
@@ -109,6 +111,7 @@ def chapter_prompt_defaults(genre: str, narrative_perspective: str) -> dict[str,
     return {
         "chapter_persona": SYSTEM_PERSONA,
         "chapter_style": CHAPTER_STYLE_TEMPLATE,
+        "reader_lens": lens.writing_lens(),
         "chapter_closing": CLOSING_HEAD,
         "chapter_priority": PRIORITY_RULES,
         "genre_guide": PromptService._resolve_genre_guide(genre or "").strip(),
@@ -122,27 +125,43 @@ def build_chapter_closing(hook_policy: str, imitation_style: bool = False, head:
     return f"{lead}{tail}\n\n{CHAPTER_OUTPUT_INSTRUCTION}"
 
 
-def _system_prompt(inp: ChapterPromptInput) -> str:
-    perspective = (inp.narrative_perspective or "").strip() or "第三人称"
-    texts = {**chapter_prompt_defaults(inp.genre, perspective), **inp.prompt_overrides}
+def build_writing_system(
+    *, genre: str, narrative_perspective: str, platform_block: str = "", style_content: str = "",
+    imitation_style: str = "", prompt_overrides: Optional[Mapping[str, str]] = None,
+    reader_lens: bool = True, whole_chapter: bool = True,
+) -> str:
+    """正文写法的 system：整章生成与助笔续写 / 改写 / 润色共用。
+
+    whole_chapter=False（只写一段）不带写作优先级、资料边界与输出要求，调用方接自己的；reader_lens=False 不带读者视角段
+    （润色只改措辞，不动情节安排）。
+    """
+    perspective = (narrative_perspective or "").strip() or "第三人称"
+    texts = {**chapter_prompt_defaults(genre, perspective), **(prompt_overrides or {})}
     style = render_vars(texts["chapter_style"], {
         "narrative_perspective": perspective,
         "perspective_boundary_clause": PromptService._build_perspective_boundary_clause(perspective),
     })
-    imitation_style = (inp.imitation_style or "").strip()
+    imitation_style = (imitation_style or "").strip()
     parts = [
         texts["chapter_persona"],
         texts["perspective_guide"],
         texts["genre_guide"],
+        texts["reader_lens"] if reader_lens else "",
         f"{IMITATION_STYLE_TITLE}\n{imitation_style}" if imitation_style else "",
         style,
-        inp.platform_block,
-        inp.style_content,
-        texts["chapter_priority"],
-        UNTRUSTED_DATA_RULE,
-        f"## 输出\n{CHAPTER_OUTPUT_INSTRUCTION}",
+        platform_block,
+        style_content,
     ]
-    return "\n\n".join(text for text in (p.strip() for p in parts) if text)
+    if whole_chapter:
+        parts += [texts["chapter_priority"], UNTRUSTED_DATA_RULE, f"## 输出\n{CHAPTER_OUTPUT_INSTRUCTION}"]
+    return "\n\n".join(text for text in ((p or "").strip() for p in parts) if text)
+
+
+def _system_prompt(inp: ChapterPromptInput) -> str:
+    return build_writing_system(
+        genre=inp.genre, narrative_perspective=inp.narrative_perspective, platform_block=inp.platform_block,
+        style_content=inp.style_content, imitation_style=inp.imitation_style, prompt_overrides=inp.prompt_overrides,
+    )
 
 
 def _setting_text(inp: ChapterPromptInput) -> str:

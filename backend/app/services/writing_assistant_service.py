@@ -6,6 +6,8 @@
   出场人物与世界观要点（续写 / 改写 / 润色时带上，人物和设定别走样）
 - 修改类结果只是候选稿：改写 / 润色 = 替换选区（replace_range），续写 = 接在末尾（append）；采用走候选稿接口
 - 提问 / 核对只回答，不产生候选稿、不动正文
+- 续写 / 改写 / 润色的 system 和整章生成是同一个 build_writing_system（项目提示词、默认写作风格、平台写法、参考文风、
+  读者视角），后面接助笔自己的边界；润色只改措辞，不带读者视角
 """
 from __future__ import annotations
 
@@ -20,17 +22,24 @@ from app.models.chapter_consistency_issue import ChapterConsistencyIssue
 from app.models.chapter_outline import ChapterOutline
 from app.models.character import Character
 from app.models.project import Project
+from app.models.project_default_style import ProjectDefaultStyle
+from app.models.writing_style import WritingStyle
 from app.services.chapter_candidate_service import candidate_summary, create_candidate
 from app.services.chapter_context_service import parse_json_list
+from app.services.chapter_prompt_builder import build_writing_system
 from app.services.chapter_version_service import content_hash
+from app.services.knowledge.kb_context import build_kb_context
 from app.services.narrative_tasks import render_narrative_tasks
 from app.services.outline_contract import forbidden_items
 from app.services.planning_context import clip
+from app.services.platform_presets import platform_block
+from app.services.project_prompts import load_overrides
 from app.utils.prompt_safety import UNTRUSTED_DATA_RULE, quote_untrusted
 
 SKILL_LABELS = {"continue": "续写", "rewrite": "改写", "polish": "润色", "review": "核对", "query": "提问"}
 MODIFYING_SKILLS = {"continue", "rewrite", "polish"}
 SELECTION_SKILLS = {"rewrite", "polish"}
+LENS_SKILLS = {"continue", "rewrite"}  # 润色只改措辞：读者视角管的是情节怎么安排，不带
 
 # 以核对类动词开头的是祈使句（「检查一下有没有吃书」），先于问句判断
 _REVIEW_LEAD = re.compile(r"^(请|帮我|麻烦|你)?(检查|核对|审校|校对|挑错|挑挑|挑毛病|查查|查一下|审一下|校一下|找找问题)")
@@ -61,6 +70,27 @@ ASSISTANT_SYSTEM = (
     "前文资料里找不到依据就直说「前文没有找到依据」，不要编造之前发生过的事。不要擅自改动作者没让你改的内容。\n\n"
     + UNTRUSTED_DATA_RULE
 )
+# 续写 / 改写 / 润色：接在正文写法 system 后面的助笔边界
+WRITING_RULE = (
+    "你现在帮作者处理当前这一章里的一段：只按作者的指令和给出的资料写，人名、称呼、设定不变，"
+    "不要擅自改动作者没让你改的内容。\n\n" + UNTRUSTED_DATA_RULE
+)
+
+
+async def writing_system(db: AsyncSession, project: Project, outline: Optional[ChapterOutline], skill: str) -> str:
+    """续写 / 改写 / 润色的 system：和整章生成同一套写法；写作风格用项目默认的那份（共创室写正文也是它）。"""
+    style = (await db.execute(
+        select(WritingStyle.prompt_content)
+        .join(ProjectDefaultStyle, ProjectDefaultStyle.style_id == WritingStyle.id)
+        .where(ProjectDefaultStyle.project_id == project.id)
+    )).scalars().first()
+    kb = await build_kb_context(db, project.id, "chapter", outline=outline)
+    base = build_writing_system(
+        genre=project.genre or "", narrative_perspective=project.narrative_perspective or "",
+        platform_block=platform_block(project.platform_preset), style_content=style or "", imitation_style=kb.style,
+        prompt_overrides=await load_overrides(db, project.id), reader_lens=skill in LENS_SKILLS, whole_chapter=False,
+    )
+    return f"{base}\n\n{WRITING_RULE}"
 
 
 def resolve_skill(message: str, *, has_selection: bool, preferred: Optional[str] = None) -> str:
@@ -270,7 +300,8 @@ async def load_tools(db: AsyncSession, chapter: Chapter) -> dict:
     cast = list((await db.execute(select(Character).where(
         Character.project_id == chapter.project_id, Character.name.in_(names),
     ))).scalars().all()) if names else []
-    return {"outline": outline, "prior": prior, "issues": issues, "cast": cast_text(cast), "world": world_text(project)}
+    return {"outline": outline, "prior": prior, "issues": issues, "cast": cast_text(cast), "world": world_text(project),
+            "project": project}
 
 
 async def execute_skill(
@@ -298,9 +329,12 @@ async def execute_skill(
 
     prompt = build_prompt(skill, message=message, chapter=chapter, outline=tools["outline"], selection=selection,
                           evidence=evidence, issues=tools["issues"], cast=tools["cast"], world=tools["world"])
+    system = ASSISTANT_SYSTEM
+    if skill in MODIFYING_SKILLS and tools["project"] is not None:
+        system = await writing_system(db, tools["project"], tools["outline"], skill)
     full = ""
     async for chunk in ai_service.generate_text_stream(
-        prompt=prompt, system_prompt=ASSISTANT_SYSTEM, creative=skill in MODIFYING_SKILLS,
+        prompt=prompt, system_prompt=system, creative=skill in MODIFYING_SKILLS,
     ):
         full += chunk
         if on_chunk:
