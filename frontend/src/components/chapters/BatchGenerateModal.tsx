@@ -82,7 +82,7 @@ export function BatchGenerateModal({ open, chapters, onClose, onStart }: BatchGe
           {option(qualityGate, setQualityGate, '质量闸门',
             '（AI 味分过高或字数严重不足时自动重写一次）')}
           {option(adherenceGate, setAdherenceGate, '章纲遵循度审校',
-            '（漏写关键事件、没写到章末落点、抢跑下一章、新增未确认设定时重写一次；每章多一次模型调用）')}
+            '（漏写关键事件、没写到章末落点、抢跑下一章、新增未确认设定、叙事任务（伏笔 / 本章兑现）没完成时重写一次；每章多一次模型调用）')}
           {option(requireConfirmedOutline, setRequireConfirmedOutline, '只写已确认的章纲',
             '（遇到 AI 草拟未确认、或上游卷纲 / 总纲改过的章纲就停下，先去确认）')}
           {option(autoExpand, setAutoExpand, '缺章纲时自动规划',
