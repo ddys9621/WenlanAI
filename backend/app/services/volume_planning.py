@@ -12,6 +12,7 @@ import math
 import re
 from typing import Any, Optional
 
+from app.services.narrative_tasks import parse_reader_line
 from app.utils.json_cleaner import safe_parse_json
 from app.utils.prompt_template import render_vars
 
@@ -171,6 +172,7 @@ CHAPTERS_GUIDE = "\n".join((
     "- 按单元故事里实际发生的事件和场景顺序分章；每章都要让局面、关系或信息至少一项发生变化，不要原地打转，也不要为了凑章数把一句话的小事拆成一章",
     "- plot_points 用自然段写清：谁在什么处境下做了什么、别人怎样回应、结果如何（200-400 字）",
     "- key_events 3-6 条，按发生顺序；最后一条是章末落点，通常留下一个未闭合的问题或新的变化；单元最后一章收束这件事并引出下一件事",
+    "- 先定这件事的兑现落在哪一章：前面的章把期待一步步推近，兑现之后的章写余波和新的期待；每章的 reader 三句照这个安排填",
     f"- {ABILITY_RULE}",
 ))
 
@@ -215,7 +217,10 @@ CHAPTERS_RULES = """- {pov_rule}
 - 章节契约：entry_state 承接上一章的 exit_state（本次第一章承接【上一章结尾】）；exit_state = 章末落点完成后停在哪；
   forbidden 1-3 条本章绝不能发生 / 揭晓的事（通常是后面章节才发生的关键事件）
 - narrative_tasks：resolve = 本章回收的旧伏笔（promise_id 填【当前未回收的伏笔】里的编号如 P3，how 写怎么回收）；advance = 顺带推进的旧伏笔；
-  plant = 新埋的伏笔（payoff_after = 计划多少章后回收）；没有合适的就留空"""
+  plant = 新埋的伏笔（payoff_after = 计划多少章后回收）；没有合适的就留空
+- reader（读者线，三句短话，各 60 字内）：waiting = 读者带着什么期待读这一章（他最想看到哪件事）；payoff = 本章给读者的
+  （兑现了什么；蓄势章写把哪个期待推近了哪一步）；gap = 信息差（读者知道而场内谁不知道什么，或主角瞒着读者什么；
+  写明本章保持还是揭开）；没有就留空字符串"""
 
 CHAPTERS_OUTPUT = """# 输出（纯 JSON 数组，{count} 个对象，chapter_number 从 {start} 到 {end}，不要 markdown）
 [
@@ -231,7 +236,8 @@ CHAPTERS_OUTPUT = """# 输出（纯 JSON 数组，{count} 个对象，chapter_nu
     "forbidden": ["本章不能提前发生的事"],
     "characters_involved": ["角色1", "角色2"],
     "target_word_count": {words},
-    "narrative_tasks": {{"resolve": [], "advance": [], "plant": []}}
+    "narrative_tasks": {{"resolve": [], "advance": [], "plant": []}},
+    "reader": {{"waiting": "读者在等什么", "payoff": "本章给读者的", "gap": "谁被蒙在鼓里（保持 / 揭开）"}}
   }}
 ]"""
 
@@ -349,6 +355,7 @@ def parse_chapter_outlines(raw: str, start: int, end: int) -> list[dict]:
             "characters_involved": _list(row.get("characters_involved"), 60, 20),
             "target_word_count": _words(row.get("target_word_count")),
             "narrative_tasks": tasks if isinstance(tasks, dict) else None,
+            "reader": parse_reader_line(row.get("reader")),
             "ref": _text(row.get("ref"), 20),
         })
     return out

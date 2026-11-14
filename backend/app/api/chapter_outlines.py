@@ -9,7 +9,7 @@ from app.api.deps import load_owned, verify_owned_ids, verify_request_project
 from app.database import get_db
 from app.logger import get_logger
 from app.services import outline_review_service as review
-from app.services.narrative_tasks import parse_narrative_tasks
+from app.services.narrative_tasks import parse_narrative_tasks, with_reader_line
 
 logger = get_logger(__name__)
 from app.models import ChapterOutline
@@ -80,6 +80,15 @@ def _dump_lists(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+def _columns(data: dict[str, Any], current_tasks: Any = None) -> dict[str, Any]:
+    """请求体 → 章纲列：列表转 JSON 文本；带了读者线就并进叙事任务 JSON（同一份里的伏笔任务原样保留）。"""
+    data = _dump_lists(data)
+    reader = data.pop("reader", None)
+    if reader is not None:
+        data["narrative_tasks"] = with_reader_line(current_tasks, reader)
+    return data
+
+
 async def _load_outline(db: AsyncSession, request: Request, outline_id: str) -> ChapterOutline:
     return await load_owned(db, request, ChapterOutline, outline_id, not_found=f"章纲不存在: {outline_id}")
 
@@ -134,7 +143,7 @@ async def create_chapter_outline(outline_data: ChapterOutlineCreate, request: Re
         )
         outline_data.order_index = (max_order_result.scalar() or 0) + 1
 
-    fields = _dump_lists(outline_data.model_dump(exclude={"project_id"}))
+    fields = _columns(outline_data.model_dump(exclude={"project_id"}))
     outline = ChapterOutline(project_id=outline_data.project_id, review_status=review.CONFIRMED, **fields)
     db.add(outline)
     await db.commit()
@@ -165,7 +174,7 @@ async def update_chapter_outline(
         if existing_result.scalars().first():
             raise HTTPException(status_code=400, detail=f"第{outline_data.chapter_number}章章纲已存在")
 
-    update_data = _dump_lists(outline_data.model_dump(exclude_unset=True))
+    update_data = _columns(outline_data.model_dump(exclude_unset=True), outline.narrative_tasks)
     if update_data:
         await db.execute(update(ChapterOutline).where(ChapterOutline.id == outline_id).values(**update_data))
         await db.commit()
@@ -242,7 +251,7 @@ async def batch_create_chapter_outlines(
         if existing_result.scalars().first():
             continue  # 跳过已存在的章节
 
-        fields = _dump_lists(outline_data.model_dump(exclude={"project_id"}))
+        fields = _columns(outline_data.model_dump(exclude={"project_id"}))
         outline = ChapterOutline(project_id=batch_data.project_id, review_status=review.CONFIRMED, **fields)
         db.add(outline)
         created_outlines.append(outline)

@@ -29,6 +29,9 @@ class ChapterOutlineCreate(ChapterOutlineBase):
     key_events: Optional[List[str]] = Field(None, description="关键事件列表，最后一条为章末钩子")
     characters_involved: Optional[List[str]] = Field(None, description="涉及角色名称列表")
     forbidden: Optional[List[str]] = Field(None, description="禁止事项：本章不能提前发生 / 揭晓的事")
+    reader: Optional[Dict[str, Any]] = Field(
+        None, description="读者线：{waiting 读者在等, payoff 本章兑现, gap 信息差}，存进 narrative_tasks.reader",
+    )
     volume_id: Optional[str] = Field(None, description="所属卷纲")
     unit_index: Optional[int] = Field(None, description="所属剧情单元序号", ge=1)
 
@@ -52,6 +55,9 @@ class ChapterOutlineUpdate(BaseModel):
     order_index: Optional[int] = Field(None, description="排序序号")
     key_events: Optional[List[str]] = Field(None, description="关键事件列表，最后一条为章末钩子")
     characters_involved: Optional[List[str]] = Field(None, description="涉及角色名称列表")
+    reader: Optional[Dict[str, Any]] = Field(
+        None, description="读者线（整份替换，{} = 清空；不传 = 不动）：{waiting, payoff, gap}",
+    )
 
 
 class ChapterOutlineResponse(ChapterOutlineBase):
@@ -62,7 +68,8 @@ class ChapterOutlineResponse(ChapterOutlineBase):
     characters_involved: Optional[List[str]] = Field(None, description="涉及角色名称列表")
     forbidden: Optional[List[str]] = Field(None, description="禁止事项")
     narrative_tasks: Optional[Dict[str, Any]] = Field(
-        None, description="本章叙事任务：{resolve:[{promise_id,title,how}], advance:[...], plant:[{title,content,payoff_after}]}",
+        None, description="本章叙事任务：{resolve:[{promise_id,title,how}], advance:[...], plant:[{title,content,payoff_after}], "
+                          "reader:{waiting,payoff,gap}（有读者线才带）}",
     )
     review_status: str = Field("confirmed", description="draft = AI 草拟待确认；confirmed = 已确认")
     confirmed_at: Optional[datetime] = Field(None, description="确认时间")

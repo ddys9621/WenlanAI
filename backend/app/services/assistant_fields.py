@@ -30,6 +30,7 @@ from app.models.world_rule import WorldRule
 from app.services import outline_review_service as outline_review
 from app.services import world_map_service as wms
 from app.services.character_rename_service import propagate_character_rename
+from app.services.narrative_tasks import READER_LIMIT, parse_narrative_tasks, with_reader_line
 from app.services.volume_planning import loads_units
 from app.services.world_map_service import load_map
 from app.utils.character_names import record_former_name
@@ -66,6 +67,7 @@ class FieldSpec:
     choices: tuple[str, ...] = ()  # 非空 = 文字字段只能取这些值（如设定条目分类）
     required: bool = False  # 文字字段不能清空（如设定条目名称）
     json_key: str = ""  # 非空 = 值存在 StoryOutline.content 这份 JSON 的这个键下（总纲按字段改，其余键原样保留）
+    task_key: str = ""  # 非空 = 章纲读者线的一句：值在 ChapterOutline.narrative_tasks 这份 JSON 的 reader[task_key]（伏笔任务不动）
     hidden: bool = False  # 不在目录里列出（只为让以前生成的候选还能应用 / 撤销）
     aliases: str = ""  # 页面上 / 作者口中的别的叫法，定位内容时一起比对（如「时代背景」也叫「时间背景」）
     detail: bool = False  # 值存在组织详情表（organizations，按 character_id 一对一），不在 characters 表上
@@ -152,6 +154,13 @@ _SPECS = [
     _spec("chapter_outline", "exit_state", "退出状态", max_length=2000),
     _spec("chapter_outline", "key_events", "关键事件", kind="list", max_length=300, max_items=20),
     _spec("chapter_outline", "forbidden", "禁止事项", kind="list", max_length=300, max_items=20),
+    # 读者线（写法见 reader_lens）：三句短话，正文任务和遵循度审校都照它来
+    _spec("chapter_outline", "reader_waiting", "读者在等", task_key="waiting", max_length=READER_LIMIT,
+          aliases="读者线 读者期待 期待"),
+    _spec("chapter_outline", "reader_payoff", "本章兑现", task_key="payoff", max_length=READER_LIMIT,
+          aliases="读者线 兑现 爽点"),
+    _spec("chapter_outline", "reader_gap", "信息差", task_key="gap", max_length=READER_LIMIT,
+          aliases="读者线 谁不知道 瞒着谁"),
     # 卷纲：剧情单元是结构化的（章号区间要连续覆盖），拆单元交给 detail_volume，这里只开放文字部分
     _spec("volume", "title", "卷名", max_length=200, required=True),
     _spec("volume", "goal", "目标与核心冲突", max_length=5000, aliases="目标 冲突"),
@@ -354,9 +363,15 @@ async def _entity_rows(db: AsyncSession, project_id: str, entity: str) -> list[A
     )).scalars().all())
 
 
+def _reader_line(outline: Any) -> dict[str, str]:
+    return parse_narrative_tasks(outline.narrative_tasks).get("reader") or {}
+
+
 def get_value(spec: FieldSpec, obj: Any) -> Any:
     if spec.entity == "volume_unit":
         return str(obj.unit.get(spec.attr) or "")
+    if spec.task_key:
+        return _reader_line(obj).get(spec.task_key, "")
     if spec.json_key:
         value = parse_story_outline_fields(obj.content).get(spec.json_key)
         return [str(x) for x in value or []] if spec.kind == "list" else str(value or "")
@@ -582,7 +597,9 @@ async def write_field(db: AsyncSession, project_id: str, field_id: str, target_i
         # 与角色页改名相同：别处的名字快照一并改掉，旧名记进曾用名
         await propagate_character_rename(db, project_id, obj.name, normalized)
         obj.aliases = record_former_name(obj.aliases, obj.name, normalized)
-    if spec.json_key:
+    if spec.task_key:
+        obj.narrative_tasks = with_reader_line(obj.narrative_tasks, {**_reader_line(obj), spec.task_key: normalized})
+    elif spec.json_key:
         obj.content = _with_outline_key(obj.content, spec.json_key, normalized)
     elif spec.detail:
         detail = getattr(obj, "_org_detail", None) or await ensure_organization_record(obj, db)

@@ -12,6 +12,7 @@ import type { AssistantDataChange } from '@/store/assistantStore'
 import { useAIJobsStore, useRunningAIJobs } from '@/store/aiJobsStore'
 import { outlineApi, chapterOutlineApi } from '@/services/api'
 import { OUTLINE_BUSY_KINDS, OUTLINE_JOB_KIND, outlineGenerationDefaults, outlineGenerationPayload } from '@/utils/outlineGeneration'
+import { READER_FIELDS, readerForm, readerPayload, readerRows } from '@/utils/readerLine'
 import { VolumesView } from '@/components/outline/VolumesView'
 import { MCPSelector } from '@/components/MCPSelector'
 import { KbCitationChips } from '@/components/knowledge/KbCitationChips'
@@ -532,7 +533,7 @@ export function OutlinesView({ outlines, projectId, project, createOutline, upda
 // ==================== Tab 4: 章纲 ====================
 const EMPTY_CHAPTER_OUTLINE_FORM = {
   chapter_number: 1, title: '', plot_points: '', scene: '', pov: '', target_word_count: 3000,
-  key_events: '', entry_state: '', exit_state: '', forbidden: '',
+  key_events: '', entry_state: '', exit_state: '', forbidden: '', reader: readerForm(),
 }
 
 const splitLines = (text: string) => text.split('\n').map((s) => s.trim()).filter(Boolean)
@@ -588,7 +589,7 @@ function ChapterOutlinesView({ chapterOutlines, volumes, projectId, createChapte
       chapter_number: co.chapter_number, title: co.title, plot_points: co.plot_points || '', scene: co.scene || '',
       pov: co.pov || '', target_word_count: co.target_word_count,
       key_events: (co.key_events || []).join('\n'), entry_state: co.entry_state || '', exit_state: co.exit_state || '',
-      forbidden: (co.forbidden || []).join('\n'),
+      forbidden: (co.forbidden || []).join('\n'), reader: readerForm(co.narrative_tasks?.reader),
     })
     setShowModal(true)
   }
@@ -601,6 +602,7 @@ function ChapterOutlinesView({ chapterOutlines, volumes, projectId, createChapte
       entry_state: form.entry_state.trim(),
       exit_state: form.exit_state.trim(),
       forbidden: splitLines(form.forbidden),
+      reader: readerPayload(form.reader),
     }
     try {
       if (editing) {
@@ -761,8 +763,9 @@ function ChapterOutlinesView({ chapterOutlines, volumes, projectId, createChapte
                         ))}
                       </div>
                     )}
-                    {(co.exit_state || (co.forbidden?.length ?? 0) > 0) && (
+                    {(co.exit_state || (co.forbidden?.length ?? 0) > 0 || co.narrative_tasks?.reader?.payoff) && (
                       <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-content-tertiary">
+                        {co.narrative_tasks?.reader?.payoff && <span>给读者：{co.narrative_tasks.reader.payoff}</span>}
                         {co.exit_state && <span>写到：{co.exit_state}</span>}
                         {(co.forbidden?.length ?? 0) > 0 && <span>禁止：{co.forbidden!.join('；')}</span>}
                       </div>
@@ -848,6 +851,21 @@ function ChapterOutlinesView({ chapterOutlines, volumes, projectId, createChapte
                 <label className="hh-label">禁止事项（每行一条：本章不能写的事）</label>
                 <textarea value={form.forbidden} onChange={e => setForm(f => ({ ...f, forbidden: e.target.value }))} rows={2} placeholder="如：不能揭露师父的真实身份" className="hh-textarea" />
               </div>
+            </div>
+            <div className="space-y-4 rounded border border-surface-border bg-surface-paper p-4">
+              <p className="text-xs leading-5 text-content-secondary">
+                <span className="font-medium text-content">读者线</span>：站在读者的位置写三句短话。写正文时「本章兑现」会单独写成一场，「信息差」揭开之前不知情的人不会突然知道；遵循度审校也核对这两句。都可以留空。
+              </p>
+              {READER_FIELDS.map((field) => (
+                <div key={field.key}>
+                  <label className="hh-label">{field.label}</label>
+                  <textarea
+                    value={form.reader[field.key]}
+                    onChange={e => setForm(f => ({ ...f, reader: { ...f.reader, [field.key]: e.target.value } }))}
+                    rows={2} maxLength={160} placeholder={field.hint} className="hh-textarea"
+                  />
+                </div>
+              ))}
             </div>
           </div>
         </Modal>
@@ -965,6 +983,14 @@ function ChapterOutlinesView({ chapterOutlines, volumes, projectId, createChapte
                     </ul>
                   </div>
                 )}
+              </div>
+            )}
+            {readerRows(viewingChapterOutline.narrative_tasks?.reader).length > 0 && (
+              <div className="hh-subpanel space-y-2 p-4 text-sm">
+                <p className="text-xs font-medium text-content-tertiary">读者线</p>
+                {readerRows(viewingChapterOutline.narrative_tasks?.reader).map((row) => (
+                  <p key={row.label}><span className="text-xs font-medium text-content-tertiary">{row.label}：</span>{row.text}</p>
+                ))}
               </div>
             )}
             {viewingChapterOutline.narrative_tasks && (

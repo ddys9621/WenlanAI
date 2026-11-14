@@ -202,7 +202,7 @@ def _task_text(inp: ChapterPromptInput, closing: str) -> str:
     high = int(inp.target_word_count * (1 + inp.word_soft_range))
     parts = [f"写第{inp.chapter_number}章《{inp.chapter_title}》。", "本章章纲：\n" + inp.chapter_outline_text.strip()]
     if inp.narrative_tasks.strip():
-        parts.append("本章叙事任务（伏笔 / 承诺）：\n" + inp.narrative_tasks.strip())
+        parts.append("本章叙事任务（读者线 / 伏笔）：\n" + inp.narrative_tasks.strip())
     if inp.structure_requirements.strip():
         parts.append("本章结构要求：\n" + inp.structure_requirements.strip())
     parts.append(

@@ -48,6 +48,16 @@ async def build_system_base_style(db: AsyncSession, ctx: Any) -> str:
 - ✅ 结尾停在具体动作、一句话或一个声音上，最好是钩子"""
 
 
+async def build_system_reader_lens(db: AsyncSession, ctx: Any) -> str:
+    """规划（分卷 / 细化 / 章纲）的写法内核（全局静态，可缓存）：站在读者的位置规划。
+
+    规划产出的是 JSON 大纲，不写正文，所以这里不放正文文风；和正文的「读者视角」、审稿清单取自同一份 reader_lens。
+    """
+    from app.services import reader_lens
+
+    return reader_lens.planning_lens()
+
+
 # ============================================================
 # user 段 业务 builder
 # ============================================================
@@ -294,6 +304,7 @@ SLOT_BUILDERS: dict[str, Callable[[AsyncSession, Any], Awaitable[str]]] = {
     # system 段
     "system_role":            build_system_role,
     "system_base_style":      build_system_base_style,
+    "system_reader_lens":     build_system_reader_lens,     # 规划场景：读者视角（规划版）
     # user 段 - 必填业务
     "project_skeleton":       build_project_skeleton,
     "chapter_outline":        build_chapter_outline,

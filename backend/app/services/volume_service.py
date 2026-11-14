@@ -23,7 +23,7 @@ from app.models.story_outline import StoryOutline
 from app.models.volume import Volume
 from app.services import outline_review_service as outline_review
 from app.services import volume_planning as vp
-from app.services.narrative_tasks import has_tasks, normalize_narrative_tasks
+from app.services.narrative_tasks import has_tasks, normalize_narrative_tasks, parse_narrative_tasks
 from app.services.planning_context import (
     actual_progress_block,
     clip,
@@ -301,6 +301,9 @@ async def _previous_chapter_block(db: AsyncSession, project_id: str, chapter_num
         lines.append(f"- 停在：{clip(prev.exit_state, 300)}")
     if prev.plot_points:
         lines.append(f"- 经过：{clip(prev.plot_points, 300)}")
+    payoff = (parse_narrative_tasks(prev.narrative_tasks).get("reader") or {}).get("payoff")
+    if payoff:
+        lines.append(f"- 上一章给读者的：{payoff}（这一章换一种给法）")
     return "\n".join(lines)
 
 
@@ -370,6 +373,8 @@ async def generate_unit_outlines(
         batch_refs: list[tuple[ChapterOutline, str]] = []
         for row in vp.parse_chapter_outlines(content, b_start, b_end):
             tasks = normalize_narrative_tasks(_map_task_ids(row["narrative_tasks"], promise_ids), open_promises)
+            if row["reader"]:
+                tasks["reader"] = row["reader"]
             outline = ChapterOutline(
                 project_id=volume.project_id, chapter_number=row["chapter_number"], title=row["title"],
                 scene=row["scene"], pov=row["pov"], plot_points=row["plot_points"],

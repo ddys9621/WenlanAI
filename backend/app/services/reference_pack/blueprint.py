@@ -52,7 +52,7 @@ class Slot:
 # 注：所有 4 档基础占用大致一致，XL 档放宽 project_skeleton 等
 BUSINESS_SLOT_TOKENS: dict[ModelTier, dict[str, int]] = {
     "S": {
-        "system_role": 100, "system_base_style": 700,
+        "system_role": 100, "system_base_style": 700, "system_reader_lens": 900,
         "project_skeleton": 1200, "chapter_outline": 400,
         "project_characters": 400, "world_rules_table": 300,
         "world_map": 120, "setting_entries": 250, "cast_relations": 200,
@@ -61,7 +61,7 @@ BUSINESS_SLOT_TOKENS: dict[ModelTier, dict[str, int]] = {
         "output_spec": 150,
     },
     "M": {
-        "system_role": 100, "system_base_style": 700,
+        "system_role": 100, "system_base_style": 700, "system_reader_lens": 900,
         "project_skeleton": 2000, "chapter_outline": 500,
         "project_characters": 600, "world_rules_table": 400, "world_map": 400,
         "setting_entries": 400, "cast_relations": 300,
@@ -70,7 +70,7 @@ BUSINESS_SLOT_TOKENS: dict[ModelTier, dict[str, int]] = {
         "output_spec": 150,
     },
     "L": {
-        "system_role": 100, "system_base_style": 700,
+        "system_role": 100, "system_base_style": 700, "system_reader_lens": 900,
         "project_skeleton": 2500, "chapter_outline": 500,
         "project_characters": 800, "world_rules_table": 600, "world_map": 600,
         "setting_entries": 500, "cast_relations": 400,
@@ -79,7 +79,7 @@ BUSINESS_SLOT_TOKENS: dict[ModelTier, dict[str, int]] = {
         "output_spec": 150,
     },
     "XL": {
-        "system_role": 100, "system_base_style": 700,
+        "system_role": 100, "system_base_style": 700, "system_reader_lens": 900,
         "project_skeleton": 2800, "chapter_outline": 500,
         "project_characters": 1200, "world_rules_table": 800, "world_map": 800,
         "setting_entries": 800, "cast_relations": 600,
@@ -137,7 +137,8 @@ SCENE_BUSINESS_TEMPLATES: dict[str, list[str]] = {
         "output_spec",
     ],
     "chapter_outline": [
-        "system_role", "system_base_style",
+        # system 段：规划不写正文，放读者视角（规划版）而不是正文文风
+        "system_role", "system_reader_lens",
         "project_skeleton", "project_characters", "world_rules_table", "setting_entries", "cast_relations", "world_map",
         "output_spec",
     ],
@@ -146,8 +147,8 @@ SCENE_BUSINESS_TEMPLATES: dict[str, list[str]] = {
         "project_skeleton", "output_spec",
     ],
     "volume_planning": [
-        # system 段：基础规则
-        "system_role", "system_base_style",
+        # system 段：角色 + 读者视角（规划版）
+        "system_role", "system_reader_lens",
         # user 段：项目骨架 → 本书角色 → 世界规则表 → 设定条目 → 人物关系与组织归属 → 世界地图 → 输出要求
         # （总纲 / 卷纲由卷纲服务拼在后面）
         "project_skeleton", "project_characters", "world_rules_table", "setting_entries", "cast_relations", "world_map",
@@ -180,7 +181,7 @@ def _make_business_slot(slot_name: str, tier: ModelTier) -> Slot:
     if slot_name == "system_role":
         return Slot(slot_name, max_tokens, "system", required=True,
                     cacheable=True, cache_tier="global")
-    if slot_name == "system_base_style":
+    if slot_name in ("system_base_style", "system_reader_lens"):
         return Slot(slot_name, max_tokens, "system", required=True,
                     cacheable=True, cache_tier="global")
     if slot_name == "project_skeleton":

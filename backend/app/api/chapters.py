@@ -817,7 +817,8 @@ async def run_chapter_generation(job, *, chapter_id: str, user_id: str, ai_servi
             st_review = begin_stage("review", "章纲遵循度审校")
             job.progress('🔎 审校是否照章纲写…', 93)
             adherence = await review_candidate(
-                ai_service, chapter_outline, full_content, render_narrative_tasks(planned_tasks_raw, chapter_number),
+                ai_service, chapter_outline, full_content,
+                render_narrative_tasks(planned_tasks_raw, chapter_number, for_review=True),
             )
             st_review.done(status=adherence.get("status"), passed=adherence.get("passed"),
                            issues=len(adherence.get("issues") or []))

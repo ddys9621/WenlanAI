@@ -6,16 +6,26 @@
 - plant：本章要埋下的新伏笔（含计划多少章后回收）
 写作时把任务明确写进「本章任务」；分析时把计划回收章交给分析模型填 deadline_chapter，
 承诺清单据此按计划区间预警，而不是一律"5 章没提就掉线"。
+
+同一份 JSON 里还有「读者线」（reader：三句短话，写法见 reader_lens）：
+- waiting：读者带着什么期待读这一章；payoff：本章给读者的兑现；gap：信息差（谁被蒙在鼓里，保持还是揭开）
+没有读者线的章纲不带 reader 键（解析结果与以前一致）。写作口吻三行都进本章任务；审校口吻不带 waiting（它是背景，
+不是要核对的任务）；分析口吻不带读者线。
 """
 from __future__ import annotations
 
 import json
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional
 
 TASK_KINDS: tuple[str, ...] = ("resolve", "advance", "plant")
+READER_KEYS: tuple[str, ...] = ("waiting", "payoff", "gap")
+READER_LABELS = {"waiting": "读者在等", "payoff": "本章兑现", "gap": "信息差"}
+READER_LIMIT = 160
+PAYOFF_HINT = "（给足：不一句带过，写出在场者的反应和主角实际拿到的东西）"
+GAP_HINT = "（没揭开之前，不知情的人照着错的认知说话做事；本章揭开的话，看错的人要在场、有反应）"
 
 
-def _empty() -> dict[str, list[dict[str, Any]]]:
+def _empty() -> dict[str, Any]:
     return {kind: [] for kind in TASK_KINDS}
 
 
@@ -31,8 +41,24 @@ def _int(value: Any) -> int | None:
     return number if number > 0 else None
 
 
-def parse_narrative_tasks(raw: Any) -> dict[str, list[dict[str, Any]]]:
-    """JSON 文本 / dict → 规整结构；坏数据一律退化为空任务。"""
+def parse_reader_line(raw: Any) -> dict[str, str]:
+    """读者线：只留认识的、有内容的键。"""
+    data = raw if isinstance(raw, dict) else {}
+    return {key: text for key in READER_KEYS if (text := _clip(data.get(key), READER_LIMIT))}
+
+
+def with_reader_line(raw: Any, reader: Any) -> Optional[str]:
+    """把读者线写进章纲的叙事任务 JSON（伏笔任务原样保留）；整份都空了返回 None。"""
+    tasks = parse_narrative_tasks(raw)
+    tasks.pop("reader", None)
+    line = parse_reader_line(reader)
+    if line:
+        tasks["reader"] = line
+    return json.dumps(tasks, ensure_ascii=False) if has_tasks(tasks) else None
+
+
+def parse_narrative_tasks(raw: Any) -> dict[str, Any]:
+    """JSON 文本 / dict → 规整结构；坏数据一律退化为空任务。有读者线才带 reader 键。"""
     data: Any = raw
     if isinstance(raw, str):
         try:
@@ -57,10 +83,13 @@ def parse_narrative_tasks(raw: Any) -> dict[str, list[dict[str, Any]]]:
                 "content": _clip(item.get("content") or item.get("title"), 160),
                 "payoff_after": _int(item.get("payoff_after")),
             })
+    reader = parse_reader_line(data.get("reader"))
+    if reader:
+        out["reader"] = reader
     return out
 
 
-def normalize_narrative_tasks(raw: Any, open_promises: Iterable[Any]) -> dict[str, list[dict[str, Any]]]:
+def normalize_narrative_tasks(raw: Any, open_promises: Iterable[Any]) -> dict[str, Any]:
     """展开结果入库前校正：resolve / advance 只保留确实还没回收的承诺，标题以承诺表为准。"""
     tasks = parse_narrative_tasks(raw)
     by_id = {str(getattr(p, "id", "")): p for p in open_promises or []}
@@ -82,13 +111,25 @@ def task_promise_ids(raw: Any) -> set[str]:
 
 def has_tasks(raw: Any) -> bool:
     tasks = parse_narrative_tasks(raw)
-    return any(tasks[kind] for kind in TASK_KINDS)
+    return any(tasks[kind] for kind in TASK_KINDS) or bool(tasks.get("reader"))
 
 
-def render_narrative_tasks(raw: Any, chapter_number: int | None = None, *, for_analysis: bool = False) -> str:
-    """写作口吻（for_analysis=False）给正文「本章任务」；分析口吻给分析提示词（带计划回收章）。"""
+def _reader_lines(reader: dict[str, str], *, for_review: bool) -> list[str]:
+    lines = []
+    if reader.get("waiting") and not for_review:
+        lines.append(f"{READER_LABELS['waiting']}：{reader['waiting']}")
+    if reader.get("payoff"):
+        lines.append(f"- {READER_LABELS['payoff']}：{reader['payoff']}{PAYOFF_HINT}")
+    if reader.get("gap"):
+        lines.append(f"- {READER_LABELS['gap']}：{reader['gap']}{GAP_HINT}")
+    return lines
+
+
+def render_narrative_tasks(raw: Any, chapter_number: int | None = None, *, for_analysis: bool = False,
+                           for_review: bool = False) -> str:
+    """写作口吻给正文「本章任务」；审校口吻（for_review）给章纲遵循度审校；分析口吻（for_analysis）给分析提示词（带计划回收章）。"""
     tasks = parse_narrative_tasks(raw)
-    lines: list[str] = []
+    lines: list[str] = [] if for_analysis else _reader_lines(tasks.get("reader") or {}, for_review=for_review)
     for item in tasks["resolve"]:
         how = f"：{item['how']}" if item.get("how") else ""
         lines.append(f"- 必须回收「{item['title']}」{how}（写清楚真相 / 结果，让读者对上前文）")

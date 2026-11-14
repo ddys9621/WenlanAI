@@ -452,11 +452,19 @@ export interface ChapterBatchResult {
   message: string;
 }
 
-/** 本章叙事任务（章纲展开时规划：要回收 / 推进 / 埋下的伏笔） */
+/** 章纲读者线：读者在等什么 / 本章给读者什么 / 谁被蒙在鼓里（保持还是揭开）；正文任务和遵循度审校都照它来 */
+export interface ReaderLine {
+  waiting?: string;
+  payoff?: string;
+  gap?: string;
+}
+
+/** 本章叙事任务（章纲展开时规划：要回收 / 推进 / 埋下的伏笔；有读者线才带 reader） */
 export interface NarrativeTasks {
   resolve: { promise_id: string | null; title: string; how?: string }[];
   advance: { promise_id: string | null; title: string; how?: string }[];
   plant: { title: string; content: string; payoff_after?: number | null }[];
+  reader?: ReaderLine;
 }
 
 // 章节生成检查响应
@@ -1006,6 +1014,7 @@ export interface ChapterOutlineCreate {
   entry_state?: string;
   exit_state?: string;
   forbidden?: string[];
+  reader?: ReaderLine;
   // 旧字段（保留兼容）
   summary?: string;
   // 系统字段
@@ -1026,6 +1035,8 @@ export interface ChapterOutlineUpdate {
   entry_state?: string;
   exit_state?: string;
   forbidden?: string[];
+  /** 读者线整份替换（清空的那句后端会删掉）；不传 = 不动 */
+  reader?: ReaderLine;
   // 旧字段（保留兼容）
   summary?: string;
   // 系统字段
