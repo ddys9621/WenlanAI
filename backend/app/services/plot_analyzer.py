@@ -60,7 +60,8 @@ FACTS_PROMPT = """你是长篇网文的连续性编辑。读完下面这一章{s
    - 推进或重新提起「未回收清单」里的某条：action = advance，ref 填它的编号（如 P3）
    - 把清单里的某条彻底回收 / 解决：action = resolve，ref 填编号
    - 清单里没有的新坑：action = plant，ref 留空；同一个坑只写一次
-   - type = foreshadow / promise / mystery / conflict；priority = low / medium / high / critical
+   - type = foreshadow / promise / mystery / conflict / secret；priority = low / medium / high / critical
+   - secret = 信息差：读者已经知道、而重要人物还不知道的关键事实（隐藏的身份 / 实力 / 计划 / 真相）；content 写清真相、谁知情、谁被蒙在鼓里；只记值得读者等着看它揭开的；被蒙的人知道了一部分 = advance，真相公开或关键的人知道了 = resolve
    - deadline_chapter：新埋设且「本章计划叙事任务」给了计划回收章时填章号，否则 null
 8. relationships：人物关系的明确变化 [{{"from", "to", "delta", "reason_type", "reason", "status", "evidence"}}]
    delta = -100~100 的整数；reason_type = rescue / betrayal / alliance / misunderstanding / confession / rivalry / respect / hostility / other；status = active / broken / past / complicated

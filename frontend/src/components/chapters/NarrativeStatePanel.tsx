@@ -4,13 +4,14 @@ import { Loader2 } from 'lucide-react'
 import { CollapseSection } from '@/components/ui/CollapseSection'
 import { Pill, type PillTone } from '@/components/ui/Pill'
 import type { NormalizedAnalysisData } from '@/utils/chapterAnalysis'
+import { PROMISE_TYPE_LABELS } from '@/utils/ledger'
 
 const SEV_TONE: Record<string, PillTone> = { critical: 'red', high: 'orange', medium: 'gold', low: 'default' }
 const SEV_LABEL: Record<string, string> = { critical: '严重', high: '高', medium: '中', low: '低' }
 const SEV_BORDER: Record<string, string> = { critical: '#ef4444', high: '#f59e0b', medium: '#f59e0b' }
 const P_STATUS_TONE: Record<string, PillTone> = { open: 'brand', progressing: 'orange', resolved: 'green', broken: 'red' }
 const P_STATUS_LABEL: Record<string, string> = { open: '未解', progressing: '推进中', resolved: '已回收', broken: '已破裂' }
-const P_TYPE_LABEL: Record<string, string> = { foreshadow: '伏笔', promise: '承诺', mystery: '悬念', conflict: '冲突' }
+const P_TYPE_LABEL: Record<string, string> = PROMISE_TYPE_LABELS
 
 function Item({ accent, children }: { accent: string; children: ReactNode }) {
   return <div className="hh-subpanel border-l-[3px] p-3" style={{ borderLeftColor: accent }}>{children}</div>

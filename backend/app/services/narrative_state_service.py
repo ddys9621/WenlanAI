@@ -33,6 +33,7 @@ class NarrativeStateService:
         "promise": "promise",
         "mystery": "mystery",
         "conflict": "conflict",
+        "secret": "secret",  # 信息差：读者已经知道、重要人物还不知道的关键事实
     }
     PRIORITY_MAP = {"low": "low", "medium": "medium", "high": "high", "critical": "critical"}
     STATUS_MAP = {
@@ -52,7 +53,10 @@ class NarrativeStateService:
     VISIBILITY_MAP = {"public": "public", "private": "private", "secret": "secret"}
     RELATION_STATUS_MAP = {"active": "active", "broken": "broken", "past": "past", "complicated": "complicated"}
     PRIORITY_WEIGHT = {"critical": 4, "high": 3, "medium": 2, "low": 1}
-    TYPE_LABELS = {"foreshadow": "伏笔", "promise": "承诺", "mystery": "悬念", "conflict": "冲突"}
+    TYPE_LABELS = {"foreshadow": "伏笔", "promise": "承诺", "mystery": "悬念", "conflict": "冲突", "secret": "信息差"}
+    # 清单里每条内容留多少字：信息差要看得到「真相 / 谁知情 / 谁被蒙在鼓里」，多留一些
+    CONTENT_CLIP = {"secret": 100}
+    DEFAULT_CONTENT_CLIP = 60
     PRIORITY_LABELS = {"critical": "紧急", "high": "高", "medium": "中", "low": "低"}
     # 作者锁里 "*" 展开成全部可锁字段（作者新建的承诺：以作者为准，对账也不删）
     LOCKABLE_FIELDS = frozenset({
@@ -838,7 +842,7 @@ class NarrativeStateService:
         return "\n".join(lines) + "\n"
 
     def promise_line(self, item: Any, current_chapter: int) -> str:
-        """一条一行：[伏笔·高·推进中] 标题（第N章起，计划第M章前）⚠️旗标：内容。标题 30 字、内容 60 字封顶。"""
+        """一条一行：[伏笔·高·推进中] 标题（第N章起，计划第M章前）⚠️旗标：内容。标题 30 字、内容 60 字封顶（信息差 100 字）。"""
         status = self._promise_status_as_of(item, current_chapter)
         tags = [self.TYPE_LABELS.get(item.promise_type or "", item.promise_type or "伏笔"),
                 self.PRIORITY_LABELS.get(item.priority or "medium", "中")]
@@ -849,7 +853,8 @@ class NarrativeStateService:
         flag = self._promise_flag(item, current_chapter)
         title = (item.title or "")[:30]
         content = (item.content or "").strip()
-        detail = "" if not content or self._normalize_key(content) == self._normalize_key(item.title) else f"：{content[:60]}"
+        clip = self.CONTENT_CLIP.get(item.promise_type or "", self.DEFAULT_CONTENT_CLIP)
+        detail = "" if not content or self._normalize_key(content) == self._normalize_key(item.title) else f"：{content[:clip]}"
         return f"- [{'·'.join(tags)}] {title}（第{item.source_chapter_number}章起{plan}）{flag.strip()}{detail}"
 
     @staticmethod

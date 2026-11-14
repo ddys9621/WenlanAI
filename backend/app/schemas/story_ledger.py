@@ -3,11 +3,13 @@ from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+PromiseType = Literal["foreshadow", "promise", "mystery", "conflict", "secret"]  # secret = 信息差
+
 
 class PromiseCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
     content: Optional[str] = Field(None, max_length=1000)
-    promise_type: Literal["foreshadow", "promise", "mystery", "conflict"] = "foreshadow"
+    promise_type: PromiseType = "foreshadow"
     priority: Literal["low", "medium", "high", "critical"] = "medium"
     source_chapter_number: int = Field(..., ge=1)
     deadline_chapter: Optional[int] = Field(None, ge=1)
@@ -16,7 +18,7 @@ class PromiseCreate(BaseModel):
 class PromiseUpdate(BaseModel):
     title: Optional[str] = Field(None, max_length=200)
     content: Optional[str] = Field(None, max_length=1000)
-    promise_type: Optional[Literal["foreshadow", "promise", "mystery", "conflict"]] = None
+    promise_type: Optional[PromiseType] = None
     priority: Optional[Literal["low", "medium", "high", "critical"]] = None
     deadline_chapter: Optional[int] = Field(None, ge=0, description="0 = 清除计划回收章")
     status: Optional[Literal["open", "resolved", "abandoned"]] = None

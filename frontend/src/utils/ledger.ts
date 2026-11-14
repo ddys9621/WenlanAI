@@ -2,8 +2,9 @@
 import type { PillTone } from '@/components/ui/Pill'
 import type { CorrectionType, LedgerPromise, PromisePriority, PromiseStatus, PromiseType, StateCorrectionCreate, TimelineItem } from '@/types/ledger'
 
+/** 伏笔账的类型（下拉选项、标签都从这张表来）；信息差 = 读者已经知道、重要人物还不知道的关键事实 */
 export const PROMISE_TYPE_LABELS: Record<PromiseType, string> = {
-  foreshadow: '伏笔', promise: '承诺', mystery: '悬念', conflict: '冲突',
+  foreshadow: '伏笔', promise: '承诺', mystery: '悬念', conflict: '冲突', secret: '信息差',
 }
 export const PRIORITY_LABELS: Record<PromisePriority, string> = { critical: '紧急', high: '高', medium: '中', low: '低' }
 export const PRIORITY_TONE: Record<PromisePriority, PillTone> = { critical: 'red', high: 'orange', medium: 'default', low: 'default' }

@@ -44,7 +44,9 @@ ACTION_SYNONYMS = {
     "埋下": "plant", "新埋": "plant", "埋设": "plant", "open": "plant", "推进": "advance", "提起": "advance",
     "progressing": "advance", "回收": "resolve", "解决": "resolve", "resolved": "resolve",
 }
-PROMISE_TYPES = frozenset({"foreshadow", "promise", "mystery", "conflict"})
+# secret = 信息差：读者已经知道、重要人物还不知道的关键事实（埋下 / 推进 / 揭开走同一套伏笔流程）
+PROMISE_TYPES = frozenset({"foreshadow", "promise", "mystery", "conflict", "secret"})
+PROMISE_TYPE_SYNONYMS = {"伏笔": "foreshadow", "承诺": "promise", "悬念": "mystery", "冲突": "conflict", "信息差": "secret"}
 PRIORITIES = frozenset({"low", "medium", "high", "critical"})
 REASON_TYPES = frozenset({
     "rescue", "betrayal", "alliance", "misunderstanding", "confession", "rivalry", "respect", "hostility", "other",
@@ -225,7 +227,7 @@ def _promise(item: Any) -> Optional[dict]:
         return None
     return {
         "action": action, "ref": ref,
-        "type": _enum(item.get("type") or item.get("promise_type"), PROMISE_TYPES, "foreshadow"),
+        "type": _enum(item.get("type") or item.get("promise_type"), PROMISE_TYPES, "foreshadow", PROMISE_TYPE_SYNONYMS),
         "title": title, "content": content,
         "owner": _text(item.get("owner"), 30), "target": _text(item.get("target"), 30),
         "priority": _enum(item.get("priority"), PRIORITIES, "medium"),

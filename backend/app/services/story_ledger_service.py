@@ -34,7 +34,7 @@ class LedgerError(ValueError):
 PROMISE_STATUS_LABELS = {
     "open": "未回收", "progressing": "推进中", "resolved": "已回收", "broken": "已破裂", "abandoned": "已放弃",
 }
-PROMISE_TYPES = ("foreshadow", "promise", "mystery", "conflict")
+PROMISE_TYPES = ("foreshadow", "promise", "mystery", "conflict", "secret")
 PRIORITIES = ("low", "medium", "high", "critical")
 ACTIVE_STATUSES = ("open", "progressing", "broken")
 EDITABLE_FIELDS = ("title", "content", "promise_type", "priority", "deadline_chapter")
@@ -182,7 +182,7 @@ async def update_promise(db: AsyncSession, project_id: str, promise_id: str, cha
         touched.add("content")
     if changes.get("promise_type") is not None:
         if changes["promise_type"] not in PROMISE_TYPES:
-            raise LedgerError("类型只能是 伏笔 / 承诺 / 悬念 / 冲突")
+            raise LedgerError("类型只能是 伏笔 / 承诺 / 悬念 / 冲突 / 信息差")
         promise.promise_type = changes["promise_type"]
         touched.add("promise_type")
     if changes.get("priority") is not None:

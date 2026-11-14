@@ -1,9 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import type { StateCorrectionCreate, TimelineItem } from '@/types/ledger'
-import { correctionOption, describeSignal, formatChars, groupTimeline, lifeLabel, lockedSummary, validateCorrection } from './ledger'
+import { correctionOption, describeSignal, formatChars, groupTimeline, lifeLabel, lockedSummary, PROMISE_TYPE_LABELS, validateCorrection } from './ledger'
 
 const form = (over: Partial<StateCorrectionCreate>): StateCorrectionCreate => ({
   character_name: '林长老', chapter_number: 2, signal_type: 'life_state', signal_value: 'survived', ...over,
+})
+
+describe('伏笔类型', () => {
+  it('信息差是伏笔账的一种类型：下拉选项和标签都从这张表来', () => {
+    expect(PROMISE_TYPE_LABELS.secret).toBe('信息差')
+    expect(Object.keys(PROMISE_TYPE_LABELS)).toEqual(['foreshadow', 'promise', 'mystery', 'conflict', 'secret'])
+  })
 })
 
 describe('作者修正表单校验', () => {
