@@ -9,7 +9,7 @@ export interface LedgerOverview {
 }
 
 export type PromiseStatus = 'open' | 'progressing' | 'resolved' | 'broken' | 'abandoned';
-export type PromiseType = 'foreshadow' | 'promise' | 'mystery' | 'conflict' | 'secret';
+export type PromiseType = 'foreshadow' | 'promise' | 'mystery' | 'conflict' | 'info_gap';
 export type PromisePriority = 'low' | 'medium' | 'high' | 'critical';
 
 export interface LedgerPromise {

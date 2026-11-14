@@ -688,7 +688,7 @@ interface ChapterCausalLinkView {
 
 interface NarrativePromiseView {
   id: string;
-  promise_type: 'foreshadow' | 'promise' | 'mystery' | 'conflict' | 'secret' | string;
+  promise_type: 'foreshadow' | 'promise' | 'mystery' | 'conflict' | 'info_gap' | string;
   title: string;
   content: string;
   priority: 'low' | 'medium' | 'high' | 'critical' | string;

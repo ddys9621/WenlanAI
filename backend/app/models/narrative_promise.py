@@ -16,7 +16,7 @@ class NarrativePromise(Base):
     source_chapter_id = Column(String(36), ForeignKey("chapters.id", ondelete="CASCADE"), nullable=False, index=True)
     source_chapter_number = Column(Integer, nullable=False, index=True)
 
-    promise_type = Column(String(20), nullable=False, index=True)  # foreshadow/promise/mystery/conflict/secret（信息差）
+    promise_type = Column(String(20), nullable=False, index=True)  # foreshadow/promise/mystery/conflict/info_gap（信息差）
     title = Column(String(200), nullable=False)
     content = Column(Text, nullable=False)
 

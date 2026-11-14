@@ -34,7 +34,7 @@ class LedgerError(ValueError):
 PROMISE_STATUS_LABELS = {
     "open": "未回收", "progressing": "推进中", "resolved": "已回收", "broken": "已破裂", "abandoned": "已放弃",
 }
-PROMISE_TYPES = ("foreshadow", "promise", "mystery", "conflict", "secret")
+PROMISE_TYPES = ("foreshadow", "promise", "mystery", "conflict", "info_gap")
 PRIORITIES = ("low", "medium", "high", "critical")
 ACTIVE_STATUSES = ("open", "progressing", "broken")
 EDITABLE_FIELDS = ("title", "content", "promise_type", "priority", "deadline_chapter")

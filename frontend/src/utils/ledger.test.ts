@@ -8,8 +8,8 @@ const form = (over: Partial<StateCorrectionCreate>): StateCorrectionCreate => ({
 
 describe('伏笔类型', () => {
   it('信息差是伏笔账的一种类型：下拉选项和标签都从这张表来', () => {
-    expect(PROMISE_TYPE_LABELS.secret).toBe('信息差')
-    expect(Object.keys(PROMISE_TYPE_LABELS)).toEqual(['foreshadow', 'promise', 'mystery', 'conflict', 'secret'])
+    expect(PROMISE_TYPE_LABELS.info_gap).toBe('信息差')
+    expect(Object.keys(PROMISE_TYPE_LABELS)).toEqual(['foreshadow', 'promise', 'mystery', 'conflict', 'info_gap'])
   })
 })
 

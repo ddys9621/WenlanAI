@@ -3,7 +3,7 @@ from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-PromiseType = Literal["foreshadow", "promise", "mystery", "conflict", "secret"]  # secret = 信息差
+PromiseType = Literal["foreshadow", "promise", "mystery", "conflict", "info_gap"]  # info_gap = 信息差
 
 
 class PromiseCreate(BaseModel):

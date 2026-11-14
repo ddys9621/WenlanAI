@@ -44,9 +44,10 @@ ACTION_SYNONYMS = {
     "埋下": "plant", "新埋": "plant", "埋设": "plant", "open": "plant", "推进": "advance", "提起": "advance",
     "progressing": "advance", "回收": "resolve", "解决": "resolve", "resolved": "resolve",
 }
-# secret = 信息差：读者已经知道、重要人物还不知道的关键事实（埋下 / 推进 / 揭开走同一套伏笔流程）
-PROMISE_TYPES = frozenset({"foreshadow", "promise", "mystery", "conflict", "secret"})
-PROMISE_TYPE_SYNONYMS = {"伏笔": "foreshadow", "承诺": "promise", "悬念": "mystery", "冲突": "conflict", "信息差": "secret"}
+# info_gap = 信息差：读者已经知道、重要人物还不知道的关键事实（埋下 / 推进 / 揭开走同一套伏笔流程）。
+# 不叫 secret：knowledge 条目的可见性字段就叫 secret（public / private / secret），同一份分析结果里会撞名
+PROMISE_TYPES = frozenset({"foreshadow", "promise", "mystery", "conflict", "info_gap"})
+PROMISE_TYPE_SYNONYMS = {"伏笔": "foreshadow", "承诺": "promise", "悬念": "mystery", "冲突": "conflict", "信息差": "info_gap"}
 PRIORITIES = frozenset({"low", "medium", "high", "critical"})
 REASON_TYPES = frozenset({
     "rescue", "betrayal", "alliance", "misunderstanding", "confession", "rivalry", "respect", "hostility", "other",
