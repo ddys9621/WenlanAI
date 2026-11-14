@@ -9,7 +9,7 @@ from app.api.deps import load_owned, verify_owned_ids, verify_request_project
 from app.database import get_db
 from app.logger import get_logger
 from app.services import outline_review_service as review
-from app.services.narrative_tasks import parse_narrative_tasks, with_reader_line
+from app.services.narrative_tasks import parse_narrative_tasks, parse_reader_line, with_reader_line
 
 logger = get_logger(__name__)
 from app.models import ChapterOutline
@@ -81,10 +81,13 @@ def _dump_lists(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _columns(data: dict[str, Any], current_tasks: Any = None) -> dict[str, Any]:
-    """请求体 → 章纲列：列表转 JSON 文本；带了读者线就并进叙事任务 JSON（同一份里的伏笔任务原样保留）。"""
+    """请求体 → 章纲列：列表转 JSON 文本；读者线改了才并进叙事任务 JSON（同一份里的伏笔任务原样保留）。
+
+    谋篇页每次保存都带着读者线三栏：没改就不动这一列，章纲指纹不变（不会凭空显示「章纲已改」）。
+    """
     data = _dump_lists(data)
     reader = data.pop("reader", None)
-    if reader is not None:
+    if reader is not None and parse_reader_line(reader) != (parse_narrative_tasks(current_tasks).get("reader") or {}):
         data["narrative_tasks"] = with_reader_line(current_tasks, reader)
     return data
 

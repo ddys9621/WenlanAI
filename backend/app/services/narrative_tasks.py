@@ -9,8 +9,8 @@
 
 同一份 JSON 里还有「读者线」（reader：三句短话，写法见 reader_lens）：
 - waiting：读者带着什么期待读这一章；payoff：本章给读者的兑现；gap：信息差（谁被蒙在鼓里，保持还是揭开）
-没有读者线的章纲不带 reader 键（解析结果与以前一致）。写作口吻三行都进本章任务；审校口吻不带 waiting（它是背景，
-不是要核对的任务）；分析口吻不带读者线。
+没有读者线的章纲不带 reader 键（解析结果与以前一致）。写作口吻三行都进本章任务（括号里是写法）；审校口吻不带 waiting
+（它是背景，不是要核对的任务），另两行括号里换成判定口径；分析口吻不带读者线。
 """
 from __future__ import annotations
 
@@ -24,6 +24,9 @@ READER_LIMIT = 160
 # 「本章兑现」可能是一次真兑现，也可能只是蓄势章把期待推近一步：前半句两种都适用，后半句只管真兑现（不逼着硬凑围观的人）
 PAYOFF_HINT = "（落到具体的事上，不一句带过；是兑现就写出在场者的反应和主角实际拿到的东西）"
 GAP_HINT = "（没揭开之前，不知情的人照着错的认知说话做事；本章揭开的话，看错的人要在场、有反应）"
+# 审校口吻带的是判定口径，不是写法。信息差多半是「本章保持」：正文没写到那层不算没完成，否则批量写作会白白重写一次
+PAYOFF_REVIEW_HINT = "（判定：正文里这件事确实发生了、不是一句话带过才算完成）"
+GAP_REVIEW_HINT = "（判定：不知情的人在正文里提前知道了，或写明本章揭开却没揭开，才算没完成；正文没写到这层信息差算完成）"
 
 
 def _empty() -> dict[str, Any]:
@@ -120,9 +123,9 @@ def _reader_lines(reader: dict[str, str], *, for_review: bool) -> list[str]:
     if reader.get("waiting") and not for_review:
         lines.append(f"{READER_LABELS['waiting']}：{reader['waiting']}")
     if reader.get("payoff"):
-        lines.append(f"- {READER_LABELS['payoff']}：{reader['payoff']}{PAYOFF_HINT}")
+        lines.append(f"- {READER_LABELS['payoff']}：{reader['payoff']}{PAYOFF_REVIEW_HINT if for_review else PAYOFF_HINT}")
     if reader.get("gap"):
-        lines.append(f"- {READER_LABELS['gap']}：{reader['gap']}{GAP_HINT}")
+        lines.append(f"- {READER_LABELS['gap']}：{reader['gap']}{GAP_REVIEW_HINT if for_review else GAP_HINT}")
     return lines
 
 

@@ -598,7 +598,8 @@ async def write_field(db: AsyncSession, project_id: str, field_id: str, target_i
         await propagate_character_rename(db, project_id, obj.name, normalized)
         obj.aliases = record_former_name(obj.aliases, obj.name, normalized)
     if spec.task_key:
-        obj.narrative_tasks = with_reader_line(obj.narrative_tasks, {**_reader_line(obj), spec.task_key: normalized})
+        if changed:  # 没改就不重写这份 JSON（章纲指纹跟着它变）
+            obj.narrative_tasks = with_reader_line(obj.narrative_tasks, {**_reader_line(obj), spec.task_key: normalized})
     elif spec.json_key:
         obj.content = _with_outline_key(obj.content, spec.json_key, normalized)
     elif spec.detail:
